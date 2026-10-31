@@ -4,7 +4,7 @@ name: binaries
 # GitHub release of a tag:
 #   dentalcraft_<ver>_linux_x86_64.tar.gz    (golgari-dev)
 #   dentalcraft_<ver>_windows_x86_64.zip     (golgari-dev, cross-compiled with mingw-w64)
-#   dentalcraft_<ver>_macos_universal.zip    (GitHub-hosted macos-latest, billed minutes)
+#   (macOS universal .zip: DISABLED for now, see the build-macos job)
 #   SHA256SUMS
 # Called by release-please.yml when a release is created; run it by hand
 # (Actions > binaries > Run workflow, or `gh workflow run binaries.yml -f tag=vX.Y.Z`)
@@ -162,8 +162,14 @@ jobs:
           retention-days: 7
 
   # Billed GitHub-hosted runner: only macOS builds here.
+  # DISABLED until GitHub-hosted runner billing is resolved. To re-enable:
+  #   1. remove the `if: false` line below;
+  #   2. add build-macos to `needs` of the release job;
+  #   3. in the release job, expect 3 archives in "Checksums" and restore the macOS
+  #      line in "Release notes" (kept there as a comment).
   build-macos:
     name: build macos_universal
+    if: false
     runs-on: macos-latest
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -256,10 +262,8 @@ jobs:
   # blocked); the runner image may lack the gh CLI, so a pinned one is fetched if needed.
   release:
     name: attach to release
-    needs: [build, build-macos]
-    # The billed macOS job can be blocked (spending limit, failed payment): still attach
-    # the Linux and Windows archives. Re-run the workflow later to add the macOS one.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # build-macos is intentionally not listed: it is disabled (see its comment).
+    needs: [build]
     runs-on: golgari-dev
     permissions:
       contents: write
@@ -293,8 +297,7 @@ jobs:
         working-directory: dist
         run: |
           ls -l
-          [ "$(ls | wc -l)" -ge 2 ] || { echo "expected at least 2 archives" >&2; exit 1; }
-          [ "$(ls | wc -l)" -eq 3 ] || echo "::warning::macOS archive missing (build-macos: ${{ needs.build-macos.result }}); re-run the workflow to add it"
+          [ "$(ls | wc -l)" -eq 2 ] || { echo "expected 2 archives (Linux, Windows)" >&2; exit 1; }
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - name: Upload to the release
@@ -311,9 +314,10 @@ jobs:
               echo "$marker"
               echo "## Binaries"
               echo
-              echo "- Linux x86_64: \`.tar.gz\`; Windows x86_64: \`.zip\` (\`dentalcraft.exe\`); macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`."
+              # When macOS is re-enabled, append to the line below: "; macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`"
+              echo "- Linux x86_64: \`.tar.gz\`; Windows x86_64: \`.zip\` (\`dentalcraft.exe\`)."
               echo "- Verify the downloads against \`SHA256SUMS\`."
-              echo "- **The binaries are not code-signed or notarized.** macOS: the app is only ad-hoc signed, so Gatekeeper blocks the first launch (right-click > Open, or \`xattr -dr com.apple.quarantine DentalCraft.app\`). Windows: SmartScreen may warn."
+              echo "- **The binaries are not code-signed.** Windows: SmartScreen may warn."
             } >> notes.md
             gh release edit "$TAG" --notes-file notes.md
           fi
