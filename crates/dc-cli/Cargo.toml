@@ -1,0 +1,20 @@
+[package]
+name = "dc-cli"
+description = "dentalcraft-cli: command line and MCP server to drive DentalCraft headless or through a running app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dentalcraft-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

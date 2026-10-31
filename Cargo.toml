@@ -23,6 +23,9 @@ dc-project = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.gi
 dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
 dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
 dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-session = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }  # not in v0.2.1 yet: resolved through the superproject [patch]
+dc-mcp = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }
@@ -69,6 +72,9 @@ tracing-appender = "0.2.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 zip = { version = "9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# dc-cli (dentalcraft-cli: headless engine, MCP server, bridge to the app)
+clap = { version = "4.6.7", features = ["derive"] }
 
 [workspace.lints.rust]
 missing_docs = "warn"
