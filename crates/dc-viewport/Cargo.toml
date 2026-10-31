@@ -1,0 +1,25 @@
+[package]
+name = "dc-viewport"
+description = "3D viewport: wgpu mesh rendering inside egui, orbit camera, standard dental views, CPU picking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+dc-mesh.workspace = true
+dc-scene.workspace = true
+dc-case.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+eframe = { workspace = true, features = ["wgpu", "wayland", "x11", "default_fonts"] }
+
+[lints]
+workspace = true

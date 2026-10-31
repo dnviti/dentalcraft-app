@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/dnviti-personal-org/dentalcraft-app"
+authors = ["Daniele Viti"]
+publish = false
+
+[workspace.dependencies]
+# dentalcraft-core crates
+dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-project = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.2.1" }
+
+# app crates
+dc-viewport = { path = "crates/dc-viewport" }
+
+# GUI: egui, eframe and egui-wgpu must always share the same version (same as core)
+egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
+eframe = { version = "=0.37.0", default-features = false }
+egui-wgpu = { version = "=0.37.0", default-features = false }
+
+# math and GPU data
+glam = { version = "0.34.1", features = ["serde"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+# dc-auth-client
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] } # rustls + ring, bundled webpki roots (no aws-lc, no OpenSSL)
+keyring = "4.2.0" # Secret Service via zbus (pure Rust, crypto-rust), Keychain, Credential Manager
+webbrowser = "1.2.6"
+ed25519-dalek = { version = "3.0.0", default-features = false }
+sha2 = "0.11.1"
+base64 = "0.23.1"
+getrandom = "0.4.3"
+url = "2.5.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# dc-workspace (WP8 workspace screen)
+dc-workspace = { path = "crates/dc-workspace" }
+uuid = { version = "1.29.0", features = ["v4"] }
+tempfile = "3.27.0"
+
+# dc-ui / dc-app (WP8 app shell)
+dc-ui = { path = "crates/dc-ui" }
+dc-auth-client = { path = "crates/dc-auth-client" }
+# dentalcraft-aligners crates
+dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.1.0" }
+dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.1.0" }
+dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.1.0" }
+egui_kittest = { version = "=0.37.0", default-features = false }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
+directories = "6.0.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "env-filter", "ansi"] }
+tracing-appender = "0.2.5"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+zip = { version = "9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
