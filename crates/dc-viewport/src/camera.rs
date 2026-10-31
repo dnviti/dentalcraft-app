@@ -1,9 +1,10 @@
 //! Orbit camera, projections and the standard dental views.
 //!
-//! World frame (same convention as the old plugin's `worldframe.py`): the
-//! occlusal plane is the XY plane, the midline runs along Y with the incisors
-//! towards −Y, the patient's right is −X and the lower arch has its teeth up
-//! (+Z). Units are millimetres.
+//! World frame (same convention as the old plugin's `worldframe.py` and
+//! [`dc_case::WorldFrame`]): the occlusal plane is the XY plane, the midline
+//! runs along Y with the incisors towards −Y, the patient's right is −X, the
+//! lower arch has its teeth up (+Z) and lies below the upper arch, whose
+//! teeth point down. Units are millimetres.
 //!
 //! The camera looks along its local −Z axis with local +Y up (right-handed,
 //! like glam's `camera::rh` helpers); depth is mapped to `[0, 1]` with
@@ -426,7 +427,7 @@ mod tests {
         assert!(close(c.up(), Vec3::Z));
         // patient's right (−X) on the left of the screen
         assert!(c.project_ndc(Vec3::new(-10.0, 0.0, 0.0), 1.0, None).x < 0.0);
-        // lower teeth (+Z) at the top of the screen
+        // the upper arch (+Z, above the lower one) at the top of the screen
         assert!(c.project_ndc(Vec3::new(0.0, 0.0, 10.0), 1.0, None).y > 0.0);
     }
 
@@ -464,6 +465,52 @@ mod tests {
             let r = v.rotation();
             assert!((r.length() - 1.0).abs() < EPS, "{v:?}");
         }
+    }
+
+    #[test]
+    fn presets_follow_the_case_world_frame() {
+        use dc_case::WorldFrame;
+        let anterior = WorldFrame::ANTERIOR.as_vec3();
+        let to_lower = WorldFrame::TOWARDS_LOWER.as_vec3();
+        let lower_teeth = WorldFrame::OCCLUSAL_NORMAL.as_vec3();
+        let upper_teeth = -lower_teeth;
+        // a lower crown tip below an upper crown tip, both near the incisors
+        let lower_tip = Vec3::new(0.0, -20.0, -1.0);
+        let upper_tip = Vec3::new(0.0, -21.0, 1.0);
+        let f = view_cam(StdView::Front);
+        assert!(
+            close(f.forward(), -anterior),
+            "front looks from the incisors"
+        );
+        assert!(
+            close(f.up(), -to_lower),
+            "the upper arch is up on the screen"
+        );
+        assert!(
+            f.project_ndc(upper_tip, 1.0, None).y > f.project_ndc(lower_tip, 1.0, None).y,
+            "upper arch above the lower arch in the front view"
+        );
+        // occlusal views look at the occlusal surface of one arch
+        let lo = view_cam(StdView::OcclusalLower);
+        assert!(close(lo.forward(), to_lower));
+        assert!(
+            lo.forward().dot(lower_teeth) < 0.0,
+            "lower teeth face the camera"
+        );
+        let up = view_cam(StdView::OcclusalUpper);
+        assert!(close(up.forward(), -to_lower));
+        assert!(
+            up.forward().dot(upper_teeth) < 0.0,
+            "upper teeth face the camera"
+        );
+        for v in [StdView::OcclusalLower, StdView::OcclusalUpper] {
+            let c = view_cam(v);
+            // incisors at the top of the screen
+            assert!(close(c.up(), anterior), "{v:?}");
+        }
+        // side views: the patient's right (−X) side faces the right view
+        assert!(view_cam(StdView::Right).forward().x > 0.9);
+        assert!(view_cam(StdView::Left).forward().x < -0.9);
     }
 
     #[test]
