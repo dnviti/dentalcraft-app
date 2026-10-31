@@ -20,17 +20,22 @@ path = "src/lib.rs"
 [dependencies]
 # core crates
 dc-case.workspace = true
+dc-command.workspace = true
 dc-i18n.workspace = true
 dc-mesh.workspace = true
 dc-module-api.workspace = true
 dc-project.workspace = true
+dc-raster.workspace = true
+dc-session.workspace = true
 # aligners module
+dca-model.workspace = true
 dca-module.workspace = true
 # app crates
 dc-auth-client.workspace = true
 dc-ui.workspace = true
 dc-workspace.workspace = true
 
+base64.workspace = true
 chrono.workspace = true
 directories.workspace = true
 eframe = { workspace = true, features = ["wgpu", "wayland", "x11", "default_fonts", "accesskit", "clipboard", "links"] }

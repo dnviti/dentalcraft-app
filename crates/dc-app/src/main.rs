@@ -1,4 +1,8 @@
 //! `dentalcraft`: the DentalCraft desktop application.
+//!
+//! `dentalcraft --control <port>` also listens on `127.0.0.1:<port>` for
+//! the bridge protocol of `dentalcraft-cli mcp --connect <port>` (see
+//! `dc_app::control`).
 
 // Release builds on Windows are GUI-subsystem (no console window); logs go to the log file.
 #![cfg_attr(
@@ -7,9 +11,42 @@
 )]
 
 use dc_app::config::{Dirs, Store};
+use dc_app::control::{ControlServer, ControlledApp};
 use dc_app::{AppDeps, DentalCraftApp};
 
+/// The port of `--control <port>` / `--control=<port>`, if given.
+fn control_port() -> Result<Option<u16>, String> {
+    let mut args = std::env::args().skip(1);
+    let mut port = None;
+    while let Some(a) = args.next() {
+        let value = if a == "--control" {
+            args.next()
+                .ok_or("--control needs a port (0 picks a free one)")?
+        } else if let Some(v) = a.strip_prefix("--control=") {
+            v.to_owned()
+        } else {
+            continue;
+        };
+        port = Some(
+            value
+                .parse::<u16>()
+                .map_err(|_| format!("--control: invalid port {value:?}"))?,
+        );
+    }
+    Ok(port)
+}
+
 fn main() -> eframe::Result {
+    let control = match control_port().and_then(|p| {
+        p.map(|port| ControlServer::bind(port).map_err(|e| format!("--control {port}: {e}")))
+            .transpose()
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
     let dirs = Dirs::standard();
     let _log_guard = dc_app::logging::init(&dirs.logs());
     dc_app::logging::install_panic_hook(dirs.logs());
@@ -25,6 +62,11 @@ fn main() -> eframe::Result {
         }
     };
     tracing::info!("sign-in server: {issuer}");
+    if let Some(c) = &control {
+        // scripts read the port from this line
+        println!("control: listening on {}", c.local_addr());
+        tracing::info!("control bridge listening on {}", c.local_addr());
+    }
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -49,12 +91,16 @@ fn main() -> eframe::Result {
                     info.driver
                 );
             }
-            Ok(Box::new(DentalCraftApp::new(AppDeps {
+            let app = DentalCraftApp::new(AppDeps {
                 store,
                 auth,
                 render_state,
                 native_dialogs: true,
-            })))
+            });
+            Ok(match control {
+                Some(server) => Box::new(ControlledApp::new(app, server)),
+                None => Box::new(app),
+            })
         }),
     )
 }

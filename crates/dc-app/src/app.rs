@@ -201,6 +201,29 @@ impl DentalCraftApp {
         &self.registry
     }
 
+    /// The open workspace, if any.
+    pub fn workspace(&self) -> Option<&Workspace> {
+        self.workspace.as_ref()
+    }
+
+    /// The open workspace, mutable (the app bridge drives it).
+    pub fn workspace_mut(&mut self) -> Option<&mut Workspace> {
+        self.workspace.as_mut()
+    }
+
+    /// Opens a workspace of `module_id` on a new empty, unsaved case
+    /// (replacing the open one without asking); `false` when the module is
+    /// not installed.
+    pub fn new_workspace(&mut self, module_id: &str) -> bool {
+        self.enter_workspace(module_id, None, None, false);
+        self.workspace.is_some() && self.screen == Screen::Workspace
+    }
+
+    /// `true` while [`DentalCraftApp::open_project`] is loading a file.
+    pub fn is_opening(&self) -> bool {
+        self.open_job.is_some()
+    }
+
     /// Draws one frame into the root `ui`.
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
