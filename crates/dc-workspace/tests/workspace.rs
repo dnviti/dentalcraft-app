@@ -48,6 +48,11 @@ fn module() -> Box<dyn Module> {
     Box::new(AlignersModule::new())
 }
 
+/// Number of leaves of the module's menu (the total of the workflow footer).
+fn leaf_count() -> usize {
+    module().menu().command_ids().len()
+}
+
 /// The aligners module that records the ids passed to [`Module::select`].
 struct Spy {
     inner: AlignersModule,
@@ -155,7 +160,8 @@ fn renders_without_project() {
     assert!(h.query_by_label("No scans yet").is_some());
     // menu entry (Case group open by default) and empty-state button
     assert_eq!(h.get_all_by_label("Import scans").count(), 2);
-    assert!(h.query_by_label("Treatment workflow 0/48").is_some());
+    let label = format!("Treatment workflow 0/{}", leaf_count());
+    assert!(h.query_by_label(&label).is_some());
     assert!(h.query_by_label_contains("No stages yet").is_some());
     assert!(!h.state().ws.is_dirty());
 }
@@ -173,7 +179,8 @@ fn renders_with_synthetic_project() {
             .is_some()
     );
     // import counts as done once the case has scans
-    assert!(h.query_by_label("Treatment workflow 1/48").is_some());
+    let label = format!("Treatment workflow 1/{}", leaf_count());
+    assert!(h.query_by_label(&label).is_some());
     // scrub to the last stage with End
     h.key_press(Key::End);
     h.run();
