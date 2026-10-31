@@ -1,0 +1,25 @@
+[package]
+name = "dc-auth-client"
+description = "Desktop sign-in for DentalCraft: OIDC authorization code + PKCE over a loopback redirect, refresh-token keyring storage, JWKS-verified id_tokens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ureq.workspace = true
+keyring.workspace = true
+webbrowser.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
