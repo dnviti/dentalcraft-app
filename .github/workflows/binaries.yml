@@ -252,14 +252,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Only uploads: a hosted Linux runner is used because it ships the gh CLI.
+  # Only uploads. Runs on the self-hosted runner (hosted minutes are billed and can be
+  # blocked); the runner image may lack the gh CLI, so a pinned one is fetched if needed.
   release:
     name: attach to release
     needs: [build, build-macos]
     # The billed macOS job can be blocked (spending limit, failed payment): still attach
     # the Linux and Windows archives. Re-run the workflow later to add the macOS one.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: golgari-dev
     permissions:
       contents: write
     env:
@@ -267,6 +268,22 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
     steps:
+      - name: Ensure the gh CLI
+        run: |
+          command -v gh >/dev/null && exit 0
+          case "$(uname -m)" in
+            x86_64) arch=amd64; sum=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d ;;
+            aarch64|arm64) arch=arm64; sum=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63 ;;
+            *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+          esac
+          ver=2.103.3
+          curl -fsSL -o gh.tar.gz "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz"
+          echo "$sum  gh.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" gh-dist
+          tar -xzf gh.tar.gz -C gh-dist --strip-components=1
+          cp gh-dist/bin/gh "$HOME/.local/bin/gh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          rm -rf gh.tar.gz gh-dist
       - uses: actions/download-artifact@v8
         with:
           pattern: binaries-*
