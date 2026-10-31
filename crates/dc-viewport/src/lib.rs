@@ -30,6 +30,7 @@
 
 pub mod bvh;
 pub mod camera;
+pub mod coloring;
 mod gizmo;
 pub mod pick;
 mod render;
@@ -46,6 +47,7 @@ use glam::{Mat4, Vec2, Vec3};
 
 pub use bvh::Bvh;
 pub use camera::{Camera, Projection, Ray, Sphere, StdView};
+pub use coloring::{label_coloring, label_colors, resolve_colors};
 pub use pick::{Pick, PickTarget};
 
 use render::{CameraUniform, ColorData, DrawItem, FrameCallback, Gpu, GpuMesh, Targets};
