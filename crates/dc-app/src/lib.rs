@@ -17,6 +17,7 @@ macro_rules! t {
 
 mod app;
 pub mod config;
+pub mod control;
 pub mod create_job;
 pub mod diagnostics;
 pub mod dialogs;
