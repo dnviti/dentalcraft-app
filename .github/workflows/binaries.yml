@@ -1,0 +1,295 @@
+name: binaries
+
+# Builds the release binaries of the application and attaches them to the
+# GitHub release of a tag:
+#   dentalcraft_<ver>_linux_x86_64.tar.gz    (golgari-dev)
+#   dentalcraft_<ver>_windows_x86_64.zip     (golgari-dev, cross-compiled with mingw-w64)
+#   dentalcraft_<ver>_macos_universal.zip    (GitHub-hosted macos-latest, billed minutes)
+#   SHA256SUMS
+# Called by release-please.yml when a release is created; run it by hand
+# (Actions > binaries > Run workflow, or `gh workflow run binaries.yml -f tag=vX.Y.Z`)
+# to backfill a tag. The sources are always those of the tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build and attach to (vX.Y.Z)
+        required: true
+        type: string
+    secrets:
+      DEPLOY_KEY_CORE:
+        required: true
+      DEPLOY_KEY_ALIGNERS:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and attach to (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binaries-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Same pin as ci.yml
+  RUST_TOOLCHAIN: 1.99.1
+
+jobs:
+  # Linux and Windows are built on the self-hosted runner. The runner image has
+  # no C toolchain: the job installs it (and mingw-w64 for the Windows target).
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: golgari-dev
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux_x86_64
+            target: x86_64-unknown-linux-gnu
+          - name: windows_x86_64
+            target: x86_64-pc-windows-gnu
+    steps:
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must look like vX.Y.Z, got '$TAG'" >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - name: Install C toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+          need_cc=0; need_mingw=0
+          command -v cc >/dev/null || need_cc=1
+          if [ "$TARGET" = x86_64-pc-windows-gnu ]; then
+            command -v x86_64-w64-mingw32-gcc >/dev/null && command -v zip >/dev/null || need_mingw=1
+          fi
+          [ "$need_cc" = 0 ] && [ "$need_mingw" = 0 ] && exit 0
+          if command -v apt-get >/dev/null; then
+            pkgs=""
+            [ "$need_cc" = 1 ] && pkgs="$pkgs build-essential pkg-config"
+            [ "$need_mingw" = 1 ] && pkgs="$pkgs gcc-mingw-w64-x86-64 zip"
+            $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $pkgs
+          elif command -v dnf >/dev/null; then
+            pkgs=""
+            [ "$need_cc" = 1 ] && pkgs="$pkgs gcc make pkgconf-pkg-config"
+            [ "$need_mingw" = 1 ] && pkgs="$pkgs mingw64-gcc zip"
+            $SUDO dnf install -y $pkgs
+          elif command -v apk >/dev/null; then
+            pkgs=""
+            [ "$need_cc" = 1 ] && pkgs="$pkgs build-base pkgconf"
+            [ "$need_mingw" = 1 ] && pkgs="$pkgs mingw-w64-gcc zip"
+            $SUDO apk add --no-cache $pkgs
+          else
+            echo "no supported package manager to install the toolchain" >&2; exit 1
+          fi
+      - name: Load deploy keys for private dependencies
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DEPLOY_KEY_CORE }}
+            ${{ secrets.DEPLOY_KEY_ALIGNERS }}
+      - name: Use SSH for private dentalcraft repositories
+        run: |
+          git config --global url."git@github.com:dnviti-personal-org/".insteadOf "https://github.com/dnviti-personal-org/"
+          # The runner image ships no known_hosts: pin GitHub's published ed25519 host key.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          # GUI subsystem for the Windows build (no console window), also for tags
+          # that predate the windows_subsystem attribute in main.rs.
+          RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-gnu' && '-C link-arg=-Wl,--subsystem,windows' || '' }}
+        run: cargo build -p dc-app --release --locked --target "$TARGET"
+      - name: Package
+        env:
+          TAG: ${{ inputs.tag }}
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.name }}
+        run: |
+          VERSION="${TAG#v}"
+          STAGE="dentalcraft_${VERSION}_${NAME}"
+          mkdir -p "$STAGE/LICENSES" dist
+          # Third-party licences shipped with the sources (fonts: SIL OFL; icons: MIT).
+          find crates -path '*/assets/fonts/*' -type f \( -name 'OFL*' -o -name 'LICENSE*' \) | while read -r f; do
+            d="$STAGE/LICENSES/$(basename "$(dirname "$f")")"
+            mkdir -p "$d" && cp "$f" "$d/"
+          done
+          cp README.md "$STAGE/"
+          case "$TARGET" in
+            x86_64-pc-windows-gnu)
+              cp "target/$TARGET/release/dentalcraft.exe" "$STAGE/"
+              zip -qr "dist/$STAGE.zip" "$STAGE"
+              ;;
+            *)
+              cp "target/$TARGET/release/dentalcraft" "$STAGE/"
+              tar -czf "dist/$STAGE.tar.gz" "$STAGE"
+              ;;
+          esac
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Billed GitHub-hosted runner: only macOS builds here.
+  build-macos:
+    name: build macos_universal
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must look like vX.Y.Z, got '$TAG'" >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - name: Load deploy keys for private dependencies
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DEPLOY_KEY_CORE }}
+            ${{ secrets.DEPLOY_KEY_ALIGNERS }}
+      - name: Use SSH for private dentalcraft repositories
+        run: |
+          git config --global url."git@github.com:dnviti-personal-org/".insteadOf "https://github.com/dnviti-personal-org/"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+      - name: Build aarch64
+        run: cargo build -p dc-app --release --locked --target aarch64-apple-darwin
+      - name: Build x86_64
+        run: cargo build -p dc-app --release --locked --target x86_64-apple-darwin
+      - name: Bundle DentalCraft.app (universal, not notarized)
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          APP="DentalCraft.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/LICENSES" dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/dentalcraft \
+            target/x86_64-apple-darwin/release/dentalcraft \
+            -output "$APP/Contents/MacOS/dentalcraft"
+          lipo -info "$APP/Contents/MacOS/dentalcraft"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key><string>com.dentalcraft.DentalCraft</string>
+            <key>CFBundleName</key><string>DentalCraft</string>
+            <key>CFBundleDisplayName</key><string>DentalCraft</string>
+            <key>CFBundleExecutable</key><string>dentalcraft</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$APP/Contents/Info.plist"
+          find crates -path '*/assets/fonts/*' -type f \( -name 'OFL*' -o -name 'LICENSE*' \) | while read -r f; do
+            d="$APP/Contents/Resources/LICENSES/$(basename "$(dirname "$f")")"
+            mkdir -p "$d" && cp "$f" "$d/"
+          done
+          # Ad-hoc signature only (no Developer ID, no notarization): Apple Silicon refuses
+          # to run Mach-O code without at least this.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          ditto -c -k --keepParent "$APP" "dist/dentalcraft_${VERSION}_macos_universal.zip"
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-macos_universal
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Only uploads: a hosted Linux runner is used because it ships the gh CLI.
+  release:
+    name: attach to release
+    needs: [build, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -l
+          [ "$(ls | wc -l)" -eq 3 ] || { echo "expected 3 archives" >&2; exit 1; }
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload to the release
+        run: |
+          gh release view "$TAG" >/dev/null   # the release must already exist
+          gh release upload "$TAG" dist/* --clobber
+      - name: Release notes
+        run: |
+          marker='<!-- binaries-note -->'
+          gh release view "$TAG" --json body --jq .body > notes.md
+          if ! grep -qF "$marker" notes.md; then
+            {
+              echo
+              echo "$marker"
+              echo "## Binaries"
+              echo
+              echo "- Linux x86_64: \`.tar.gz\`; Windows x86_64: \`.zip\` (\`dentalcraft.exe\`); macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`."
+              echo "- Verify the downloads against \`SHA256SUMS\`."
+              echo "- **The binaries are not code-signed or notarized.** macOS: the app is only ad-hoc signed, so Gatekeeper blocks the first launch (right-click > Open, or \`xattr -dr com.apple.quarantine DentalCraft.app\`). Windows: SmartScreen may warn."
+            } >> notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi
