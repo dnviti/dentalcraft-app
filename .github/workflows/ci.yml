@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  test:
+    # ARC scale set in golgari's k3s: one ephemeral pod per job, no GPU.
+    # Every step after checkout is skipped until the workspace has a
+    # Cargo.toml, so the first pushes of the empty scaffold are green.
+    runs-on: golgari-dev
+    steps:
+      - uses: actions/checkout@v7
+      - name: Load deploy keys for private dependencies
+        if: hashFiles('Cargo.toml') != ''
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: |
+            ${{ secrets.DEPLOY_KEY_CORE }}
+            ${{ secrets.DEPLOY_KEY_ALIGNERS }}
+      - name: Use SSH for private dentalcraft repositories
+        if: hashFiles('Cargo.toml') != ''
+        run: git config --global url."git@github.com:dnviti-personal-org/".insteadOf "https://github.com/dnviti-personal-org/"
+      - name: Install Rust 1.99.1
+        if: hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - name: Cache cargo
+        if: hashFiles('Cargo.toml') != ''
+        uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo fmt --all --check
+      - name: Clippy
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo test --workspace
