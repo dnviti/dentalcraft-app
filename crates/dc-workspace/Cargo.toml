@@ -19,8 +19,9 @@ dc-mesh.workspace = true
 dc-module-api.workspace = true
 dc-project.workspace = true
 dc-scene.workspace = true
-# aligners data model, for the stage timeline
+# aligners data model (stage timeline) and algorithms (contact map overlay)
 dca-model.workspace = true
+dca-algo.workspace = true
 # app crates
 dc-ui.workspace = true
 dc-viewport.workspace = true

@@ -24,6 +24,7 @@ mod icons;
 pub mod import;
 mod keys;
 mod menu;
+mod overlay;
 mod project;
 pub mod timeline;
 mod ui;

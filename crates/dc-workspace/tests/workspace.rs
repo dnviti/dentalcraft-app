@@ -229,10 +229,23 @@ fn every_leaf_can_be_activated() {
         ws.activate(id);
         assert_eq!(ws.selected(), Some(*id));
     }
-    // all leaves are placeholders except the import, run by the workspace
+    // placeholders say they are not available; a leaf with a registered
+    // command runs it as a job (the next ones find the workspace busy) and
+    // the import is run by the workspace
+    let stubs = leaves
+        .iter()
+        .filter(|id| {
+            !dca_module::commands::is_registered(id) && !dc_workspace::import::is_import_command(id)
+        })
+        .count();
     let keys = ws.toast_keys();
-    assert_eq!(keys.len(), leaves.len() - 1);
-    assert!(keys.iter().all(|k| k == NOT_AVAILABLE_KEY));
+    let not_available = keys.iter().filter(|k| *k == NOT_AVAILABLE_KEY).count();
+    assert_eq!(not_available, stubs, "{keys:?}");
+    assert!(
+        keys.iter()
+            .all(|k| k == NOT_AVAILABLE_KEY || k == "ws-toast-busy"),
+        "{keys:?}"
+    );
     assert_eq!(ws.dialog_requests(), 1);
     assert!(ws.wait_for_jobs(WAIT));
 }
@@ -318,12 +331,14 @@ fn module_shortcuts_run_their_command() {
         h.state().ws.selected(),
         Some("aligners.preparation.segmentation.automatic")
     );
+    // a placeholder says it is not available; a registered command runs and
+    // fails on the empty case
+    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
+    let keys = h.state().ws.toast_keys();
     assert!(
-        h.state()
-            .ws
-            .toast_keys()
-            .iter()
-            .any(|k| k == NOT_AVAILABLE_KEY)
+        keys.iter()
+            .any(|k| k == NOT_AVAILABLE_KEY || k == "ws-toast-command-failed"),
+        "{keys:?}"
     );
 }
 

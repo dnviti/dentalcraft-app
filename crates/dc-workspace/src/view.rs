@@ -17,6 +17,7 @@ use egui::{
 };
 use glam::{Quat, Vec3};
 
+use crate::overlay::{self, ContactColors, Layers};
 use crate::t;
 use crate::timeline::TimelineModel;
 use crate::workspace::Workspace;
@@ -92,7 +93,14 @@ struct SceneKey {
     upper: bool,
     lower: bool,
     display: Display,
+    stage: u32,
+    overlay0: bool,
+    layers: Layers,
+    occlusal: bool,
 }
+
+/// Contact map computed for one case state (by pointer).
+type ContactCache = Option<(usize, Result<Arc<ContactColors>, String>)>;
 
 /// Viewport and view options.
 #[derive(Default)]
@@ -107,6 +115,14 @@ pub(crate) struct ViewState {
     pub refit: bool,
     /// Meshes currently shown.
     pub mesh_count: usize,
+    /// Layers over the scans (labels, seeds, contact map).
+    pub layers: Layers,
+    /// Contact map of the last state it was asked for.
+    contacts: ContactCache,
+    /// Scans of the last scene (a new set is framed).
+    scan_ids: Vec<uuid::Uuid>,
+    /// The meshes of the last scene (also without a viewport).
+    pub meshes: Vec<ViewMesh>,
 }
 
 impl ViewState {
@@ -132,39 +148,113 @@ fn scene_color(c: Color32) -> Color {
     )
 }
 
-/// Meshes to show for `state`: the scans (in the world frame; upper and
-/// lower arch per the toggles, the bite scan with both) and the module's
-/// scene meshes.
-pub(crate) fn scene_meshes(
-    state: &CaseState,
-    module: &dyn Module,
-    upper: bool,
-    lower: bool,
-    opacity: f32,
-    enamel: Color,
-) -> Vec<ViewMesh> {
+/// What a scene is built from.
+pub(crate) struct SceneInput<'a> {
+    pub state: &'a CaseState,
+    pub module: &'a dyn Module,
+    /// Upper arch shown.
+    pub upper: bool,
+    /// Lower arch shown.
+    pub lower: bool,
+    pub opacity: f32,
+    pub enamel: Color,
+    /// Stage shown on the timeline (0 = initial position).
+    pub stage: u32,
+    /// Ghost of the initial position over a later stage.
+    pub overlay0: bool,
+    pub layers: Layers,
+    /// Contact map colours (drawn instead of the labels when given).
+    pub contacts: Option<&'a ContactColors>,
+    /// Occlusal view: only the arch looked at is shown (the other one would
+    /// cover its occlusal surface).
+    pub occlusal: bool,
+}
+
+/// Seed marker size (mm).
+const SEED_RADIUS: f32 = 0.8;
+/// Opacity of the stage 0 ghost.
+const GHOST_OPACITY: f32 = 0.25;
+
+/// Meshes to show: the scans in the world frame (upper and lower arch per
+/// the toggles, the bite scan with both), coloured by tooth label or by the
+/// contact map and posed at the stage shown, the seed markers and the
+/// module's scene meshes.
+pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> Vec<ViewMesh> {
+    let state = input.state;
     let world = state.case.world_frame.from_case.to_mat4().as_mat4();
+    let al = overlay::aligners(state);
+    let palette = overlay::palette();
+    // in the occlusal view the antagonist hides the arch looked at
+    let looks_at_upper = input.upper && state.case.scan(ScanRole::Upper).is_some();
+    let (upper, lower) = if input.occlusal && looks_at_upper {
+        (true, false)
+    } else {
+        (input.upper, input.lower)
+    };
+    let shown = |role: ScanRole| match role {
+        ScanRole::Upper => upper,
+        ScanRole::Lower => lower,
+        ScanRole::Bite => upper && lower,
+    };
+    let posed_stage = al.and_then(|a| overlay::stage(a, input.stage).map(|s| (a, s)));
     let mut out = Vec::new();
     for scan in &state.case.scans {
-        let shown = match scan.role {
-            ScanRole::Upper => upper,
-            ScanRole::Lower => lower,
-            ScanRole::Bite => upper && lower,
-        };
         let Some(mesh) = state.mesh(&scan.mesh) else {
             continue;
         };
         let (a, b) = scan.id.as_u64_pair();
-        let mut vm = ViewMesh::new((a ^ b) >> 1, Arc::clone(mesh))
-            .with_xform(world * scan.import_xform.to_mat4().as_mat4())
-            .with_coloring(MeshColoring::Uniform(enamel))
-            .with_opacity(opacity);
-        vm.visible = shown;
+        let id = (a ^ b) >> 2;
+        let xform = world * scan.import_xform.to_mat4().as_mat4();
+        let labelled = overlay::scan_labels(state, scan.role, mesh);
+        let coloring = match (input.contacts.and_then(|c| c.of(scan.role)), labelled) {
+            (Some(c), _) if c.len() == mesh.vertex_count() => MeshColoring::PerVertex(c.clone()),
+            (_, Some(lm)) if input.layers.labels => dc_viewport::label_coloring(mesh, lm, &palette)
+                .unwrap_or(MeshColoring::Uniform(input.enamel)),
+            _ => MeshColoring::Uniform(input.enamel),
+        };
+        let posed = match (posed_stage, labelled.and_then(|m| m.vertex_labels.as_ref())) {
+            (Some((a, st)), Some(l)) if input.stage > 0 => {
+                overlay::posed_mesh(mesh, l, &a.tooth_frames, st).map(Arc::new)
+            }
+            _ => None,
+        };
+        if posed.is_some() && input.overlay0 {
+            let mut ghost = ViewMesh::new(id | (1 << 62), Arc::clone(mesh))
+                .with_xform(xform)
+                .with_coloring(MeshColoring::Uniform(input.enamel))
+                .with_opacity(GHOST_OPACITY.min(input.opacity));
+            ghost.visible = shown(scan.role);
+            ghost.pickable = false;
+            out.push(ghost);
+        }
+        let mut vm = ViewMesh::new(id, posed.unwrap_or_else(|| Arc::clone(mesh)))
+            .with_xform(xform)
+            .with_coloring(coloring)
+            .with_opacity(input.opacity);
+        vm.visible = shown(scan.role);
         out.push(vm);
     }
-    for (i, item) in module.scene(state).iter().enumerate() {
+    if input.layers.seeds
+        && let Some(a) = al
+    {
+        let seeds = a.seeds.iter().filter(|s| {
+            shown(if s.fdi.is_upper() {
+                ScanRole::Upper
+            } else {
+                ScanRole::Lower
+            })
+        });
+        if let Some(m) = overlay::seed_markers(seeds, SEED_RADIUS) {
+            let mut vm = ViewMesh::new(1 << 61, Arc::new(m))
+                .with_xform(world)
+                .with_coloring(MeshColoring::VertexLabels(palette));
+            vm.pickable = false;
+            out.push(vm);
+        }
+    }
+    for (i, item) in input.module.scene(state).iter().enumerate() {
         if let Some(vm) = ViewMesh::from_scene_item((1 << 63) | i as u64, item, &state.blobs) {
-            out.push(vm.with_opacity(opacity));
+            out.push(vm.with_opacity(input.opacity));
         }
     }
     out
@@ -179,12 +269,53 @@ impl Workspace {
             .find(|c| crate::import::is_import_command(c))
     }
 
-    fn sync_scene(&mut self, ui: &Ui) {
+    /// Contact map of the current state (computed once per state); `None`
+    /// when the layer is off. A case without a map turns the layer off and
+    /// says why.
+    fn contact_map(&mut self) -> Option<Arc<ContactColors>> {
+        if !self.view.layers.contacts {
+            return None;
+        }
+        let state = self.undo.current();
+        let ptr = Arc::as_ptr(state) as usize;
+        if self.view.contacts.as_ref().is_none_or(|(p, _)| *p != ptr) {
+            let r = overlay::contact_colors(state).map(Arc::new);
+            self.view.contacts = Some((ptr, r));
+        }
+        match &self.view.contacts {
+            Some((_, Ok(c))) => Some(Arc::clone(c)),
+            Some((_, Err(e))) => {
+                let detail = e.clone();
+                self.view.layers.contacts = false;
+                self.view.contacts = None;
+                self.toast(
+                    Toast::new(ToastLevel::Warning, "ws-toast-contacts-unavailable")
+                        .with_detail(detail),
+                );
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub(crate) fn sync_scene(&mut self, ui: &Ui) {
+        let enamel = scene_color(colors(ui).model_enamel);
+        self.sync_scene_with(enamel);
+    }
+
+    /// Rebuilds the meshes when the state, the stage, the toggles or the
+    /// view changed.
+    pub(crate) fn sync_scene_with(&mut self, enamel: Color) {
+        let contacts = self.contact_map();
         let key = SceneKey {
             state: Arc::as_ptr(self.undo.current()) as usize,
             upper: self.timeline.upper,
             lower: self.timeline.lower,
             display: self.view.display,
+            stage: self.timeline.current,
+            overlay0: self.timeline.overlay0,
+            layers: self.view.layers,
+            occlusal: self.view.view == ViewChoice::Occlusal,
         };
         if self.view.synced == Some(key) {
             return;
@@ -195,25 +326,46 @@ impl Workspace {
         } else {
             1.0
         };
-        let enamel = scene_color(colors(ui).model_enamel);
-        let meshes = scene_meshes(
-            self.undo.current(),
-            self.module.as_ref(),
-            self.timeline.upper,
-            self.timeline.lower,
+        let state = Arc::clone(self.undo.current());
+        let meshes = scene_meshes(&SceneInput {
+            state: &state,
+            module: self.module.as_ref(),
+            upper: self.timeline.upper,
+            lower: self.timeline.lower,
             opacity,
             enamel,
-        );
+            stage: self.timeline.current,
+            overlay0: self.timeline.overlay0,
+            layers: self.view.layers,
+            contacts: contacts.as_deref(),
+            occlusal: key.occlusal,
+        });
         self.view.mesh_count = meshes.iter().filter(|m| m.visible).count();
+        // a new set of scans (import, demo, a command through the bridge) is framed
+        let ids: Vec<uuid::Uuid> = state.case.scans.iter().map(|s| s.id).collect();
+        let new_scans = ids != self.view.scan_ids && !ids.is_empty();
+        self.view.scan_ids = ids;
+        self.view.meshes = meshes.clone();
         if let Some(vp) = &mut self.view.viewport {
             vp.settings.wireframe = self.view.display == Display::Wireframe;
             vp.set_meshes(meshes);
+            if new_scans {
+                vp.fit();
+            }
         }
+    }
+
+    /// The occlusal view looks at the upper arch: it is shown and exists
+    /// (or the case has no lower arch either).
+    fn upper_looked_at(&self) -> bool {
+        let case = &self.undo.current().case;
+        self.timeline.upper
+            && (case.scan(ScanRole::Upper).is_some() || case.scan(ScanRole::Lower).is_none())
     }
 
     fn set_view(&mut self, choice: ViewChoice) {
         self.view.view = choice;
-        let sv = choice.std_view(self.timeline.upper);
+        let sv = choice.std_view(self.upper_looked_at());
         self.apply_std_view(sv);
     }
 
@@ -236,7 +388,7 @@ impl Workspace {
             None => self
                 .view
                 .headless_view
-                .unwrap_or_else(|| self.view.view.std_view(self.timeline.upper))
+                .unwrap_or_else(|| self.view.view.std_view(self.upper_looked_at()))
                 .rotation(),
         }
     }
@@ -291,8 +443,12 @@ impl Workspace {
             self.empty_state(ui, rect);
         }
 
-        // legend (bottom left)
-        legend(ui, inner);
+        // legend (bottom left): the contact ramp when the map is shown
+        if self.view.layers.contacts {
+            contact_legend(ui, inner);
+        } else {
+            legend(ui, inner);
+        }
 
         // scale bar (bottom right)
         if let Some(px) = px_per_mm {
@@ -349,6 +505,17 @@ impl Workspace {
                     }
                 }
                 separator(ui);
+                let layers = &mut self.view.layers;
+                for (icon, key, on) in [
+                    (ic::TOOTH, "ws-layer-labels", &mut layers.labels),
+                    (ic::MAP_PIN, "ws-layer-seeds", &mut layers.seeds),
+                    (ic::GRID_NINE, "ws-layer-contacts", &mut layers.contacts),
+                ] {
+                    if icon_toggle(ui, icon, &t(key), *on).clicked() {
+                        *on = !*on;
+                    }
+                }
+                separator(ui);
                 for (icon, key) in [
                     (ic::SQUARE, "ws-layer-attachments"),
                     (ic::DIAMOND, "ws-layer-ipr"),
@@ -374,7 +541,7 @@ impl Workspace {
             (false, true) => t("ws-jaw-lower"),
             (false, false) => t("ws-jaw-none"),
         };
-        let view = match self.view.view.std_view(self.timeline.upper) {
+        let view = match self.view.view.std_view(self.upper_looked_at()) {
             StdView::OcclusalUpper => t("ws-caption-occlusal-upper"),
             StdView::OcclusalLower => t("ws-caption-occlusal-lower"),
             StdView::Front => t("ws-caption-front"),
@@ -772,6 +939,54 @@ fn point_in_quad(p: Pos2, q: &[Pos2; 4]) -> bool {
     true
 }
 
+fn contact_legend(ui: &mut Ui, inner: Rect) {
+    let c = *colors(ui);
+    let rows = overlay::contact_legend();
+    let h = 40.0 + rows.len() as f32 * 20.0;
+    let r = Rect::from_min_size(pos2(inner.left(), inner.bottom() - h), vec2(236.0, h));
+    let p = ui.painter();
+    p.rect(
+        r,
+        CornerRadius::same(6),
+        c.bg_panel.gamma_multiply(0.92),
+        Stroke::new(1.0, c.border_subtle),
+        StrokeKind::Inside,
+    );
+    p.text(
+        pos2(r.left() + 12.0, r.top() + 16.0),
+        Align2::LEFT_CENTER,
+        t("ws-contacts-title"),
+        fonts::semibold(12.0),
+        c.text_primary,
+    );
+    for (k, (color, key, range)) in rows.iter().enumerate() {
+        let y = r.top() + 40.0 + k as f32 * 20.0;
+        let [rr, gg, bb, aa] = color.to_array();
+        let fill = Color32::from(egui::Rgba::from_rgba_unmultiplied(rr, gg, bb, aa));
+        p.rect_filled(
+            Rect::from_center_size(pos2(r.left() + 20.0, y), vec2(14.0, 12.0)),
+            CornerRadius::same(2),
+            fill,
+        );
+        p.text(
+            pos2(r.left() + 36.0, y),
+            Align2::LEFT_CENTER,
+            t(key),
+            fonts::ui(12.0),
+            c.text_primary,
+        );
+        p.text(
+            pos2(r.right() - 10.0, y),
+            Align2::RIGHT_CENTER,
+            range,
+            fonts::mono(11.0),
+            c.text_secondary,
+        );
+    }
+    let resp = ui.interact(r, Id::unique("dc-workspace-contact-legend"), Sense::hover());
+    resp.widget_info(|| WidgetInfo::labeled(Role::Image, true, t("ws-contacts-title")));
+}
+
 fn legend(ui: &mut Ui, inner: Rect) {
     let c = *colors(ui);
     let rows: [(&str, u8); 4] = [
@@ -872,6 +1087,253 @@ fn scale_bar(ui: &mut Ui, inner: Rect, px_per_mm: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::overlay::tests::{exec, lower_demo};
+    use dc_project::{AppInfo, Project};
+    use dca_model::{AlignersState, Stage};
+    use glam::DQuat;
+    use serde_json::{Value, json};
+
+    fn workspace(state: CaseState) -> Workspace {
+        let project = Project::new(
+            AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            state,
+        );
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            None,
+        )
+    }
+
+    /// Two segmented demo arches in virtual occlusion with tooth frames and
+    /// three stages; stage 2 moves tooth 31 by 1 mm.
+    fn staged_case() -> CaseState {
+        let s = exec(
+            "aligners.demo",
+            &lower_demo(),
+            json!({ "arch": "upper", "seed": 11 }),
+        );
+        let s = exec("aligners.occlusion.virtual-bite", &s, Value::Null);
+        let mut s = exec("aligners.teeth.frames", &s, Value::Null);
+        let mut al = s
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.stages = (0..3).map(Stage::new).collect();
+        al.stages[2].poses.insert(
+            dc_case::Fdi::new(31).unwrap(),
+            dc_case::Pose::new(glam::DVec3::X, DQuat::IDENTITY),
+        );
+        s.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+        s
+    }
+
+    fn scan_mesh(ws: &Workspace, role: ScanRole) -> &ViewMesh {
+        let st = ws.undo.current();
+        let scan = st.case.scan(role).unwrap();
+        let (a, b) = scan.id.as_u64_pair();
+        let id = (a ^ b) >> 2;
+        ws.view.meshes.iter().find(|m| m.id == id).unwrap()
+    }
+
+    #[test]
+    fn scans_are_coloured_by_their_tooth_labels() {
+        let mut ws = workspace(lower_demo());
+        ws.sync_scene_with(Color::TOOTH);
+        let vm = scan_mesh(&ws, ScanRole::Lower);
+        let colors = dc_viewport::resolve_colors(&vm.mesh, &vm.coloring);
+        let st = ws.undo.current();
+        let al = overlay::aligners(st).unwrap();
+        let labels = st.mesh(&al.labels[&ScanRole::Lower]).unwrap();
+        let labels = labels.vertex_labels.as_ref().unwrap();
+        let p = overlay::palette();
+        assert!(labels.iter().zip(&colors).all(|(l, c)| p.color(*l) == *c));
+        // seed markers: one octahedron per seed, coloured by tooth number
+        let seeds = ws.view.meshes.iter().find(|m| m.id == 1 << 61).unwrap();
+        assert_eq!(seeds.mesh.vertex_count(), al.seeds.len() * 6);
+        assert!(!seeds.pickable);
+        // the label layer off: the enamel colour
+        ws.view.layers.labels = false;
+        ws.view.layers.seeds = false;
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(
+            scan_mesh(&ws, ScanRole::Lower).coloring,
+            MeshColoring::Uniform(Color::TOOTH)
+        );
+        assert!(ws.view.meshes.iter().all(|m| m.id != 1 << 61));
+    }
+
+    #[test]
+    fn the_stage_shown_poses_the_teeth_and_the_contact_map_colours_them() {
+        let mut ws = workspace(staged_case());
+        ws.sync_scene_with(Color::TOOTH);
+        let rest = Arc::clone(&scan_mesh(&ws, ScanRole::Lower).mesh);
+        // stage 1 moves nothing; stage 2 moves tooth 31
+        ws.timeline.current = 1;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(Arc::ptr_eq(&scan_mesh(&ws, ScanRole::Lower).mesh, &rest));
+        ws.timeline.current = 2;
+        ws.sync_scene_with(Color::TOOTH);
+        let posed = Arc::clone(&scan_mesh(&ws, ScanRole::Lower).mesh);
+        let moved = posed
+            .positions
+            .iter()
+            .zip(&rest.positions)
+            .filter(|(a, b)| a.distance(**b) > 0.9)
+            .count();
+        assert!(moved > 100, "{moved}");
+        // with the stage 0 overlay, a ghost of the rest position is drawn
+        ws.timeline.overlay0 = true;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(
+            ws.view
+                .meshes
+                .iter()
+                .any(|m| m.opacity < 0.5 && Arc::ptr_eq(&m.mesh, &rest))
+        );
+        // the contact map replaces the label colours on both arches
+        ws.view.layers.contacts = true;
+        ws.sync_scene_with(Color::TOOTH);
+        for role in [ScanRole::Lower, ScanRole::Upper] {
+            assert!(matches!(
+                scan_mesh(&ws, role).coloring,
+                MeshColoring::PerVertex(_)
+            ));
+        }
+        assert!(ws.view.layers.contacts);
+        // without an upper arch the map is not available: the layer turns off
+        let mut one = workspace(lower_demo());
+        one.view.layers.contacts = true;
+        one.sync_scene_with(Color::TOOTH);
+        assert!(!one.view.layers.contacts);
+        assert!(
+            one.toast_keys()
+                .iter()
+                .any(|k| k == "ws-toast-contacts-unavailable")
+        );
+    }
+
+    #[test]
+    fn view_presets_follow_the_world_frame_and_the_occlusal_view_shows_one_arch() {
+        let mut ws = workspace(staged_case());
+        for (choice, sv) in [
+            (ViewChoice::Front, StdView::Front),
+            (ViewChoice::Left, StdView::Left),
+            (ViewChoice::Right, StdView::Right),
+            (ViewChoice::Back, StdView::Back),
+            (ViewChoice::Occlusal, StdView::OcclusalUpper),
+        ] {
+            ws.set_view(choice);
+            assert_eq!(ws.view.headless_view, Some(sv));
+            assert_eq!(ws.camera_rotation(), sv.rotation());
+        }
+        // front: looking from the incisors (−Y) with the upper arch (+Z) up
+        let (dir, up) = StdView::Front.direction_and_up();
+        assert_eq!(dir, -dc_case::WorldFrame::ANTERIOR.as_vec3());
+        assert_eq!(up, -dc_case::WorldFrame::TOWARDS_LOWER.as_vec3());
+        // occlusal view of the upper arch: the lower arch would cover it
+        ws.set_view(ViewChoice::Occlusal);
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(scan_mesh(&ws, ScanRole::Upper).visible);
+        assert!(!scan_mesh(&ws, ScanRole::Lower).visible);
+        // only the lower arch shown: the occlusal view looks at it from above
+        ws.timeline.upper = false;
+        ws.set_view(ViewChoice::Occlusal);
+        assert_eq!(ws.view.headless_view, Some(StdView::OcclusalLower));
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(scan_mesh(&ws, ScanRole::Lower).visible);
+        assert!(!scan_mesh(&ws, ScanRole::Upper).visible);
+        // the front view shows both arches
+        ws.timeline.upper = true;
+        ws.set_view(ViewChoice::Front);
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(scan_mesh(&ws, ScanRole::Lower).visible && scan_mesh(&ws, ScanRole::Upper).visible);
+    }
+
+    #[test]
+    fn commands_run_from_outside_refresh_the_scene() {
+        // the --control bridge runs case commands through Workspace::run_command
+        let run = |ws: &mut Workspace, id: &str, params: Value| {
+            let spec = dca_module::commands::find(id).unwrap();
+            ws.run_command(Box::new(spec.command(params)));
+            assert!(ws.wait_for_jobs(std::time::Duration::from_secs(60)));
+        };
+        let mut ws = workspace(CaseState::default());
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(ws.view.meshes.is_empty());
+        run(&mut ws, "aligners.demo", json!({ "arch": "lower" }));
+        run(
+            &mut ws,
+            "aligners.demo",
+            json!({ "arch": "upper", "seed": 11 }),
+        );
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(ws.view.scan_ids.len(), 2);
+        let before = scan_mesh(&ws, ScanRole::Upper).mesh.positions[0];
+        assert!(matches!(
+            scan_mesh(&ws, ScanRole::Upper).coloring,
+            MeshColoring::Labels { .. }
+        ));
+        // the virtual bite moves the upper arch: the next frame shows it moved
+        run(&mut ws, "aligners.occlusion.virtual-bite", Value::Null);
+        ws.sync_scene_with(Color::TOOTH);
+        let after = scan_mesh(&ws, ScanRole::Upper).mesh.positions[0];
+        assert!(before.distance(after) > 1.0);
+        assert_eq!(
+            ws.view.synced.map(|k| k.state),
+            Some(Arc::as_ptr(ws.undo.current()) as usize)
+        );
+    }
+
+    #[test]
+    fn the_stage_slider_is_bound_to_the_aligners_stages() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        struct App(Workspace);
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 1000.0))
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    let _ = app.0.show(ui);
+                },
+                App(workspace(staged_case())),
+            );
+        h.run();
+        let model = TimelineModel::from_state(h.state().0.undo.current());
+        assert_eq!(model.last(), 2);
+        // the slider is the row of stage cells; a click picks the stage under it
+        h.get_by_role(Role::Slider).click();
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 1);
+        h.get_by_label("Last stage").click();
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 2);
+        // the scene follows the slider: tooth 31 is posed
+        let ws = &h.state().0;
+        assert_eq!(ws.view.synced.map(|k| k.stage), Some(2));
+        let caption = ws.caption_text();
+        assert!(caption.contains("02"), "{caption}");
+        // a new state with more stages (e.g. from the bridge) extends the slider
+        let mut more = ws.undo.current().as_ref().clone();
+        let mut al = more
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.stages.push(Stage::new(3));
+        more.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+        h.state_mut().0.undo.push(Arc::new(more), "test");
+        h.run();
+        h.get_by_label("Last stage").click();
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 3);
+        assert_eq!(h.state().0.view.synced.map(|k| k.stage), Some(3));
+    }
 
     #[test]
     fn scale_lengths() {
