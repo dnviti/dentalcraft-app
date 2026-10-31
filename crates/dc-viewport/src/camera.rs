@@ -240,6 +240,22 @@ impl Camera {
         c.xyz() / c.w
     }
 
+    /// Size in points of a length of `length_mm` across the view (along the
+    /// screen's right axis) at world point `p`, in a viewport of `size`
+    /// points: the radius of a brush circle drawn at `p`.
+    pub fn screen_length(
+        &self,
+        p: Vec3,
+        length_mm: f32,
+        size: Vec2,
+        bounds: Option<Sphere>,
+    ) -> f32 {
+        let aspect = size.x.max(1.0) / size.y.max(1.0);
+        let a = self.project_ndc(p, aspect, bounds);
+        let b = self.project_ndc(p + self.right() * length_mm, aspect, bounds);
+        ((b.x - a.x) * 0.5 * size.x).hypot((b.y - a.y) * 0.5 * size.y)
+    }
+
     /// Switches to a standard view, keeping target and distance.
     pub fn set_view(&mut self, view: StdView) {
         self.rotation = view.rotation();
@@ -352,6 +368,29 @@ mod tests {
 
     fn close(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < EPS
+    }
+
+    #[test]
+    fn a_length_on_screen_follows_the_projection() {
+        let size = Vec2::new(800.0, 600.0);
+        let mut c = Camera {
+            projection: Projection::Orthographic,
+            distance: 60.0,
+            ..Camera::default()
+        };
+        // orthographic: the visible height is 2 * half_height, whatever the depth
+        let px = c.screen_length(c.target, 5.0, size, None);
+        assert!(
+            (px - 5.0 / (2.0 * c.half_height()) * size.y).abs() < 0.05,
+            "{px}"
+        );
+        let near = c.screen_length(c.target + c.forward() * 20.0, 5.0, size, None);
+        assert!((near - px).abs() < 0.05);
+        // perspective: closer to the eye is bigger
+        c.projection = Projection::Perspective;
+        let far = c.screen_length(c.target + c.forward() * 20.0, 5.0, size, None);
+        let close = c.screen_length(c.target - c.forward() * 20.0, 5.0, size, None);
+        assert!(close > far * 1.5, "{close} {far}");
     }
 
     #[test]
