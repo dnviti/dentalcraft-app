@@ -1,5 +1,11 @@
 //! `dentalcraft`: the DentalCraft desktop application.
 
+// Release builds on Windows are GUI-subsystem (no console window); logs go to the log file.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use dc_app::config::{Dirs, Store};
 use dc_app::{AppDeps, DentalCraftApp};
 
