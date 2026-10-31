@@ -1,0 +1,56 @@
+[package]
+name = "dc-app"
+description = "DentalCraft desktop application: launcher (Home), sign-in, support, new project and the module workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dentalcraft"
+path = "src/main.rs"
+
+[lib]
+name = "dc_app"
+path = "src/lib.rs"
+
+[dependencies]
+# core crates
+dc-case.workspace = true
+dc-i18n.workspace = true
+dc-mesh.workspace = true
+dc-module-api.workspace = true
+dc-project.workspace = true
+# aligners module
+dca-module.workspace = true
+# app crates
+dc-auth-client.workspace = true
+dc-ui.workspace = true
+dc-workspace.workspace = true
+
+chrono.workspace = true
+directories.workspace = true
+eframe = { workspace = true, features = ["wgpu", "wayland", "x11", "default_fonts", "accesskit", "clipboard", "links"] }
+egui.workspace = true
+egui-wgpu.workspace = true
+image.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+uuid.workspace = true
+webbrowser.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
