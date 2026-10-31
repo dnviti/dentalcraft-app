@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default issuer in debug builds (`dentalcraft-server dev`).
 pub const DEV_ISSUER: &str = "http://127.0.0.1:8787";
-/// Default issuer in release builds.
-// TODO(release): confirm the production sign-in host once the server is deployed.
+/// Default issuer in release builds: the production sign-in server
+/// (`dentalcraft-server`). `DC_AUTH_ISSUER` or the saved setting override it.
 pub const RELEASE_ISSUER: &str = "https://auth.dentalcraft.app";
 /// Environment variable overriding the issuer.
 pub const ISSUER_ENV: &str = "DC_AUTH_ISSUER";
@@ -292,5 +292,20 @@ mod tests {
             assert_eq!(s.issuer(), "https://x.example");
             assert_eq!(Settings::default().issuer(), default_issuer());
         }
+    }
+
+    #[test]
+    fn issuer_constants() {
+        assert_eq!(RELEASE_ISSUER, "https://auth.dentalcraft.app");
+        assert_eq!(DEV_ISSUER, "http://127.0.0.1:8787");
+        assert!(RELEASE_ISSUER.starts_with("https://"));
+        assert_eq!(
+            default_issuer(),
+            if cfg!(debug_assertions) {
+                DEV_ISSUER
+            } else {
+                RELEASE_ISSUER
+            }
+        );
     }
 }
