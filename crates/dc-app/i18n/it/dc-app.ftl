@@ -144,6 +144,7 @@ signin-fact-coming-soon = { $count } in arrivo
 signin-continue = Continua in DentalCraft
 signin-switch-account = Cambia account
 signin-error-title = L'accesso non è riuscito
+signin-error-server = Server di accesso: { $issuer }
 signin-try-again = Riprova
 footer-privacy = Informativa privacy
 footer-terms = Condizioni d'uso

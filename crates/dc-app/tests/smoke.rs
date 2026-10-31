@@ -129,3 +129,27 @@ fn i18n_keys_exist_in_every_language() {
     }
     dc_i18n::set_language(Lang::En).unwrap();
 }
+
+#[test]
+fn sign_in_error_names_the_issuer() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path(), Lang::En);
+    h.state_mut().go(Screen::SignIn);
+    h.run_steps(3);
+    h.get_by_label("Sign in with DentalCraft account").click();
+    // the headless issuer (127.0.0.1:9) refuses the connection at once
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.query_by_label("Sign-in did not work").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no sign-in error shown"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.run_steps(1);
+    }
+    assert!(
+        h.query_by_label("Sign-in server: http://127.0.0.1:9")
+            .is_some()
+    );
+}

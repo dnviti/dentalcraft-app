@@ -449,8 +449,10 @@ impl DentalCraftApp {
         if let Some(a) = &self.auth
             && let Some(s) = a.poll()
         {
-            if let AuthState::SignedIn(u) = &s {
-                tracing::info!("signed in as {}", u.email);
+            match &s {
+                AuthState::SignedIn(u) => tracing::info!("signed in as {}", u.email),
+                AuthState::Error(e) => tracing::warn!("sign-in error ({}): {e}", a.issuer()),
+                _ => {}
             }
             self.auth_state = s;
         }

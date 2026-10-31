@@ -295,7 +295,14 @@ impl DentalCraftApp {
                     fonts::style(&t.text.body_l),
                     c.text_secondary,
                 );
-                tracing::debug!("sign-in error: {e}");
+                if let Some(a) = &self.auth {
+                    text(
+                        ui,
+                        t!("signin-error-server", issuer = a.issuer()),
+                        fonts::ui(12.0),
+                        c.text_secondary,
+                    );
+                }
                 if Button::primary(t!("signin-try-again"))
                     .icon(icons::ARROWS_CLOCKWISE)
                     .size(ButtonSize::Cta)

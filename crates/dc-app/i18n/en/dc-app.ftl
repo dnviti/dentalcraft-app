@@ -144,6 +144,7 @@ signin-fact-coming-soon = { $count } coming soon
 signin-continue = Continue to DentalCraft
 signin-switch-account = Switch account
 signin-error-title = Sign-in did not work
+signin-error-server = Sign-in server: { $issuer }
 signin-try-again = Try again
 footer-privacy = Privacy notice
 footer-terms = Terms of use
