@@ -142,6 +142,7 @@ pub struct Workspace {
     pub(crate) dialog_requests: usize,
     pub(crate) egui_ctx: Option<egui::Context>,
     pub(crate) view: ViewState,
+    pub(crate) manual: crate::manual::Manual,
     pub(crate) menu_view: MenuView,
     pub(crate) selected: Option<&'static str>,
     pub(crate) timeline: TimelineState,
@@ -228,6 +229,7 @@ impl Workspace {
             dialog_requests: 0,
             egui_ctx: None,
             view: ViewState::default(),
+            manual: crate::manual::Manual::default(),
             selected: None,
             timeline: TimelineState::default(),
             toasts: Vec::new(),
@@ -362,6 +364,16 @@ impl Workspace {
         {
             self.select_item(id);
             self.menu_view.reveal(&self.menu, id);
+        }
+        // a manual tool opens its panel and works on the pointer; its command runs from there
+        if let Some(tool) = crate::manual::Tool::from_command(command_id)
+            && self
+                .commands
+                .iter()
+                .any(|c| c.id == command_id && c.status == MenuStatus::Ready)
+        {
+            self.open_manual_tool(tool);
+            return;
         }
         let ours = import::is_import_command(command_id);
         let state = self.undo.current().clone();

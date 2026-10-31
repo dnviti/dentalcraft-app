@@ -399,14 +399,17 @@ impl Workspace {
         self.sync_scene(ui);
         let rect = ui.available_rect_before_wrap();
         let mut px_per_mm = None;
+        let mut manual_events = Vec::new();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
+                vp.settings.hover_pick = self.manual.wants_hover();
                 if std::mem::take(&mut self.view.refit) {
                     vp.fit();
                 }
-                // picks are ignored: tooth selection needs the segmentation
-                let _ = vp.ui(ui);
+                // the clicks and strokes go to the manual tool that is open
+                let vr = vp.ui(ui);
+                manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr);
                 let half = vp.camera().half_height();
                 if half > 0.0 {
                     px_per_mm = Some(rect.height() / (2.0 * half));
@@ -419,6 +422,9 @@ impl Workspace {
             }
         }
 
+        self.manual_events(manual_events);
+        self.manual_feedback();
+
         let inset = 16.0;
         let inner = rect.shrink(inset);
         // toolbar + caption (top left)
@@ -430,6 +436,8 @@ impl Workspace {
         self.toolbar(&mut top);
         top.add_space(8.0);
         self.caption(&mut top);
+        top.add_space(8.0);
+        self.manual_panel(&mut top);
 
         // view cube (top right)
         let cube_rect =

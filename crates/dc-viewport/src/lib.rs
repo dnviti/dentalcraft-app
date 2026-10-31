@@ -452,6 +452,28 @@ impl Viewport {
         pick::pick(ray, targets)
     }
 
+    /// Size in points, in a viewport of `rect`, of a length of `length_mm`
+    /// across the view at world point `p` (the radius of a brush circle).
+    pub fn screen_length(&self, rect: Rect, p: Vec3, length_mm: f32) -> f32 {
+        self.camera.screen_length(
+            p,
+            length_mm,
+            Vec2::new(rect.width(), rect.height()),
+            self.bounding_sphere(),
+        )
+    }
+
+    /// Screen position, inside the viewport `rect`, of world point `p`.
+    pub fn screen_pos(&self, rect: Rect, p: Vec3) -> Pos2 {
+        let ndc = self
+            .camera
+            .project_ndc(p, aspect_of(rect), self.bounding_sphere());
+        Pos2::new(
+            rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
+            rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
+        )
+    }
+
     /// Picks under a screen position inside the viewport `rect`.
     pub fn pick_at(&self, rect: Rect, pos: Pos2) -> Option<Pick> {
         let ray = self
