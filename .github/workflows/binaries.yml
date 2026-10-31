@@ -124,7 +124,10 @@ jobs:
           # GUI subsystem for the Windows build (no console window), also for tags
           # that predate the windows_subsystem attribute in main.rs.
           RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-gnu' && '-C link-arg=-Wl,--subsystem,windows' || '' }}
-        run: cargo build -p dc-app --release --locked --target "$TARGET"
+        # No --locked: release-please bumps the workspace version in Cargo.toml but not in
+        # Cargo.lock, so the lock of a release tag is always stale for the workspace crates.
+        # All dependencies stay pinned by the lock; only the workspace versions are rewritten.
+        run: cargo build -p dc-app --release --target "$TARGET"
       - name: Package
         env:
           TAG: ${{ inputs.tag }}
@@ -198,9 +201,9 @@ jobs:
         with:
           key: macos-universal
       - name: Build aarch64
-        run: cargo build -p dc-app --release --locked --target aarch64-apple-darwin
+        run: cargo build -p dc-app --release --target aarch64-apple-darwin
       - name: Build x86_64
-        run: cargo build -p dc-app --release --locked --target x86_64-apple-darwin
+        run: cargo build -p dc-app --release --target x86_64-apple-darwin
       - name: Bundle DentalCraft.app (universal, not notarized)
         env:
           TAG: ${{ inputs.tag }}
@@ -253,6 +256,9 @@ jobs:
   release:
     name: attach to release
     needs: [build, build-macos]
+    # The billed macOS job can be blocked (spending limit, failed payment): still attach
+    # the Linux and Windows archives. Re-run the workflow later to add the macOS one.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -270,7 +276,8 @@ jobs:
         working-directory: dist
         run: |
           ls -l
-          [ "$(ls | wc -l)" -eq 3 ] || { echo "expected 3 archives" >&2; exit 1; }
+          [ "$(ls | wc -l)" -ge 2 ] || { echo "expected at least 2 archives" >&2; exit 1; }
+          [ "$(ls | wc -l)" -eq 3 ] || echo "::warning::macOS archive missing (build-macos: ${{ needs.build-macos.result }}); re-run the workflow to add it"
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - name: Upload to the release
