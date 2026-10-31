@@ -233,6 +233,108 @@ fn the_pipeline_runs_on_the_golden_fixture_scans_of_both_arches() {
     round_trip(&mut s, tmp.path());
 }
 
+/// The whole pipeline on the golden fixtures of both arches with the print
+/// files of the shell stage at the draft quality (`DCA_QUALITY` for
+/// another one): a printable model per stage and a trimmed aligner per
+/// aligner, each checked by the print check. Prints the timings and the
+/// result of every file; fails on the first file that is not printable.
+#[test]
+#[ignore = "the shells of every stage of both arches: run with --release --ignored --nocapture"]
+fn the_pipeline_makes_printable_shells_on_the_golden_fixture_scans() {
+    let root = fixtures();
+    let (lower, upper) = (
+        root.join("demo_lower_mild/scan.dcm"),
+        root.join("demo_upper_mild/scan.dcm"),
+    );
+    if !lower.is_file() || !upper.is_file() {
+        eprintln!("skipped: no golden fixtures at {}", root.display());
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let mut s = session();
+    for src in [&lower, &upper] {
+        let mesh = dc_mesh::dcm::decode(&std::fs::read(src).unwrap()).unwrap();
+        let name = if src == &lower {
+            "lower.stl"
+        } else {
+            "upper.stl"
+        };
+        let path = tmp.path().join(name);
+        dc_mesh::io::write(&path, &mesh, dc_mesh::io::MeshFormat::Stl).unwrap();
+        s.execute("case.import", json!({ "path": path.display().to_string() }))
+            .unwrap();
+    }
+    let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "draft".to_owned());
+    let dir = tmp.path().join("export");
+    let out = s
+        .execute(
+            "aligners.auto",
+            json!({
+                "start_date": "2026-11-02",
+                "export_dir": dir.display().to_string(),
+                "shells": true,
+                "quality": quality,
+            }),
+        )
+        .unwrap();
+    let steps = out["steps"].as_array().unwrap();
+    for st in steps {
+        eprintln!(
+            "{:>2} {:<48} {:>7.2} s",
+            st["step"],
+            st["id"].as_str().unwrap(),
+            st["seconds"].as_f64().unwrap()
+        );
+    }
+    let report = &steps.last().unwrap()["output"];
+    assert_eq!(steps.last().unwrap()["id"], "aligners.output.report");
+    assert_eq!(report["meshes"], "shells", "{}", report["notes"]);
+    eprintln!("notes: {:#}", report["notes"]);
+    let nl = report["aligners"]["lower"].as_u64().unwrap();
+    let nu = report["aligners"]["upper"].as_u64().unwrap();
+    let files = report["files"].as_array().unwrap();
+    let count = |prefix: &str| {
+        files
+            .iter()
+            .filter(|f| f["name"].as_str().unwrap().starts_with(prefix))
+            .count() as u64
+    };
+    // a model per stage (0 the initial one), an aligner per aligner and the
+    // passive ones of the shorter arch
+    assert_eq!(count("modelli_termoformatura/"), nl + nu + 2);
+    assert_eq!(count("stampa_resina/"), 2 * nl.max(nu));
+    let check: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("print_check.json")).unwrap()).unwrap();
+    let mut failed = Vec::new();
+    for f in check["files"].as_array().unwrap() {
+        let c = &f["check"];
+        eprintln!(
+            "{:<52} {:<5} faces {:>8} volume {:>6.2} ml wall {:>5} {}",
+            f["name"].as_str().unwrap(),
+            if f["ok"] == true { "ok" } else { "FAIL" },
+            c["triangles"],
+            c["volume_mm3"].as_f64().unwrap_or(0.0) / 1000.0,
+            c["min_thickness_mm"],
+            f["problems_text"]
+        );
+        if f["ok"] != true {
+            failed.push(f["name"].as_str().unwrap().to_owned());
+        }
+    }
+    let v = s
+        .execute(
+            "aligners.output.manifest",
+            json!({ "dir": dir.display().to_string() }),
+        )
+        .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    eprintln!(
+        "golden fixture pipeline with shells ({quality}): {:.2} s",
+        out["seconds"]
+    );
+    assert!(failed.is_empty(), "not printable: {failed:?}");
+}
+
 #[test]
 fn the_pipeline_runs_on_the_demo_arches() {
     let tmp = tempfile::tempdir().unwrap();
