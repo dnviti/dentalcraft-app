@@ -400,9 +400,9 @@ impl DentalCraftApp {
                 .clicked()
                 && let Some(a) = &self.auth
             {
-                // TODO(server): sign-up page; accounts are created by invitation for now.
-                ui.ctx()
-                    .open_url(egui::OpenUrl::new_tab(a.issuer().to_owned()));
+                // The server's sign-up page: an administrator approves the request.
+                let signup = format!("{}/signup", a.issuer().trim_end_matches('/'));
+                ui.ctx().open_url(egui::OpenUrl::new_tab(signup));
             }
         });
         crate::screens::home::offline_note(ui, c);
