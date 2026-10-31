@@ -28,6 +28,8 @@ serde_json.workspace = true
 [dev-dependencies]
 # end-to-end test of `mcp --connect` against the app bridge (headless egui loop)
 dc-app = { path = "../dc-app" }
+# decodes the golden fixture scans of the end-to-end pipeline test
+dc-mesh.workspace = true
 egui.workspace = true
 egui_kittest.workspace = true
 tempfile.workspace = true
