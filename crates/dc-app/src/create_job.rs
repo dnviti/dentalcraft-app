@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use dc_case::{Case, CaseState, Jaws, Pose, Scan, ScanRole};
+use dc_case::{Case, CaseState, Jaws, Pose, RoleSource, Scan, ScanRole};
 use dc_project::{AppInfo, Project};
 
 /// What the user filled in on the New project screen.
@@ -161,6 +161,7 @@ pub fn run(
         state.case.scans.push(Scan {
             id: uuid::Uuid::new_v4(),
             role: *role,
+            role_source: RoleSource::Explicit,
             source_name: name,
             source_units: units,
             import_xform: Pose::default(),
