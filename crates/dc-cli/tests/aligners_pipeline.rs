@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 /// The pipeline steps `aligners.auto` runs on a case with both arches and
 /// their seeds, with the full export.
 const STEPS: &[&str] = &[
+    "aligners.case.detect-arch",
     "aligners.preparation.orientation.automatic",
     "aligners.preparation.segmentation.automatic",
     "aligners.preparation.reconstruction.automatic",
@@ -71,11 +72,11 @@ fn run_and_check(s: &mut Session, dir: &Path, numbering: usize) -> Value {
             st["seconds"].as_f64().unwrap()
         );
     }
-    // the steps, in pipeline order, the numbering of the arches without seeds second
+    // the steps, in pipeline order, the numbering of the arches without seeds after the orientation
     let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
     let mut expected = STEPS.to_vec();
     for _ in 0..numbering {
-        expected.insert(1, "aligners.preparation.numbering.automatic");
+        expected.insert(2, "aligners.preparation.numbering.automatic");
     }
     assert_eq!(ids, expected);
     let by_id = |id: &str| -> &Value { &steps.iter().find(|s| s["id"] == id).unwrap()["output"] };
@@ -358,6 +359,36 @@ fn the_pipeline_runs_on_the_demo_arches() {
     }
     assert!(!aligners(s.state()).stages.is_empty());
     round_trip(&mut s, tmp.path());
+}
+
+/// MCP and the CLI prefer the module's command over `case.import`: everything
+/// a client reads from `case.import` must be there, with the same value where
+/// the case does not make it differ.
+#[test]
+fn the_import_of_the_module_is_a_superset_of_case_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut demo = session();
+    demo.execute("aligners.demo", json!({"arch": "lower"}))
+        .unwrap();
+    let state = demo.state().clone();
+    let scan = state.case.scan(ScanRole::Lower).unwrap();
+    let mesh = state.blobs.require(&scan.mesh).unwrap();
+    let path = tmp.path().join("lower.stl");
+    dc_mesh::io::write(&path, mesh, dc_mesh::io::MeshFormat::Stl).unwrap();
+    let params = json!({ "path": path.display().to_string() });
+
+    let core = session().execute("case.import", params.clone()).unwrap();
+    let module = session()
+        .execute("aligners.case.import-scans", params)
+        .unwrap();
+    let (core, module) = (core.as_object().unwrap(), module.as_object().unwrap());
+    for (key, value) in core {
+        assert!(module.contains_key(key), "{key} missing");
+        if !matches!(key.as_str(), "scan_id" | "imported") {
+            assert_eq!(&module[key], value, "{key}");
+        }
+    }
+    assert!(module.contains_key("detections"));
 }
 
 #[test]
