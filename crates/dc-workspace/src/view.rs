@@ -10,7 +10,7 @@ use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
 use dc_ui::widgets;
-use dc_viewport::{StdView, ViewMesh, Viewport};
+use dc_viewport::{FitInsets, StdView, ViewMesh, Viewport};
 use egui::{
     Align2, Color32, CornerRadius, Frame, Id, Margin, Pos2, Rect, Role, Sense, Stroke, StrokeKind,
     Ui, UiBuilder, Vec2, WidgetInfo, pos2, vec2,
@@ -402,12 +402,17 @@ impl Workspace {
         let c = *colors(ui);
         self.sync_scene(ui);
         let rect = ui.available_rect_before_wrap();
+        let inset = OVERLAY_INSET;
+        let inner = rect.shrink(inset);
+        // the toolbar wraps into rows that stop short of the view cube
+        let toolbar_rows = toolbar_rows(ui, toolbar_max_width(inner.width()));
         let mut px_per_mm = None;
         let mut manual_events = Vec::new();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
                 vp.settings.hover_pick = self.manual.wants_hover();
+                vp.settings.fit_insets = fit_insets(toolbar_height(toolbar_rows.len()));
                 if std::mem::take(&mut self.view.refit) {
                     vp.fit();
                 }
@@ -429,23 +434,23 @@ impl Workspace {
         self.manual_events(manual_events);
         self.manual_feedback();
 
-        let inset = 16.0;
-        let inner = rect.shrink(inset);
         // toolbar + caption (top left)
         let mut top = ui.new_child(
             UiBuilder::new()
                 .max_rect(inner)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        self.toolbar(&mut top);
+        self.toolbar(&mut top, &toolbar_rows);
         top.add_space(8.0);
         self.caption(&mut top);
         top.add_space(8.0);
         self.manual_panel(&mut top);
 
         // view cube (top right)
-        let cube_rect =
-            Rect::from_min_size(pos2(inner.right() - 100.0, inner.top()), vec2(100.0, 100.0));
+        let cube_rect = Rect::from_min_size(
+            pos2(inner.right() - CUBE_SIZE, inner.top()),
+            vec2(CUBE_SIZE, CUBE_SIZE),
+        );
         if let Some(sv) = view_cube(ui, cube_rect, self.camera_rotation()) {
             self.apply_std_view(sv);
         }
@@ -479,25 +484,42 @@ impl Workspace {
         );
     }
 
-    fn toolbar(&mut self, ui: &mut Ui) {
+    fn toolbar(&mut self, ui: &mut Ui, rows: &[Vec<ToolbarItem>]) {
         let c = *colors(ui);
         let frame = Frame::new()
             .fill(c.bg_raised)
             .stroke(Stroke::new(1.0, c.border_subtle))
             .corner_radius(CornerRadius::same(6))
-            .inner_margin(Margin::same(4))
+            .inner_margin(Margin::same(TOOLBAR_MARGIN as i8))
             .shadow(dc_ui::theme::shadow(
                 &dc_ui::tokens::tokens().shadow.e1_popover,
             ));
         frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for v in ViewChoice::ALL {
-                    if text_segment(ui, &t(v.key()), self.view.view == v).clicked() {
-                        self.set_view(v);
+            ui.spacing_mut().item_spacing.y = TOOLBAR_SPACING;
+            for row in rows {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = TOOLBAR_SPACING;
+                    for (i, item) in row.iter().enumerate() {
+                        if i > 0 && row[i - 1].gap_to(*item) > TOOLBAR_SPACING {
+                            separator(ui);
+                        }
+                        match item {
+                            ToolbarItem::View(v) => {
+                                if text_segment(ui, &t(v.key()), self.view.view == *v).clicked() {
+                                    self.set_view(*v);
+                                }
+                            }
+                            ToolbarItem::Group(g) => self.toolbar_group(ui, *g),
+                        }
                     }
-                }
-                separator(ui);
+                });
+            }
+        });
+    }
+
+    fn toolbar_group(&mut self, ui: &mut Ui, group: ToolbarGroup) {
+        match group {
+            ToolbarGroup::Display => {
                 for (d, icon, key) in [
                     (Display::Solid, ic::CUBE, "ws-display-solid"),
                     (
@@ -511,7 +533,8 @@ impl Workspace {
                         self.view.display = d;
                     }
                 }
-                separator(ui);
+            }
+            ToolbarGroup::Tools => {
                 for (icon, key) in [
                     (ic::RULER, "ws-tool-measure"),
                     (ic::ANGLE, "ws-tool-angle"),
@@ -521,7 +544,8 @@ impl Workspace {
                         self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                     }
                 }
-                separator(ui);
+            }
+            ToolbarGroup::Layers => {
                 let layers = &mut self.view.layers;
                 for (icon, key, on) in [
                     (ic::TOOTH, "ws-layer-labels", &mut layers.labels),
@@ -532,7 +556,8 @@ impl Workspace {
                         *on = !*on;
                     }
                 }
-                separator(ui);
+            }
+            ToolbarGroup::Marks => {
                 for (icon, key) in [
                     (ic::SQUARE, "ws-layer-attachments"),
                     (ic::DIAMOND, "ws-layer-ipr"),
@@ -542,12 +567,13 @@ impl Workspace {
                         self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                     }
                 }
-                separator(ui);
+            }
+            ToolbarGroup::Fit => {
                 if icon_toggle(ui, ic::CORNERS_OUT, &t("ws-fit"), false).clicked() {
                     self.view.refit = true;
                 }
-            });
-        });
+            }
+        }
     }
 
     /// Text of the viewport caption chip.
@@ -821,11 +847,156 @@ fn drop_overlay(ui: &mut Ui, rect: Rect) {
     );
 }
 
+/// Space between the overlays and the edges of the viewport (the design's
+/// 16 pt inset).
+const OVERLAY_INSET: f32 = 16.0;
+/// Side of the view cube (top right).
+const CUBE_SIZE: f32 = 100.0;
+/// Free space kept between the toolbar and the view cube.
+const CUBE_GAP: f32 = 8.0;
+/// Inner margin of the toolbar frame.
+const TOOLBAR_MARGIN: f32 = 4.0;
+/// Space between the widgets of the toolbar, and between its rows.
+const TOOLBAR_SPACING: f32 = 2.0;
+/// Height of a toolbar button.
+const TOOLBAR_BUTTON: f32 = 32.0;
+/// Width of a toolbar separator (the widget, not the spacing round it).
+const SEPARATOR_WIDTH: f32 = 9.0;
+/// Breathing room kept between the framed scans and what floats over the view.
+const FIT_MARGIN: f32 = 16.0;
+
+/// A run of related toolbar widgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolbarGroup {
+    Display,
+    Tools,
+    Layers,
+    Marks,
+    Fit,
+}
+
+/// What the toolbar breaks into rows: each view segment (a segment bar that
+/// is too wide for the room breaks between segments) and each other group
+/// (never split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolbarItem {
+    View(ViewChoice),
+    Group(ToolbarGroup),
+}
+
+impl ToolbarItem {
+    /// Every item, in the order of the toolbar.
+    fn all() -> Vec<ToolbarItem> {
+        let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
+        let groups = [
+            ToolbarGroup::Display,
+            ToolbarGroup::Tools,
+            ToolbarGroup::Layers,
+            ToolbarGroup::Marks,
+            ToolbarGroup::Fit,
+        ]
+        .into_iter()
+        .map(ToolbarItem::Group);
+        views.chain(groups).collect()
+    }
+
+    /// Width of the item at most (a selected view segment is a little
+    /// wider than the others).
+    fn width(self, ui: &Ui) -> f32 {
+        let buttons =
+            |n: usize| n as f32 * TOOLBAR_BUTTON + n.saturating_sub(1) as f32 * TOOLBAR_SPACING;
+        match self {
+            ToolbarItem::View(v) => text_segment_width(ui, &t(v.key())),
+            ToolbarItem::Group(ToolbarGroup::Fit) => buttons(1),
+            ToolbarItem::Group(_) => buttons(3),
+        }
+    }
+
+    /// Space taken between `self` and the item after it: the segments of the
+    /// views touch, everything else is parted by a separator.
+    fn gap_to(self, next: ToolbarItem) -> f32 {
+        match (self, next) {
+            (ToolbarItem::View(_), ToolbarItem::View(_)) => TOOLBAR_SPACING,
+            // a separator and the spacing on both of its sides
+            _ => SEPARATOR_WIDTH + 2.0 * TOOLBAR_SPACING,
+        }
+    }
+}
+
+/// The most the toolbar frame can be wide in a viewport overlay area of
+/// `inner_width`: what is left of it beside the view cube.
+pub(crate) fn toolbar_max_width(inner_width: f32) -> f32 {
+    (inner_width - CUBE_SIZE - CUBE_GAP).max(0.0)
+}
+
+/// The toolbar items packed into rows that fit in `max_width` (frame
+/// included). An item wider than the room stays alone on its row.
+fn toolbar_rows(ui: &Ui, max_width: f32) -> Vec<Vec<ToolbarItem>> {
+    let widths: Vec<(ToolbarItem, f32)> = ToolbarItem::all()
+        .into_iter()
+        .map(|i| (i, i.width(ui)))
+        .collect();
+    pack_toolbar_rows(&widths, max_width)
+}
+
+/// [`toolbar_rows`] on known item widths.
+fn pack_toolbar_rows(widths: &[(ToolbarItem, f32)], max_width: f32) -> Vec<Vec<ToolbarItem>> {
+    // frame margins and border on both sides
+    let room = max_width - 2.0 * (TOOLBAR_MARGIN + 1.0);
+    let mut rows: Vec<Vec<ToolbarItem>> = Vec::new();
+    let mut used = 0.0;
+    for &(item, w) in widths {
+        let next_used = rows
+            .last()
+            .and_then(|row| row.last())
+            .map(|prev| used + prev.gap_to(item) + w);
+        match (rows.last_mut(), next_used) {
+            (Some(row), Some(n)) if n <= room => {
+                row.push(item);
+                used = n;
+            }
+            _ => {
+                rows.push(vec![item]);
+                used = w;
+            }
+        }
+    }
+    rows
+}
+
+/// Height of the toolbar frame with `rows` rows.
+pub(crate) fn toolbar_height(rows: usize) -> f32 {
+    let rows = rows.max(1) as f32;
+    rows * TOOLBAR_BUTTON + (rows - 1.0) * TOOLBAR_SPACING + 2.0 * (TOOLBAR_MARGIN + 1.0)
+}
+
+/// What the overlays cover of the viewport, for the framing of the scans:
+/// the toolbar along the top (and the rows it wrapped into), plus a margin
+/// all round. The caption, the cube and the legend sit in the corners, which
+/// the bounding box of an arch leaves empty.
+pub(crate) fn fit_insets(toolbar_height: f32) -> FitInsets {
+    FitInsets {
+        top: OVERLAY_INSET + toolbar_height + CUBE_GAP,
+        ..FitInsets::NONE
+    }
+    .grown(FIT_MARGIN)
+}
+
 fn separator(ui: &mut Ui) {
     let c = *colors(ui);
-    let (r, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
+    let (r, _) = ui.allocate_exact_size(vec2(SEPARATOR_WIDTH, 24.0), Sense::hover());
     ui.painter()
         .vline(r.center().x, r.y_range(), Stroke::new(1.0, c.border_subtle));
+}
+
+/// Width of a view segment with this label (selected, the wider font).
+fn text_segment_width(ui: &Ui, label: &str) -> f32 {
+    let g = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        fonts::semibold(13.0),
+        Color32::PLACEHOLDER,
+    );
+    g.size().x + 20.0
 }
 
 fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
@@ -838,7 +1009,7 @@ fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
     let g = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
-    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, 32.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, TOOLBAR_BUTTON), Sense::click());
     let l = label.to_owned();
     resp.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, &l));
     let p = ui.painter();
@@ -859,7 +1030,7 @@ fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
 
 fn icon_toggle(ui: &mut Ui, icon: &str, tooltip: &str, on: bool) -> egui::Response {
     let c = *colors(ui);
-    let (r, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(TOOLBAR_BUTTON), Sense::click());
     let tip = tooltip.to_owned();
     resp.widget_info(|| WidgetInfo::selected(Role::Button, true, on, &tip));
     let p = ui.painter();
@@ -1159,6 +1330,68 @@ fn scale_bar(ui: &mut Ui, inner: Rect, px_per_mm: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn widths(view: f32) -> Vec<(ToolbarItem, f32)> {
+        ToolbarItem::all()
+            .into_iter()
+            .map(|i| match i {
+                ToolbarItem::View(_) => (i, view),
+                ToolbarItem::Group(ToolbarGroup::Fit) => (i, 32.0),
+                ToolbarItem::Group(_) => (i, 100.0),
+            })
+            .collect()
+    }
+
+    /// Width of a packed row, frame included.
+    fn row_width(row: &[ToolbarItem], widths: &[(ToolbarItem, f32)]) -> f32 {
+        let w = |i: &ToolbarItem| widths.iter().find(|(x, _)| x == i).unwrap().1;
+        let items: f32 = row.iter().map(w).sum();
+        let gaps: f32 = row.windows(2).map(|p| p[0].gap_to(p[1])).sum();
+        items + gaps + 2.0 * (TOOLBAR_MARGIN + 1.0)
+    }
+
+    #[test]
+    fn the_toolbar_breaks_into_rows_that_fit() {
+        let w = widths(80.0);
+        // room for everything: one row, every item once, in order
+        let rows = pack_toolbar_rows(&w, 2000.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ToolbarItem::all());
+        for room in [900.0, 600.0, 420.0, 312.0, 200.0, 130.0] {
+            let rows = pack_toolbar_rows(&w, room);
+            let flat: Vec<ToolbarItem> = rows.iter().flatten().copied().collect();
+            assert_eq!(flat, ToolbarItem::all(), "nothing lost or moved at {room}");
+            for row in &rows {
+                assert!(
+                    row.len() == 1 || row_width(row, &w) <= room,
+                    "{room}: a row of {} items is {} wide",
+                    row.len(),
+                    row_width(row, &w)
+                );
+            }
+        }
+        // a longer language needs more rows, never fewer
+        let narrow = pack_toolbar_rows(&w, 312.0).len();
+        assert!(narrow > pack_toolbar_rows(&w, 900.0).len());
+        assert!(toolbar_height(narrow) > toolbar_height(1));
+    }
+
+    #[test]
+    fn the_toolbar_leaves_the_cube_its_corner() {
+        // the cube is 100 wide at the top right of an area of 920
+        assert_eq!(toolbar_max_width(920.0), 920.0 - 100.0 - 8.0);
+        assert_eq!(toolbar_max_width(50.0), 0.0);
+    }
+
+    #[test]
+    fn the_fit_keeps_clear_of_the_toolbar() {
+        let one = fit_insets(toolbar_height(1));
+        let two = fit_insets(toolbar_height(2));
+        // below the toolbar (and its inset) plus a margin; room at the sides
+        assert!(one.top >= OVERLAY_INSET + toolbar_height(1) + FIT_MARGIN);
+        assert!(two.top > one.top);
+        assert!(one.left >= FIT_MARGIN && one.right >= FIT_MARGIN && one.bottom >= FIT_MARGIN);
+    }
 
     use crate::overlay::tests::{exec, lower_demo};
     use dc_project::{AppInfo, Project};

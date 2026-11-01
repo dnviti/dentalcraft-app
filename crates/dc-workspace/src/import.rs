@@ -275,13 +275,27 @@ pub(crate) fn report_toasts(report: &Value, module_id: &str) -> Vec<ReportToast>
         ));
     }
 
+    let cause = ClearCause::of_import(report);
+    let cleared = cleared_toast(module_id, report, cause);
+    // A replacement is told once: by the module's own warning (which scan took
+    // whose place) when the report has it, with the way back appended unless
+    // the notice of the cleared results already gives it.
+    let replaced_warned = array(report, "warnings")
+        .iter()
+        .any(|w| text(w, "code") == Some("replaced"));
+
     // most serious first; the sort is stable, so equals keep the report order
     let mut warnings: Vec<(u8, Toast)> = Vec::new();
     for w in array(report, "warnings") {
-        let Some(message) = warning_message(w) else {
+        let Some(mut message) = warning_message(w) else {
             continue;
         };
-        let key = warning_title_key(text(w, "code").unwrap_or_default());
+        let code = text(w, "code").unwrap_or_default();
+        if code == "replaced" && cause == ClearCause::Replaced && cleared.is_none() {
+            message.push(' ');
+            message.push_str(&crate::t("ws-import-replaced-detail"));
+        }
+        let key = warning_title_key(code);
         let toast = Toast::new(ToastLevel::Warning, key).with_detail(message);
         warnings.push((warning_rank(w), toast));
     }
@@ -290,10 +304,9 @@ pub(crate) fn report_toasts(report: &Value, module_id: &str) -> Vec<ReportToast>
     sticky.extend(arch.into_iter().map(|(_, t)| ReportToast::new(t, true)));
 
     let mut notes: Vec<Toast> = Vec::new();
-    let cause = ClearCause::of_import(report);
-    if let Some(t) = cleared_toast(module_id, report, cause) {
+    if let Some(t) = cleared {
         notes.push(t);
-    } else if cause == ClearCause::Replaced {
+    } else if cause == ClearCause::Replaced && !replaced_warned {
         notes.push(
             Toast::new(ToastLevel::Info, "ws-toast-import-replaced")
                 .with_detail(crate::t("ws-import-replaced-detail")),
@@ -468,6 +481,41 @@ mod tests {
         // replaced without anything cleared
         let r = json!({ "imported": [{}], "replaced": true });
         assert_eq!(plain(&r, "x")[0].message_key, "ws-toast-import-replaced");
+    }
+
+    #[test]
+    fn a_replacement_is_told_once() {
+        // the module's own warning says which scan took whose place; the way
+        // back goes into it, and there is no second notice with the same title
+        let r = json!({
+            "imported": [{}],
+            "replaced": true,
+            "warnings": [warning_of("replaced", "x", "b.stl replaces a.stl.")],
+        });
+        let t = plain(&r, "x");
+        let titles: Vec<&str> = t.iter().map(|t| t.message_key.as_str()).collect();
+        assert_eq!(titles, ["ws-toast-warn-replaced", "ws-toast-imported"]);
+        let d = t[0].detail.as_deref().unwrap();
+        assert!(d.starts_with("b.stl replaces a.stl. "), "{d}");
+        assert!(d.contains("Ctrl+Z"), "{d}");
+        // with results cleared, that notice carries the way back and has its own title
+        let r = json!({
+            "imported": [{}],
+            "replaced": true,
+            "module_cleared": ["seeds"],
+            "warnings": [warning_of("replaced", "x", "b.stl replaces a.stl.")],
+        });
+        let t = plain(&r, "x");
+        assert_eq!(t[0].detail.as_deref(), Some("b.stl replaces a.stl."));
+        assert_eq!(t[1].message_key, "ws-toast-import-cleared");
+        let mut titles: Vec<String> = t.iter().map(|t| dc_i18n::tr(&t.message_key)).collect();
+        titles.sort();
+        titles.dedup();
+        assert_eq!(
+            titles.len(),
+            t.len(),
+            "two notices share a title: {titles:?}"
+        );
     }
 
     /// A report with every kind of warning, listed in the reverse of the

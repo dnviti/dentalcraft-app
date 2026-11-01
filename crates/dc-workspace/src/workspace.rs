@@ -920,7 +920,7 @@ impl Workspace {
                 Some(Ok(Err(CommandError::NotAvailable(_)))) => {
                     self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 }
-                Some(Ok(Err(e))) => self.job_error("ws-toast-command-failed", e.to_string()),
+                Some(Ok(Err(e))) => self.job_error("ws-toast-command-failed", error_text(e)),
                 Some(Err(e)) => self.job_panic(&e),
                 None => {}
             },

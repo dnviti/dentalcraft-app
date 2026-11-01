@@ -167,6 +167,11 @@ impl TimelineState {
     }
 }
 
+/// Width of the transport buttons and the space after them.
+const TRANSPORT_WIDTH: f32 = 5.0 * 36.0 + 4.0 * 4.0 + 16.0;
+/// The least room beside the transport that is worth a hint.
+const HINT_MIN_WIDTH: f32 = 160.0;
+
 /// Draws the timeline (112 pt tall area).
 pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     let c = *colors(ui);
@@ -181,59 +186,32 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     }
     let has = !model.is_empty();
 
+    // The jaw toggles keep their own room at the right (the widest labels
+    // are the Italian ones); the transport and the readout or hint share what
+    // is left, and the hint is cut with an ellipsis rather than run under them.
+    let toggle_gap = 16.0;
+    let toggles_w = [t("ws-tl-upper"), t("ws-tl-lower"), t("ws-tl-overlay0")]
+        .iter()
+        .map(|l| widgets::toggle_width(ui, l))
+        .sum::<f32>()
+        + 2.0 * toggle_gap;
+    let row_h = 36.0;
+    let mut hint_below = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        let b = |ui: &mut Ui, icon: &str, key: &str| {
-            widgets::icon_button_sized(ui, icon, t(key), 36.0, has)
-        };
-        if b(ui, ic::SKIP_BACK, "ws-tl-first").clicked() {
-            st.current = 0;
-        }
-        if b(ui, ic::CARET_LEFT, "ws-tl-prev").clicked() {
-            st.step(-1, last);
-        }
-        let play_icon = if st.playing { ic::PAUSE } else { ic::PLAY };
-        if b(ui, play_icon, "ws-tl-play").clicked() {
-            st.toggle_play(now, last);
-        }
-        if b(ui, ic::CARET_RIGHT, "ws-tl-next").clicked() {
-            st.step(1, last);
-        }
-        if b(ui, ic::SKIP_FORWARD, "ws-tl-last").clicked() {
-            st.current = last;
-        }
-        ui.add_space(16.0);
-        if has {
-            ui.label(
-                egui::RichText::new(t("ws-tl-stage"))
-                    .font(fonts::medium(13.0))
-                    .color(c.text_secondary),
-            );
-            ui.label(
-                egui::RichText::new(format!("{:02}", st.current))
-                    .font(fonts::mono_bold(20.0))
-                    .color(c.text_primary),
-            );
-            ui.label(
-                egui::RichText::new(dc_i18n::tr_args(
-                    "ws-tl-of-week",
-                    &[
-                        ("last", &last.to_string()),
-                        ("week", &model.week(st.current).to_string()),
-                    ],
-                ))
-                .font(fonts::mono(13.0))
-                .color(c.text_secondary),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new(t("ws-tl-empty"))
-                    .font(fonts::ui(13.0))
-                    .color(c.text_secondary),
-            );
-        }
+        let left_w = (ui.available_width() - toggles_w - toggle_gap).max(0.0);
+        // too little room beside the transport for the hint: it goes in the
+        // empty bar under the row instead
+        hint_below = !has && left_w - TRANSPORT_WIDTH < HINT_MIN_WIDTH;
+        ui.allocate_ui_with_layout(
+            vec2(left_w, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                transport_and_readout(ui, model, st, has, hint_below, last, now);
+            },
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 16.0;
+            ui.spacing_mut().item_spacing.x = toggle_gap;
             widgets::toggle(ui, &mut st.overlay0, t("ws-tl-overlay0"));
             widgets::toggle(ui, &mut st.lower, t("ws-tl-lower"));
             widgets::toggle(ui, &mut st.upper, t("ws-tl-upper"));
@@ -251,6 +229,88 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
             Stroke::new(1.0, c.border_subtle),
             StrokeKind::Inside,
         );
+        if hint_below {
+            let hint = t("ws-tl-empty");
+            ui.put(
+                rect.shrink2(vec2(8.0, 0.0)),
+                egui::Label::new(
+                    egui::RichText::new(hint.clone())
+                        .font(fonts::ui(12.0))
+                        .color(c.text_secondary),
+                )
+                .truncate(),
+            )
+            .on_hover_text(hint);
+        }
+    }
+}
+
+/// The left side of the timeline header: transport buttons, then the stage
+/// readout or, without stages, the hint (which gives way when short of room).
+fn transport_and_readout(
+    ui: &mut Ui,
+    model: &TimelineModel,
+    st: &mut TimelineState,
+    has: bool,
+    hint_below: bool,
+    last: u32,
+    now: f64,
+) {
+    let c = *colors(ui);
+    ui.spacing_mut().item_spacing.x = 4.0;
+    let b = |ui: &mut Ui, icon: &str, key: &str| {
+        widgets::icon_button_sized(ui, icon, t(key), 36.0, has)
+    };
+    if b(ui, ic::SKIP_BACK, "ws-tl-first").clicked() {
+        st.current = 0;
+    }
+    if b(ui, ic::CARET_LEFT, "ws-tl-prev").clicked() {
+        st.step(-1, last);
+    }
+    let play_icon = if st.playing { ic::PAUSE } else { ic::PLAY };
+    if b(ui, play_icon, "ws-tl-play").clicked() {
+        st.toggle_play(now, last);
+    }
+    if b(ui, ic::CARET_RIGHT, "ws-tl-next").clicked() {
+        st.step(1, last);
+    }
+    if b(ui, ic::SKIP_FORWARD, "ws-tl-last").clicked() {
+        st.current = last;
+    }
+    ui.add_space(16.0);
+    if has {
+        ui.label(
+            egui::RichText::new(t("ws-tl-stage"))
+                .font(fonts::medium(13.0))
+                .color(c.text_secondary),
+        );
+        ui.label(
+            egui::RichText::new(format!("{:02}", st.current))
+                .font(fonts::mono_bold(20.0))
+                .color(c.text_primary),
+        );
+        ui.label(
+            egui::RichText::new(dc_i18n::tr_args(
+                "ws-tl-of-week",
+                &[
+                    ("last", &last.to_string()),
+                    ("week", &model.week(st.current).to_string()),
+                ],
+            ))
+            .font(fonts::mono(13.0))
+            .color(c.text_secondary),
+        );
+    } else if !hint_below {
+        let hint = t("ws-tl-empty");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(hint.clone())
+                    .font(fonts::ui(13.0))
+                    .color(c.text_secondary),
+            )
+            .truncate(),
+        )
+        .on_hover_text(hint);
     }
 }
 

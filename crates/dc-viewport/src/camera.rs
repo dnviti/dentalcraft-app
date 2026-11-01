@@ -118,6 +118,61 @@ impl Ray {
     }
 }
 
+/// Parts of the viewport (in points) that floating widgets cover: the free
+/// area left inside them is where [`Camera::fit_box_in`] frames a box.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FitInsets {
+    /// From the left edge.
+    pub left: f32,
+    /// From the top edge.
+    pub top: f32,
+    /// From the right edge.
+    pub right: f32,
+    /// From the bottom edge.
+    pub bottom: f32,
+}
+
+impl FitInsets {
+    /// The whole viewport is free.
+    pub const NONE: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
+
+    /// The same inset on the four sides.
+    pub fn all(v: f32) -> Self {
+        Self {
+            left: v,
+            top: v,
+            right: v,
+            bottom: v,
+        }
+    }
+
+    /// Adds `v` on the four sides (a breathing margin round the free area).
+    pub fn grown(self, v: f32) -> Self {
+        Self {
+            left: self.left + v,
+            top: self.top + v,
+            right: self.right + v,
+            bottom: self.bottom + v,
+        }
+    }
+
+    /// No negative or non-finite values.
+    fn clamped(self) -> Self {
+        let fix = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        Self {
+            left: fix(self.left),
+            top: fix(self.top),
+            right: fix(self.right),
+            bottom: fix(self.bottom),
+        }
+    }
+}
+
 /// Bounding sphere used to place the clip planes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sphere {
@@ -275,9 +330,40 @@ impl Camera {
     /// centre moves to the box centre and the distance is the smallest that
     /// keeps every corner on screen, enlarged by `margin` (e.g. 1.1).
     pub fn fit_box(&mut self, min: Vec3, max: Vec3, aspect: f32, margin: f32) {
+        self.fit_box_in(
+            min,
+            max,
+            Vec2::new(aspect.max(1e-6), 1.0),
+            FitInsets::NONE,
+            margin,
+        );
+    }
+
+    /// Like [`Camera::fit_box`], for a viewport of `size` (points) of which
+    /// only the area inside `insets` is free: the box is framed to fill that
+    /// area (centred in it, every corner inside), so what floats over the
+    /// edges of the viewport (a toolbar, a legend) never covers it. Insets
+    /// that leave no area fall back to the whole viewport.
+    pub fn fit_box_in(&mut self, min: Vec3, max: Vec3, size: Vec2, insets: FitInsets, margin: f32) {
+        let size = size.max(Vec2::splat(1e-6));
+        let mut insets = insets.clamped();
+        let mut free = Vec2::new(
+            size.x - insets.left - insets.right,
+            size.y - insets.top - insets.bottom,
+        );
+        if free.x < 1.0 || free.y < 1.0 {
+            insets = FitInsets::NONE;
+            free = size;
+        }
         let center = (min + max) * 0.5;
         let tan_y = (self.fov_y * 0.5).tan();
-        let tan_x = tan_y * aspect.max(1e-6);
+        // what the free area spans, in units of tan(angle) at unit depth
+        let tan_fx = tan_y * free.x / size.y;
+        let tan_fy = tan_y * free.y / size.y;
+        // where the middle of the free area is, from the middle of the
+        // viewport (right and down), in the same units
+        let off_x = tan_y * (insets.left - insets.right) / size.y;
+        let off_y = tan_y * (insets.top - insets.bottom) / size.y;
         let (right, up, back) = (self.right(), self.up(), -self.forward());
         let mut d: f32 = 0.0;
         for i in 0..8 {
@@ -286,12 +372,18 @@ impl Camera {
                 if i & 2 == 0 { min.y } else { max.y },
                 if i & 4 == 0 { min.z } else { max.z },
             ) - center;
-            let (x, y, z) = (
-                p.dot(right).abs() * margin,
-                p.dot(up).abs() * margin,
-                p.dot(back),
-            );
-            let need = (x / tan_x).max(y / tan_y);
+            let z = p.dot(back);
+            // The box centre sits at the middle of the free area, which is
+            // `off` away from the screen centre at any depth along the line
+            // of sight to it; a corner nearer the eye by z moves with it.
+            let (x, y) = match self.projection {
+                Projection::Perspective => (
+                    (p.dot(right) + off_x * z).abs() * margin,
+                    (p.dot(up) - off_y * z).abs() * margin,
+                ),
+                Projection::Orthographic => (p.dot(right).abs() * margin, p.dot(up).abs() * margin),
+            };
+            let need = (x / tan_fx).max(y / tan_fy);
             d = d.max(match self.projection {
                 // the corner at depth z (towards the eye) must fit the frustum
                 Projection::Perspective => need + z,
@@ -302,8 +394,12 @@ impl Camera {
             // a point: keep a sensible distance
             d = self.distance.min(10.0);
         }
-        self.target = center;
-        self.distance = d.clamp(MIN_DISTANCE, MAX_DISTANCE);
+        let d = d.clamp(MIN_DISTANCE, MAX_DISTANCE);
+        // the target is the centre of the screen: put the box centre where the
+        // middle of the free area is
+        // (a unit of tan(angle) is `d` long at the target depth, both projections)
+        self.target = center - right * (off_x * d) + up * (off_y * d);
+        self.distance = d;
     }
 
     /// Turntable orbit: `yaw` about the world Z axis, `pitch` about the
@@ -588,6 +684,94 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fit_box_in_keeps_the_box_in_the_free_area() {
+        let (min, max) = (Vec3::new(-30.0, -25.0, -5.0), Vec3::new(30.0, 20.0, 12.0));
+        let size = Vec2::new(900.0, 600.0);
+        let insets = FitInsets {
+            left: 20.0,
+            top: 110.0,
+            right: 140.0,
+            bottom: 30.0,
+        };
+        let bounds = Some(Sphere {
+            center: (min + max) * 0.5,
+            radius: (max - min).length() * 0.5,
+        });
+        for v in StdView::ALL {
+            for proj in [Projection::Perspective, Projection::Orthographic] {
+                let mut c = view_cam(v);
+                c.projection = proj;
+                c.fit_box_in(min, max, size, insets, 1.0);
+                let aspect = size.x / size.y;
+                // free area in NDC (x right, y up)
+                let x0 = -1.0 + 2.0 * insets.left / size.x;
+                let x1 = 1.0 - 2.0 * insets.right / size.x;
+                let y0 = -1.0 + 2.0 * insets.bottom / size.y;
+                let y1 = 1.0 - 2.0 * insets.top / size.y;
+                let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                let mut slack = f32::MAX;
+                for i in 0..8 {
+                    let p = Vec3::new(
+                        if i & 1 == 0 { min.x } else { max.x },
+                        if i & 2 == 0 { min.y } else { max.y },
+                        if i & 4 == 0 { min.z } else { max.z },
+                    );
+                    let n = c.project_ndc(p, aspect, bounds);
+                    lo = lo.min(n.truncate());
+                    hi = hi.max(n.truncate());
+                    slack = slack
+                        .min(n.x - x0)
+                        .min(x1 - n.x)
+                        .min(n.y - y0)
+                        .min(y1 - n.y);
+                    assert!(
+                        n.x >= x0 - EPS && n.x <= x1 + EPS && n.y >= y0 - EPS && n.y <= y1 + EPS,
+                        "{v:?} {proj:?} corner {n} outside [{x0},{x1}]x[{y0},{y1}]"
+                    );
+                }
+                // tight: a corner touches the border of the free area
+                assert!(slack.abs() < 1e-3, "{v:?} {proj:?} slack {slack}");
+                if proj == Projection::Orthographic {
+                    // centred in the free area
+                    let mid = (lo + hi) * 0.5;
+                    assert!((mid.x - (x0 + x1) * 0.5).abs() < 1e-3, "{v:?} {mid}");
+                    assert!((mid.y - (y0 + y1) * 0.5).abs() < 1e-3, "{v:?} {mid}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fit_box_in_without_insets_is_fit_box() {
+        let (min, max) = (Vec3::new(-30.0, -25.0, -5.0), Vec3::new(30.0, 20.0, 12.0));
+        for proj in [Projection::Perspective, Projection::Orthographic] {
+            let mut a = view_cam(StdView::Front);
+            a.projection = proj;
+            let mut b = a;
+            a.fit_box(min, max, 1.5, 1.05);
+            b.fit_box_in(min, max, Vec2::new(900.0, 600.0), FitInsets::NONE, 1.05);
+            assert!((a.distance - b.distance).abs() < 1e-3, "{proj:?}");
+            assert!((a.target - b.target).length() < 1e-4, "{proj:?}");
+        }
+    }
+
+    #[test]
+    fn fit_box_in_with_no_free_area_uses_the_whole_viewport() {
+        let (min, max) = (Vec3::splat(-10.0), Vec3::splat(10.0));
+        let mut a = view_cam(StdView::Front);
+        let mut b = a;
+        a.fit_box(min, max, 2.0, 1.0);
+        b.fit_box_in(
+            min,
+            max,
+            Vec2::new(800.0, 400.0),
+            FitInsets::all(500.0),
+            1.0,
+        );
+        assert!((a.distance - b.distance).abs() < 1e-3);
     }
 
     #[test]
