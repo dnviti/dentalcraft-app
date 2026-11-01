@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use dc_case::ScanRole;
-use dc_case::import::{ImportError, prepare};
+use dc_case::import::{ImportError, PrepareOptions, WarningCode, prepare_with};
 use dc_command::{CancelToken, JobCtx};
 use dc_mesh::Units;
 use dc_ui::widgets::{self, BadgeKind, Button};
@@ -36,8 +36,12 @@ pub struct ScanFacts {
     pub bytes: u64,
     /// Triangles after the cleanup.
     pub triangles: usize,
-    /// Unit the file was in (converted to millimetres on import).
+    /// Unit the file was in (converted to millimetres on import). A file read
+    /// with [`PrepareOptions::KEEP_UNITS`] (a bite) stays in millimetres.
     pub units: Units,
+    /// Symbol of the unit a kept-as-it-is file looks to be in (`cm`) when its
+    /// size does not fit millimetres: the import's `units_suspect` warning.
+    pub units_suspect: Option<String>,
 }
 
 /// State of the probe of one row.
@@ -51,18 +55,40 @@ pub enum Probe {
     Failed(ImportError),
 }
 
-/// The probe: reads a file like the import does and keeps the facts.
-pub type ProbeFn = dyn Fn(&Path, &JobCtx) -> Result<ScanFacts, ImportError> + Send + Sync;
+/// The probe: reads a file like the import does, with the options the import
+/// will use for it, and keeps the facts.
+pub type ProbeFn =
+    dyn Fn(&Path, &PrepareOptions, &JobCtx) -> Result<ScanFacts, ImportError> + Send + Sync;
 
-/// The probe of the application: the import's own `prepare`.
-pub fn probe_file(path: &Path, ctx: &JobCtx) -> Result<ScanFacts, ImportError> {
-    let scan = prepare(path, ctx)?;
+/// The probe of the application: the import's own `prepare_with`.
+pub fn probe_file(
+    path: &Path,
+    options: &PrepareOptions,
+    ctx: &JobCtx,
+) -> Result<ScanFacts, ImportError> {
+    let scan = prepare_with(path, options, ctx)?;
     let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+    let units_suspect = scan
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::UnitsSuspect)
+        .and_then(|w| w.args.get("units").cloned());
     Ok(ScanFacts {
         bytes,
         triangles: scan.mesh.face_count(),
         units: scan.source_units,
+        units_suspect,
     })
+}
+
+/// How the import reads a file of this role: a bite scan keeps its units
+/// (the plugin never rescales those), every other scan is converted.
+fn options_for(role: Option<ScanRole>) -> PrepareOptions {
+    if role == Some(ScanRole::Bite) {
+        PrepareOptions::KEEP_UNITS
+    } else {
+        PrepareOptions::default()
+    }
 }
 
 type ProbeResult = (u64, Result<ScanFacts, ImportError>);
@@ -94,9 +120,10 @@ impl Prober {
         }
     }
 
-    /// Starts the probe of `path` on its own thread; returns the row id, the
-    /// token that stops it and the state to show until the answer comes.
-    fn start(&mut self, path: &Path) -> (u64, CancelToken, Probe) {
+    /// Starts the probe of `path`, read with `options`, on its own thread;
+    /// returns the row id, the token that stops it and the state to show
+    /// until the answer comes.
+    fn start(&mut self, path: &Path, options: PrepareOptions) -> (u64, CancelToken, Probe) {
         let id = self.next_id;
         self.next_id += 1;
         let ctx = JobCtx::detached();
@@ -105,7 +132,7 @@ impl Prober {
         let spawned = std::thread::Builder::new()
             .name("dc-scan-probe".into())
             .spawn(move || {
-                let _ = tx.send((id, run(&file, &ctx)));
+                let _ = tx.send((id, run(&file, &options, &ctx)));
             });
         let probe = match spawned {
             Ok(_) => Probe::Pending,
@@ -138,6 +165,9 @@ pub struct ScanEntry {
     pub choice: Option<ScanRole>,
     /// What the probe found.
     pub probe: Probe,
+    /// `true` when the probe reads the file the way a bite is read (units
+    /// kept): what the import will do when the row's role is bite.
+    probed_as_bite: bool,
     cancel: CancelToken,
 }
 
@@ -153,6 +183,12 @@ impl ScanEntry {
     /// else none (auto).
     pub fn shown(&self) -> Option<ScanRole> {
         self.choice.or(self.hint)
+    }
+
+    /// `true` when the import will read this row as a bite scan (the user's
+    /// choice, else the name's hint), and so keep its units.
+    pub fn is_bite(&self) -> bool {
+        self.shown() == Some(ScanRole::Bite)
     }
 
     /// Next value of the badge: Auto, Upper, Lower, Bite, Auto. A row whose
@@ -258,16 +294,39 @@ impl NewProjectState {
             let hint = p
                 .file_name()
                 .and_then(|n| dc_case::role_from_name(&n.to_string_lossy()));
-            let (id, cancel, probe) = self.prober.start(&p);
+            let as_bite = hint == Some(ScanRole::Bite);
+            let (id, cancel, probe) = self.prober.start(&p, options_for(hint));
             self.scans.push(ScanEntry {
                 id,
                 path: p,
                 hint,
                 choice: None,
                 probe,
+                probed_as_bite: as_bite,
                 cancel,
             });
         }
+    }
+
+    /// Gives row `index` the next value of its badge. When that makes it a
+    /// bite row, or stops it being one, the file is probed again the way the
+    /// import will read it (a bite keeps its units); the answer of the probe
+    /// it replaces is dropped.
+    pub fn cycle_scan(&mut self, index: usize) {
+        let Some(row) = self.scans.get_mut(index) else {
+            return;
+        };
+        row.cycle();
+        if row.is_bite() == row.probed_as_bite {
+            return;
+        }
+        row.cancel.cancel();
+        let as_bite = row.is_bite();
+        let (id, cancel, probe) = self.prober.start(&row.path, options_for(row.shown()));
+        row.id = id;
+        row.cancel = cancel;
+        row.probe = probe;
+        row.probed_as_bite = as_bite;
     }
 
     /// Removes row `index`; its probe is cancelled and a late answer is
@@ -449,6 +508,20 @@ fn probe_line(ui: &mut Ui, c: &Palette, probe: &Probe) {
                 .font(fonts::mono(11.0))
                 .color(c.text_secondary),
             );
+            if let Some(looks) = &f.units_suspect {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{}  {}",
+                            icons::WARNING,
+                            t!("np-scan-units-suspect", units = looks.clone())
+                        ))
+                        .font(fonts::ui(12.0))
+                        .color(c.status_warning),
+                    )
+                    .wrap(),
+                );
+            }
         }
         Probe::Failed(e) => {
             ui.add(
@@ -891,7 +964,7 @@ impl DentalCraftApp {
             self.new_project.remove_scan(i);
         }
         if let Some(i) = cycle {
-            self.new_project.scans[i].cycle();
+            self.new_project.cycle_scan(i);
         }
         ui.add_space(8.0);
         // preview
@@ -991,11 +1064,12 @@ mod tests {
 
     /// A probe that answers at once without touching the disk.
     fn instant() -> Arc<ProbeFn> {
-        Arc::new(|_, _| {
+        Arc::new(|_, _, _| {
             Ok(ScanFacts {
                 bytes: 1_048_576,
                 triangles: 12,
                 units: Units::Millimeters,
+                units_suspect: None,
             })
         })
     }
@@ -1162,13 +1236,14 @@ mod tests {
         let ui_thread = std::thread::current().id();
         let seen = Arc::new(Mutex::new(None));
         let seen_in = seen.clone();
-        let probe: Arc<ProbeFn> = Arc::new(move |_, _| {
+        let probe: Arc<ProbeFn> = Arc::new(move |_, _, _| {
             *seen_in.lock().unwrap() = Some(std::thread::current().id());
             gate.lock().unwrap().recv().ok();
             Ok(ScanFacts {
                 bytes: 10,
                 triangles: 3,
                 units: Units::Centimeters,
+                units_suspect: None,
             })
         });
         let mut s = NewProjectState::with_probe(Path::new("/p"), probe);
@@ -1193,7 +1268,7 @@ mod tests {
         let gate = Mutex::new(gate);
         let cancelled_seen = Arc::new(Mutex::new(false));
         let flag = cancelled_seen.clone();
-        let probe: Arc<ProbeFn> = Arc::new(move |path, ctx| {
+        let probe: Arc<ProbeFn> = Arc::new(move |path, _, ctx| {
             if path.ends_with("slow.stl") {
                 gate.lock().unwrap().recv().ok();
                 *flag.lock().unwrap() = ctx.is_cancelled();
@@ -1202,6 +1277,7 @@ mod tests {
                 bytes: 1,
                 triangles: 1,
                 units: Units::Millimeters,
+                units_suspect: None,
             })
         });
         let mut s = NewProjectState::with_probe(Path::new("/p"), probe);
@@ -1258,6 +1334,180 @@ mod tests {
         }
         // the form still creates: the import reports the bad rows
         assert_eq!(s.request().unwrap().scans.len(), 3);
+    }
+
+    /// A probe that records the options and the name of every read, and
+    /// answers like the real one: a file read with the units kept is in mm.
+    type Reads = Arc<Mutex<Vec<(String, bool)>>>;
+
+    fn recording() -> (Arc<ProbeFn>, Reads) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let probe: Arc<ProbeFn> = Arc::new(move |path, options, _| {
+            log.lock()
+                .unwrap()
+                .push((file_name(path), options.normalize_units));
+            Ok(ScanFacts {
+                bytes: 1,
+                triangles: 1,
+                units: if options.normalize_units {
+                    Units::Centimeters
+                } else {
+                    Units::Millimeters
+                },
+                units_suspect: (!options.normalize_units).then(|| "cm".to_owned()),
+            })
+        });
+        (probe, seen)
+    }
+
+    fn reads(seen: &Mutex<Vec<(String, bool)>>) -> Vec<(String, bool)> {
+        let mut v = seen.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_bite_row_is_probed_with_the_units_kept() {
+        let (probe, seen) = recording();
+        let mut s = NewProjectState::with_probe(Path::new("/p"), probe);
+        s.add_scans(vec![
+            PathBuf::from("/x/bite.stl"),
+            PathBuf::from("/x/lower.stl"),
+            PathBuf::from("/x/scan.stl"),
+        ]);
+        wait_probes(&mut s);
+        // the file name sets the bite role: the import keeps its units, so
+        // does the probe; the others are converted
+        assert_eq!(
+            reads(&seen),
+            [
+                ("bite.stl".to_owned(), false),
+                ("lower.stl".to_owned(), true),
+                ("scan.stl".to_owned(), true)
+            ]
+        );
+        let Probe::Ready(f) = &s.scans[0].probe else {
+            panic!("{:?}", s.scans[0].probe)
+        };
+        assert_eq!(units_text(f.units), "mm");
+        assert_eq!(f.units_suspect.as_deref(), Some("cm"));
+        let Probe::Ready(f) = &s.scans[1].probe else {
+            panic!()
+        };
+        assert_eq!(f.units, Units::Centimeters);
+        assert_eq!(f.units_suspect, None);
+    }
+
+    #[test]
+    fn the_badge_going_to_or_from_bite_probes_the_row_again() {
+        let (probe, seen) = recording();
+        let mut s = NewProjectState::with_probe(Path::new("/p"), probe);
+        s.add_scans(vec![PathBuf::from("/x/scan.stl")]);
+        wait_probes(&mut s);
+        let count = || seen.lock().unwrap().len();
+        assert_eq!(count(), 1);
+        // Auto -> Upper -> Lower: still converted, no new read
+        s.cycle_scan(0);
+        s.cycle_scan(0);
+        wait_probes(&mut s);
+        assert_eq!(count(), 1);
+        // Lower -> Bite: read again with the units kept
+        s.cycle_scan(0);
+        assert_eq!(s.scans[0].probe, Probe::Pending);
+        wait_probes(&mut s);
+        assert_eq!(count(), 2);
+        assert_eq!(seen.lock().unwrap()[1], ("scan.stl".to_owned(), false));
+        assert!(matches!(&s.scans[0].probe, Probe::Ready(f) if f.units == Units::Millimeters));
+        // Bite -> Auto: back to the conversion
+        s.cycle_scan(0);
+        wait_probes(&mut s);
+        assert_eq!(seen.lock().unwrap()[2], ("scan.stl".to_owned(), true));
+        assert!(matches!(&s.scans[0].probe, Probe::Ready(f) if f.units == Units::Centimeters));
+        // a name that says bite: leaving it for Upper reads it converted
+        s.add_scans(vec![PathBuf::from("/x/bite.stl")]);
+        wait_probes(&mut s);
+        let before = count();
+        s.cycle_scan(1); // bite hint -> Upper
+        wait_probes(&mut s);
+        assert_eq!(count(), before + 1);
+        assert_eq!(
+            seen.lock().unwrap().last().unwrap(),
+            &("bite.stl".to_owned(), true)
+        );
+        assert!(!s.scans[1].is_bite());
+    }
+
+    #[test]
+    fn a_stale_probe_never_overwrites_the_new_one() {
+        // the first read of the row is slow and answers last
+        let (release, gate) = sync_channel::<()>(0);
+        let gate = Mutex::new(gate);
+        let probe: Arc<ProbeFn> = Arc::new(move |_, options, ctx| {
+            if options.normalize_units {
+                gate.lock().unwrap().recv().ok();
+                assert!(ctx.is_cancelled(), "the replaced probe is cancelled");
+            }
+            Ok(ScanFacts {
+                bytes: 1,
+                triangles: 1,
+                units: if options.normalize_units {
+                    Units::Centimeters
+                } else {
+                    Units::Millimeters
+                },
+                units_suspect: None,
+            })
+        });
+        let mut s = NewProjectState::with_probe(Path::new("/p"), probe);
+        s.add_scans(vec![PathBuf::from("/x/scan.stl")]);
+        s.cycle_scan(0);
+        s.cycle_scan(0);
+        s.cycle_scan(0); // Bite: the converted read is stale
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while s.scans[0].probe == Probe::Pending {
+            assert!(Instant::now() < deadline);
+            s.poll_probes();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(&s.scans[0].probe, Probe::Ready(f) if f.units == Units::Millimeters));
+        release.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!s.poll_probes(), "the stale answer is dropped");
+        assert!(matches!(&s.scans[0].probe, Probe::Ready(f) if f.units == Units::Millimeters));
+    }
+
+    #[test]
+    fn the_real_probe_keeps_the_units_of_a_bite_and_says_when_they_look_wrong() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bite = tmp.path().join("bite.stl");
+        let other = tmp.path().join("scan.stl");
+        // 10 units wide: centimetres for an arch, a suspect size for a bite
+        std::fs::write(&bite, TRI_STL).unwrap();
+        std::fs::write(&other, TRI_STL).unwrap();
+        let mut s = NewProjectState::new(Path::new("/p"));
+        s.add_scans(vec![bite, other]);
+        wait_probes(&mut s);
+        let Probe::Ready(b) = &s.scans[0].probe else {
+            panic!("{:?}", s.scans[0].probe)
+        };
+        assert_eq!(b.units, Units::Millimeters);
+        assert_eq!(b.units_suspect.as_deref(), Some("cm"));
+        let Probe::Ready(o) = &s.scans[1].probe else {
+            panic!("{:?}", s.scans[1].probe)
+        };
+        assert_eq!(o.units, Units::Centimeters);
+        assert_eq!(o.units_suspect, None);
+        // the same file as an upper arch: converted
+        s.cycle_scan(0); // bite hint -> Upper
+        wait_probes(&mut s);
+        let Probe::Ready(b) = &s.scans[0].probe else {
+            panic!()
+        };
+        assert_eq!(
+            (b.units, b.units_suspect.clone()),
+            (Units::Centimeters, None)
+        );
     }
 
     #[test]

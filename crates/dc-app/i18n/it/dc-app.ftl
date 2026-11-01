@@ -273,6 +273,7 @@ np-role-auto = Auto
 np-role-auto-tip = Il nome non dice nulla, quindi la forma della scansione decide quando crei il progetto. Fai clic per scegliere.
 np-scan-reading = Lettura del file…
 np-scan-facts = { $size } MB · { $triangles } triangoli · { $units }
+np-scan-units-suspect = Le dimensioni sembrano in { $units }, ma una scansione di morso non viene mai ridimensionata: è letta come millimetri. Controlla il file.
 np-preview = Arcata di esempio per { $name }. L'anteprima reale della mesh non è ancora pronta.
 np-preview-empty = Qui compare l'anteprima della scansione.
 np-change-location = Cambia posizione

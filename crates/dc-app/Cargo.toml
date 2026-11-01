@@ -54,7 +54,9 @@ webbrowser.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+dca-algo.workspace = true
 egui_kittest.workspace = true
+glam.workspace = true
 tempfile.workspace = true
 
 [lints]

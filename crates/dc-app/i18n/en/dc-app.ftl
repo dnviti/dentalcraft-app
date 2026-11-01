@@ -273,6 +273,7 @@ np-role-auto = Auto
 np-role-auto-tip = The name says nothing, so the shape of the scan decides when you create the project. Click to choose.
 np-scan-reading = Reading the file…
 np-scan-facts = { $size } MB · { $triangles } triangles · { $units }
+np-scan-units-suspect = The size looks like { $units }, but a bite scan is never rescaled: it is read as millimetres. Check the file.
 np-preview = Placeholder arch for { $name }. The real mesh preview is not built yet.
 np-preview-empty = The scan preview shows here.
 np-change-location = Change location

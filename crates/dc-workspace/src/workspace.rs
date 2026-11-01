@@ -59,6 +59,34 @@ pub(crate) struct ShownToast {
     pub toast: Toast,
     /// Time (egui seconds) it was first drawn.
     pub born: Option<f64>,
+    /// Stays until the user closes it (errors always do), and is always
+    /// drawn: an arch warning must not time out or be pushed off the stack.
+    pub sticky: bool,
+}
+
+impl ShownToast {
+    /// `true` when it never times out.
+    pub fn stays(&self) -> bool {
+        self.sticky || self.toast.level == ToastLevel::Error
+    }
+}
+
+/// Indices of the notifications to draw, oldest first: every one that stays
+/// until closed, plus the newest of the others up to `max` in all. The bound
+/// never hides a sticky one.
+pub(crate) fn visible_toasts(toasts: &[ShownToast], max: usize) -> Vec<usize> {
+    let stay = toasts.iter().filter(|t| t.stays()).count();
+    let mut room = max.saturating_sub(stay);
+    let mut keep = vec![false; toasts.len()];
+    for (i, t) in toasts.iter().enumerate().rev() {
+        if t.stays() {
+            keep[i] = true;
+        } else if room > 0 {
+            keep[i] = true;
+            room -= 1;
+        }
+    }
+    (0..toasts.len()).filter(|&i| keep[i]).collect()
 }
 
 /// A registered command whose JSON output is shown to the user.
@@ -343,6 +371,16 @@ impl Workspace {
             .collect()
     }
 
+    /// i18n keys of the notifications currently listed that stay until the
+    /// user closes them (oldest first): errors and the arch warnings.
+    pub fn sticky_toast_keys(&self) -> Vec<String> {
+        self.toasts
+            .iter()
+            .filter(|t| t.stays())
+            .map(|t| t.toast.message_key.clone())
+            .collect()
+    }
+
     /// Untranslated detail of the notifications currently listed (oldest
     /// first), next to their i18n keys: the sentence an import warning or a
     /// failed file carries.
@@ -575,11 +613,14 @@ impl Workspace {
         });
     }
 
-    /// Shows what an import did, as notifications: one per failed file with
-    /// its reason, a notice when a scan was replaced or a module cleared
-    /// results (it lists only what was cleared), one per warning with its
-    /// translated `message`, and a line with the number of scans added. More
-    /// than a handful are grouped in one line.
+    /// Shows what an import did, as notifications, most serious first: one
+    /// per failed file with its reason; one per arch warning (role guessed,
+    /// to check, taken or not recognised); a notice when a scan was replaced
+    /// or a module cleared results (it lists only what was affected); the
+    /// units warnings; the other warnings, each with its translated
+    /// `message`; and a line with the number of scans added. Failed files
+    /// and arch warnings are never cut or grouped and stay until closed; the
+    /// rest times out and, past a handful, is grouped in one line.
     ///
     /// `report` is the JSON output of the import command (module
     /// `import-scans` or `case.import`): the arrays `imported` (the scans
@@ -587,14 +628,19 @@ impl Workspace {
     /// `message`), `module_cleared` (ids), and `replaced` (bool). Missing
     /// fields count as empty, so a serialized `ImportReport` works too.
     pub fn show_import_report(&mut self, report: &Value) {
-        for toast in import::report_toasts(report, self.module.id()) {
-            self.toast(toast);
+        for t in import::report_toasts(report, self.module.id()) {
+            if t.sticky {
+                self.toast_sticky(t.toast);
+            } else {
+                self.toast(t.toast);
+            }
         }
     }
 
-    /// Notification of a role change: what the module cleared, if anything.
+    /// Notification of a role change: what the module cleared or marked to
+    /// be redone, if anything.
     fn show_role_report(&mut self, report: &Value) {
-        if let Some(toast) = import::cleared_toast(self.module.id(), report) {
+        if let Some(toast) = import::role_changed_toast(self.module.id(), report) {
             self.toast(toast);
         }
     }
@@ -708,7 +754,20 @@ impl Workspace {
     }
 
     pub(crate) fn toast(&mut self, toast: Toast) {
-        self.toasts.push(ShownToast { toast, born: None });
+        self.toasts.push(ShownToast {
+            toast,
+            born: None,
+            sticky: false,
+        });
+    }
+
+    /// A notification that stays until the user closes it.
+    pub(crate) fn toast_sticky(&mut self, toast: Toast) {
+        self.toasts.push(ShownToast {
+            toast,
+            born: None,
+            sticky: true,
+        });
     }
 
     pub(crate) fn module_ctx_run(&mut self, f: impl FnOnce(&mut dyn Module, &mut ModuleCtx<'_>)) {
@@ -910,5 +969,51 @@ fn error_text(e: CommandError) -> String {
     match e {
         CommandError::Failed(m) | CommandError::Invalid(m) => m,
         e => e.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(level: ToastLevel, sticky: bool) -> ShownToast {
+        ShownToast {
+            toast: Toast::new(level, "k"),
+            born: None,
+            sticky,
+        }
+    }
+
+    #[test]
+    fn errors_and_sticky_toasts_stay_until_closed() {
+        assert!(shown(ToastLevel::Error, false).stays());
+        assert!(shown(ToastLevel::Warning, true).stays());
+        assert!(!shown(ToastLevel::Warning, false).stays());
+        assert!(!shown(ToastLevel::Success, false).stays());
+    }
+
+    #[test]
+    fn the_bound_never_hides_a_sticky_toast() {
+        use ToastLevel::{Info, Warning};
+        // plain, sticky, plain, plain, plain, plain: four fit, the sticky one counts
+        let list = [
+            shown(Info, false),
+            shown(Warning, true),
+            shown(Info, false),
+            shown(Info, false),
+            shown(Info, false),
+            shown(Info, false),
+        ];
+        assert_eq!(visible_toasts(&list, 4), [1, 3, 4, 5]);
+        // many sticky ones go past the bound, and no plain one is left
+        let list: Vec<_> = (0..7)
+            .map(|n| shown(Warning, n != 6))
+            .chain([shown(Info, false)])
+            .collect();
+        let v = visible_toasts(&list, 4);
+        assert_eq!(v, [0, 1, 2, 3, 4, 5]);
+        // below the bound everything is drawn
+        assert_eq!(visible_toasts(&list[..2], 4), [0, 1]);
+        assert!(visible_toasts(&[], 4).is_empty());
     }
 }

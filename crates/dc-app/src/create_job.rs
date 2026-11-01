@@ -449,6 +449,104 @@ mod tests {
         }
     }
 
+    /// The lower demo arch with a closed base inside the arch, as a model has:
+    /// the plugin flags the cue as "to be checked" (the same mesh the aligners
+    /// import tests use). A synthetic model, never a patient file.
+    fn lower_on_a_model_base() -> dc_mesh::TriMesh {
+        use dca_algo::{anatomy::Arch, demo};
+        use glam::Vec3;
+        let params = demo::Params {
+            arch: Arch::Lower,
+            seed: 1,
+            ..demo::Params::default()
+        };
+        let mut mesh = demo::run(&params).mesh;
+        mesh.vertex_labels = None;
+        let bb = mesh.aabb().unwrap();
+        let (lo, hi) = (bb.min, bb.max);
+        let n = 40u32;
+        let first = mesh.positions.len() as u32;
+        let z = lo.z + 0.2 * (hi.z - lo.z);
+        for i in 0..n {
+            for j in 0..n {
+                let x = lo.x + (hi.x - lo.x) * (0.15 + 0.7 * i as f32 / (n - 1) as f32);
+                let y = lo.y + (hi.y - lo.y) * (0.05 + 0.9 * j as f32 / (n - 1) as f32);
+                mesh.positions.push(Vec3::new(x, y, z));
+            }
+        }
+        for i in 0..n - 1 {
+            for j in 0..n - 1 {
+                let a = first + i * n + j;
+                mesh.tris.push([a, a + 1, a + n]);
+                mesh.tris.push([a + 1, a + n + 1, a + n]);
+            }
+        }
+        mesh
+    }
+
+    #[test]
+    fn a_scan_recognised_from_a_weak_cue_reaches_the_workspace_to_check() {
+        use dc_workspace::Workspace;
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan_a.stl");
+        dc_mesh::io::write(&path, &lower_on_a_model_base(), dc_mesh::MeshFormat::Stl).unwrap();
+        // no role from the user and none in the name: the module recognises it
+        let req = request(dir.path(), vec![(path, None)]);
+        let created = run_quiet(&req).unwrap();
+        let scan = &created.project.case_state.case.scans[0];
+        assert_eq!(
+            (scan.role, scan.role_source),
+            (ScanRole::Lower, RoleSource::DetectedUnsure)
+        );
+
+        // the app shows the report of the base state: the arch warning stays
+        let report = base_state_report(created.report);
+        let mut ws = Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(created.project),
+            None,
+        );
+        ws.show_import_report(&report);
+        ws.activate("aligners.case.import-scans");
+        assert_eq!(ws.toast_keys()[0], "ws-toast-warn-provisional");
+        assert_eq!(ws.sticky_toast_keys(), ["ws-toast-warn-provisional"]);
+        let note = ws.toast_details()[0].1.clone().unwrap();
+        assert!(
+            note.contains("scan_a.stl") && note.contains("weak"),
+            "{note}"
+        );
+
+        // the scans panel marks it, with Confirm
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1920.0, 1080.0))
+            .with_context_setup(|c| dc_ui::theme::install(c, dc_ui::Mode::Dark))
+            .build_ui_state(
+                |ui, ws: &mut Workspace| {
+                    let _ = ws.show(ui);
+                },
+                ws,
+            );
+        h.run();
+        assert!(h.query_by_label("Detected, to check").is_some());
+        // Confirm is one undo step
+        h.get_by_label("Confirm").click();
+        h.step();
+        assert!(
+            h.state_mut()
+                .wait_for_jobs(std::time::Duration::from_secs(20))
+        );
+        h.run();
+        let source = |h: &Harness<'_, Workspace>| h.state().state().case.scans[0].role_source;
+        assert_eq!(source(&h), RoleSource::Explicit);
+        assert!(h.query_by_label("Detected, to check").is_none());
+        assert!(h.state_mut().undo());
+        assert_eq!(source(&h), RoleSource::DetectedUnsure);
+        assert!(!h.state_mut().undo(), "nothing else to undo");
+    }
+
     #[test]
     fn stems() {
         assert_eq!(file_stem("AL-2026-0142", "BIA-07"), "AL-2026-0142_BIA-07");
