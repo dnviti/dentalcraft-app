@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dc_case::CaseState;
 use dc_command::{CommandError, JobCtx};
@@ -31,7 +31,8 @@ const OTHER: &str = "aligners.teeth.build";
 /// for a cancel. The tests share them: they run one at a time.
 static CALLS: Mutex<Vec<(&'static str, Value)>> = Mutex::new(Vec::new());
 static SLOW: AtomicBool = AtomicBool::new(false);
-/// The export does not look at the cancel flag for a while (a long step).
+/// The export does not look at the cancel flag until a test clears this (a
+/// long step), so the test does not race the clock on a slow machine.
 static STUBBORN: AtomicBool = AtomicBool::new(false);
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 static METHOD: Mutex<&'static str> = Mutex::new("virtual_bite");
@@ -54,8 +55,9 @@ fn run_export(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((EXPORT, params.clone()));
-    if STUBBORN.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(600));
+    let held = Instant::now();
+    while STUBBORN.load(Ordering::SeqCst) && held.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(5));
     }
     if SLOW.load(Ordering::SeqCst) {
         // a long job: it stops at the first look at the cancel flag
@@ -400,6 +402,7 @@ fn after_the_cross_the_status_bar_says_it_is_stopping_until_the_job_ends() {
     assert!(h.state().is_busy());
     assert!(h.query_by_label_contains("Stopping at the end").is_some());
     assert!(h.query_by_label("Cancel the background job").is_none());
+    STUBBORN.store(false, Ordering::SeqCst);
     assert!(h.state_mut().wait_for_jobs(WAIT));
     h.run();
     assert!(h.state().toast_keys().contains(&"job-cancelled".to_owned()));
