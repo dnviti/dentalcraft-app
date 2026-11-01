@@ -370,6 +370,7 @@ impl Workspace {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.module_ctx_run(|m, ctx| m.inspector(ui, ctx));
+                self.leaf_inspector(ui, item.as_ref());
                 if item
                     .as_ref()
                     .and_then(|it| it.command_id())
@@ -564,7 +565,9 @@ impl Workspace {
                 if let Some((k, job)) = self.running.iter().enumerate().next() {
                     widgets::divider_v(ui, 16.0);
                     let prog = job.progress();
+                    let cancelling = job.cancelling();
                     if job.cancellable()
+                        && !cancelling
                         && widgets::icon_button_sized(ui, ic::X, t("ws-cancel-job"), 20.0, true)
                             .clicked()
                     {
@@ -572,10 +575,14 @@ impl Workspace {
                     }
                     ui.label(mono(format!("{:.0} %", prog.fraction * 100.0)));
                     widgets::progress_bar(ui, Some(prog.fraction), 120.0);
-                    let label = prog
-                        .message_key
-                        .as_deref()
-                        .map_or_else(|| t(job.name_key), t);
+                    // the job, then the step it is on when the command says
+                    let name = t(job.name_key);
+                    let label = match prog.message_key.as_deref().map(t) {
+                        // asked to stop: it ends at the end of the step it is in
+                        _ if cancelling => format!("{name} \u{b7} {}", t("ws-job-stopping")),
+                        Some(step) if step != name => format!("{name} \u{b7} {step}"),
+                        _ => name,
+                    };
                     ui.label(
                         RichText::new(label)
                             .font(fonts::ui(12.0))
@@ -668,7 +675,10 @@ impl Workspace {
                                 );
                                 ui.end_row();
                             }
-                            for (id, text) in &self.shortcut_text {
+                            // the keys of the module's tools, in key order
+                            let mut keys: Vec<_> = self.shortcut_text.iter().collect();
+                            keys.sort_by(|a, b| a.1.cmp(b.1));
+                            for (id, text) in keys {
                                 if let Some(d) = self.commands.iter().find(|d| d.id == *id) {
                                     ui.label(
                                         RichText::new(text)
