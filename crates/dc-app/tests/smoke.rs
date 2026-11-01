@@ -96,7 +96,7 @@ fn new_project_requires_case_alias_and_scans() {
     h.run_steps(3);
     assert_eq!(h.state().screen(), Screen::NewProject);
     assert!(h.query_by_label_contains("Required").is_none());
-    h.get_by_label("Create project and segment").click();
+    h.get_by_label("Create project").click();
     h.run_steps(3);
     // still here, with the errors shown
     assert_eq!(h.state().screen(), Screen::NewProject);
