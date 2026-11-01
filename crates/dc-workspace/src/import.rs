@@ -21,8 +21,16 @@ pub const EXTENSIONS: [&str; 3] = ["stl", "obj", "ply"];
 pub const DIALOG_EXTENSIONS: [&str; 6] = ["stl", "ply", "obj", "STL", "PLY", "OBJ"];
 
 /// Most notifications one report puts on screen, the one-line group and the
-/// success line included (the stack draws four).
+/// success line included (the stack draws four). Failed files and arch
+/// warnings do not count against it past the first slots: they are never
+/// grouped or dropped, so a report with many of them goes over the bound
+/// by them alone, and the other notes shrink to [`MIN_OTHER_TOASTS`].
 pub const MAX_REPORT_TOASTS: usize = 4;
+
+/// Fewest slots the other notes keep, the success line included, when failed
+/// files and arch warnings fill the bound: the cleared notice, one group
+/// line and the success line.
+const MIN_OTHER_TOASTS: usize = 3;
 
 /// Longest list of grouped messages in the "more" notification.
 const GROUP_CHARS: usize = 220;
@@ -86,6 +94,7 @@ fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 fn warning_title_key(code: &str) -> &'static str {
     match code {
         "rescaled" => "ws-toast-warn-rescaled",
+        "units_suspect" => "ws-toast-warn-units-suspect",
         "tiny" => "ws-toast-warn-tiny",
         "low_polygons" => "ws-toast-warn-low-polygons",
         "obj_objects_merged" => "ws-toast-warn-obj-merged",
@@ -143,72 +152,186 @@ fn cleared_ids(report: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// Notification for the results a module cleared because their scan changed.
-/// It names what was cleared and where to get it back; it never says the
-/// case was reset, because only these results were.
-pub(crate) fn cleared_toast(module_id: &str, report: &Value) -> Option<Toast> {
+/// What made a module clear results: it decides the wording of the notice,
+/// which says only what happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClearCause {
+    /// A new scan took the place of one on the same role.
+    Replaced,
+    /// A scan changed role (`case.set-role`, or an import that moved a
+    /// provisional scan to the other arch) and nothing was replaced.
+    RoleChanged,
+    /// Scans were added and nothing was replaced or moved.
+    Added,
+}
+
+impl ClearCause {
+    /// The cause behind an import report: a replacement wins over a move.
+    fn of_import(report: &Value) -> Self {
+        let replaced = report.get("replaced").and_then(Value::as_bool) == Some(true)
+            || !array(report, "replaced_roles").is_empty();
+        if replaced {
+            Self::Replaced
+        } else if !array(report, "moved").is_empty() {
+            Self::RoleChanged
+        } else {
+            Self::Added
+        }
+    }
+
+    /// Title key and detail key of the notice.
+    fn keys(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Replaced => ("ws-toast-import-cleared", "ws-import-cleared-detail"),
+            Self::RoleChanged => ("ws-toast-role-changed", "ws-role-changed-detail"),
+            Self::Added => ("ws-toast-import-affected", "ws-import-affected-detail"),
+        }
+    }
+}
+
+/// Notification for the results a module cleared, or marked to be redone
+/// (the bite registration), because the scans changed. It names what was
+/// affected and where to get it back; it never says the case was reset,
+/// because only these results were.
+pub(crate) fn cleared_toast(module_id: &str, report: &Value, cause: ClearCause) -> Option<Toast> {
     let ids = cleared_ids(report);
     if ids.is_empty() {
         return None;
     }
     let list = cleared_list(module_id, &ids);
-    Some(
-        Toast::new(ToastLevel::Warning, "ws-toast-import-cleared")
-            .with_detail(tr_args("ws-import-cleared-detail", &[("list", &list)])),
-    )
+    let (title, detail) = cause.keys();
+    Some(Toast::new(ToastLevel::Warning, title).with_detail(tr_args(detail, &[("list", &list)])))
 }
+
+/// Notification of the report of a role change (`case.set-role`).
+pub(crate) fn role_changed_toast(module_id: &str, report: &Value) -> Option<Toast> {
+    cleared_toast(module_id, report, ClearCause::RoleChanged)
+}
+
+/// A notification of an import report and whether it stays until the user
+/// closes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReportToast {
+    pub toast: Toast,
+    /// Failed files and arch warnings: never time out, never grouped.
+    pub sticky: bool,
+}
+
+impl ReportToast {
+    fn new(toast: Toast, sticky: bool) -> Self {
+        Self { toast, sticky }
+    }
+}
+
+/// Position of a warning in the report: the lower, the more serious. Arch
+/// warnings come first (a wrong arch spoils everything computed after it),
+/// then the units ones (the model may be in another unit), then the rest.
+/// The Aligners arch notes share the code `provisional` with the generic one,
+/// so their keys tell them apart.
+fn warning_rank(w: &Value) -> u8 {
+    let code = text(w, "code").unwrap_or_default();
+    match text(w, "key").unwrap_or_default() {
+        "aligners-arch-warn-to-be-checked" => return ARCH_TO_BE_CHECKED,
+        "aligners-arch-warn-not-recognised" => return ARCH_NOT_RECOGNISED,
+        _ => {}
+    }
+    match code {
+        "arch_conflict" => 0,
+        "provisional" => 1,
+        "replaced" => 4,
+        "units_suspect" => FIRST_UNITS,
+        "rescaled" => FIRST_UNITS + 1,
+        "tiny" => FIRST_UNITS + 2,
+        "low_polygons" => FIRST_OTHER,
+        "bad_faces_removed" => FIRST_OTHER + 1,
+        "obj_objects_merged" => FIRST_OTHER + 2,
+        "bite_limit" => FIRST_OTHER + 3,
+        _ => u8::MAX,
+    }
+}
+
+const ARCH_TO_BE_CHECKED: u8 = 2;
+const ARCH_NOT_RECOGNISED: u8 = 3;
+const FIRST_UNITS: u8 = 10;
+const FIRST_OTHER: u8 = 20;
 
 /// Notifications for the JSON report of an import (the output of the module's
 /// `import-scans` or of `case.import`), oldest first. Order of importance:
-/// failed files, the replaced or cleared notice, the warnings, then the
-/// success line last, so it stays at the bottom. At most
-/// [`MAX_REPORT_TOASTS`]: the surplus becomes one grouped line.
-pub(crate) fn report_toasts(report: &Value, module_id: &str) -> Vec<Toast> {
-    let mut notes: Vec<Toast> = Vec::new();
+/// failed files; the arch warnings; the cleared (or replaced) notice; the
+/// units warnings; every other warning; then the success line, so it stays at
+/// the bottom.
+///
+/// Failed files and arch warnings are `sticky` and always listed in full,
+/// each as its own notification. The rest keeps its time out and, when it
+/// does not fit in [`MAX_REPORT_TOASTS`] together with the sticky ones, the
+/// surplus becomes one grouped line.
+pub(crate) fn report_toasts(report: &Value, module_id: &str) -> Vec<ReportToast> {
+    let mut sticky: Vec<ReportToast> = Vec::new();
     for f in array(report, "failed") {
         let reason = text(f, "reason").unwrap_or("?");
-        notes
-            .push(Toast::new(ToastLevel::Error, "ws-toast-import-file-failed").with_detail(reason));
+        sticky.push(ReportToast::new(
+            Toast::new(ToastLevel::Error, "ws-toast-import-file-failed").with_detail(reason),
+            true,
+        ));
     }
-    if let Some(t) = cleared_toast(module_id, report) {
-        notes.push(t);
-    } else if report.get("replaced").and_then(Value::as_bool) == Some(true)
-        || !array(report, "replaced_roles").is_empty()
-    {
-        notes.push(
-            Toast::new(ToastLevel::Info, "ws-toast-import-replaced")
-                .with_detail(crate::t("ws-import-replaced-detail")),
-        );
-    }
+
+    // most serious first; the sort is stable, so equals keep the report order
+    let mut warnings: Vec<(u8, Toast)> = Vec::new();
     for w in array(report, "warnings") {
         let Some(message) = warning_message(w) else {
             continue;
         };
         let key = warning_title_key(text(w, "code").unwrap_or_default());
-        notes.push(Toast::new(ToastLevel::Warning, key).with_detail(message));
+        let toast = Toast::new(ToastLevel::Warning, key).with_detail(message);
+        warnings.push((warning_rank(w), toast));
     }
+    warnings.sort_by_key(|(rank, _)| *rank);
+    let (arch, minor): (Vec<_>, Vec<_>) = warnings.into_iter().partition(|(r, _)| *r < FIRST_UNITS);
+    sticky.extend(arch.into_iter().map(|(_, t)| ReportToast::new(t, true)));
+
+    let mut notes: Vec<Toast> = Vec::new();
+    let cause = ClearCause::of_import(report);
+    if let Some(t) = cleared_toast(module_id, report, cause) {
+        notes.push(t);
+    } else if cause == ClearCause::Replaced {
+        notes.push(
+            Toast::new(ToastLevel::Info, "ws-toast-import-replaced")
+                .with_detail(crate::t("ws-import-replaced-detail")),
+        );
+    }
+    // the units warnings, then the others (ranks are already in that order)
+    notes.extend(minor.into_iter().map(|(_, t)| t));
 
     let imported = array(report, "imported").len();
-    let budget = MAX_REPORT_TOASTS - usize::from(imported > 0);
-    if notes.len() > budget {
-        let rest = notes.split_off(budget - 1);
+    let success = usize::from(imported > 0);
+    let budget = MAX_REPORT_TOASTS
+        .saturating_sub(sticky.len())
+        .max(MIN_OTHER_TOASTS);
+    let slots = budget - success;
+    if notes.len() > slots {
+        let rest = notes.split_off(slots - 1);
         notes.push(group(&rest));
     }
+
+    let mut out = sticky;
+    out.extend(notes.into_iter().map(|t| ReportToast::new(t, false)));
     if imported > 0 {
         let key = if imported == 1 {
             "ws-import-added-one"
         } else {
             "ws-import-added-many"
         };
-        notes.push(
+        out.push(ReportToast::new(
             Toast::new(ToastLevel::Success, "ws-toast-imported")
                 .with_detail(tr_args(key, &[("count", &imported.to_string())])),
-        );
+            false,
+        ));
     }
-    notes
+    out
 }
 
-/// One line for the notifications that did not fit.
+/// One line for the notes that did not fit (never failed files or arch
+/// warnings: those are not grouped).
 fn group(rest: &[Toast]) -> Toast {
     let mut list = rest
         .iter()
@@ -218,12 +341,7 @@ fn group(rest: &[Toast]) -> Toast {
     if list.chars().count() > GROUP_CHARS {
         list = list.chars().take(GROUP_CHARS).collect::<String>() + "…";
     }
-    let level = if rest.iter().any(|t| t.level == ToastLevel::Error) {
-        ToastLevel::Error
-    } else {
-        ToastLevel::Warning
-    };
-    Toast::new(level, "ws-toast-import-more").with_detail(tr_args(
+    Toast::new(ToastLevel::Warning, "ws-toast-import-more").with_detail(tr_args(
         "ws-import-more-detail",
         &[("count", &rest.len().to_string()), ("list", &list)],
     ))
@@ -267,14 +385,32 @@ mod tests {
         assert_eq!(bite["files"][1], json!({ "path": "b.stl", "role": "bite" }));
     }
 
+    /// The notifications of `report` without their stickiness.
+    fn plain(report: &Value, module_id: &str) -> Vec<Toast> {
+        report_toasts(report, module_id)
+            .into_iter()
+            .map(|t| t.toast)
+            .collect()
+    }
+
+    fn warning_of(code: &str, key: &str, message: &str) -> Value {
+        json!({ "code": code, "key": key, "args": {}, "message": message })
+    }
+
+    /// An arch warning (the sticky kind).
     fn warning(n: usize) -> Value {
-        json!({ "code": "provisional", "key": "x", "args": {}, "message": format!("w{n}") })
+        warning_of("provisional", "x", &format!("w{n}"))
+    }
+
+    /// A warning that times out and can be grouped.
+    fn minor(n: usize) -> Value {
+        warning_of("low_polygons", "x", &format!("m{n}"))
     }
 
     #[test]
     fn a_clean_import_is_one_success_line() {
         let r = json!({ "imported": [{}, {}], "warnings": [], "failed": [], "module_cleared": [] });
-        let t = report_toasts(&r, "aligners");
+        let t = plain(&r, "aligners");
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].level, ToastLevel::Success);
         assert_eq!(t[0].message_key, "ws-toast-imported");
@@ -287,7 +423,7 @@ mod tests {
             "failed": [{ "reason": "broken.stl: the file cannot be read." }],
             "warnings": [warning(1)],
         });
-        let t = report_toasts(&r, "aligners");
+        let t = plain(&r, "aligners");
         let keys: Vec<_> = t.iter().map(|t| t.message_key.as_str()).collect();
         assert_eq!(
             keys,
@@ -306,40 +442,213 @@ mod tests {
 
     #[test]
     fn many_notes_are_grouped_in_one_line() {
-        let warnings: Vec<Value> = (0..9).map(warning).collect();
+        let warnings: Vec<Value> = (0..9).map(minor).collect();
         let r = json!({ "imported": [{}], "warnings": warnings });
-        let t = report_toasts(&r, "aligners");
+        let t = plain(&r, "aligners");
         assert_eq!(t.len(), MAX_REPORT_TOASTS);
-        assert_eq!(t[0].detail.as_deref(), Some("w0"));
-        assert_eq!(t[1].detail.as_deref(), Some("w1"));
+        assert_eq!(t[0].detail.as_deref(), Some("m0"));
+        assert_eq!(t[1].detail.as_deref(), Some("m1"));
         assert_eq!(t[2].message_key, "ws-toast-import-more");
         let more = t[2].detail.as_deref().unwrap();
-        assert!(more.contains('7') && more.contains("w8"), "{more}");
+        assert!(more.contains('7') && more.contains("m8"), "{more}");
         assert_eq!(t[3].message_key, "ws-toast-imported");
         // nothing imported: the success slot goes to the notes
-        let r = json!({ "warnings": (0..9).map(warning).collect::<Vec<_>>() });
-        assert_eq!(report_toasts(&r, "aligners").len(), MAX_REPORT_TOASTS);
+        let r = json!({ "warnings": (0..9).map(minor).collect::<Vec<_>>() });
+        assert_eq!(plain(&r, "aligners").len(), MAX_REPORT_TOASTS);
     }
 
     #[test]
     fn the_cleared_notice_lists_only_what_was_cleared() {
         let r = json!({ "imported": [{}], "replaced": true, "module_cleared": ["seeds", "nope"] });
-        let t = report_toasts(&r, "no-such-module");
+        let t = plain(&r, "no-such-module");
         assert_eq!(t[0].message_key, "ws-toast-import-cleared");
         let d = t[0].detail.as_deref().unwrap();
         assert!(d.contains("seeds, nope"), "{d}");
         assert!(!d.to_lowercase().contains("reset"), "{d}");
         // replaced without anything cleared
         let r = json!({ "imported": [{}], "replaced": true });
+        assert_eq!(plain(&r, "x")[0].message_key, "ws-toast-import-replaced");
+    }
+
+    /// A report with every kind of warning, listed in the reverse of the
+    /// order they must come out in.
+    fn full_report() -> Value {
+        json!({
+            "imported": [{}, {}],
+            "replaced": true,
+            "module_cleared": ["seeds"],
+            "failed": [{ "reason": "broken.stl: the file cannot be read." }],
+            "warnings": [
+                warning_of("bite_limit", "x", "bite limit"),
+                warning_of("obj_objects_merged", "x", "objects merged"),
+                warning_of("bad_faces_removed", "x", "faces removed"),
+                warning_of("low_polygons", "x", "few polygons"),
+                warning_of("tiny", "x", "very small"),
+                warning_of("rescaled", "x", "converted"),
+                warning_of("units_suspect", "x", "units?"),
+                warning_of("replaced", "x", "replaced scan"),
+                warning_of("provisional", "aligners-arch-warn-not-recognised", "not recognised"),
+                warning_of("provisional", "aligners-arch-warn-to-be-checked", "to be checked"),
+                warning_of("arch_conflict", "x", "arch taken"),
+            ],
+        })
+    }
+
+    #[test]
+    fn warnings_come_by_severity_and_the_arch_ones_stay() {
+        let t = report_toasts(&full_report(), "aligners");
+        let order: Vec<(&str, bool)> = t
+            .iter()
+            .map(|t| (t.toast.detail.as_deref().unwrap_or_default(), t.sticky))
+            .collect();
+        // failed files, then the arch warnings (conflict, check, not
+        // recognised, replaced): never grouped
+        assert_eq!(order[0], ("broken.stl: the file cannot be read.", true));
         assert_eq!(
-            report_toasts(&r, "x")[0].message_key,
-            "ws-toast-import-replaced"
+            order[1..5],
+            [
+                ("arch taken", true),
+                ("to be checked", true),
+                ("not recognised", true),
+                ("replaced scan", true)
+            ]
         );
+        assert_eq!(t[0].toast.level, ToastLevel::Error);
+        // the cleared notice, the units warnings, the rest grouped, success last
+        assert_eq!(t[5].toast.message_key, "ws-toast-import-cleared");
+        assert!(!t[5].sticky);
+        let rest: Vec<_> = t[6..]
+            .iter()
+            .map(|t| t.toast.message_key.as_str())
+            .collect();
+        assert_eq!(rest, ["ws-toast-import-more", "ws-toast-imported"]);
+        assert!(t[6..].iter().all(|t| !t.sticky));
+        // the group keeps the units warnings first, then the others
+        let more = t[6].toast.detail.as_deref().unwrap();
+        let at = |needle: &str| {
+            more.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {more}"))
+        };
+        assert!(at("units?") < at("converted"), "{more}");
+        assert!(at("converted") < at("very small"), "{more}");
+        assert!(at("very small") < at("few polygons"), "{more}");
+        assert!(at("few polygons") < at("faces removed"), "{more}");
+        assert!(at("faces removed") < at("objects merged"), "{more}");
+        assert!(at("objects merged") < at("bite limit"), "{more}");
+    }
+
+    #[test]
+    fn only_the_arch_warnings_and_failed_files_are_sticky() {
+        let r = json!({
+            "warnings": [
+                warning_of("units_suspect", "x", "u"),
+                warning_of("provisional", "x", "p"),
+                warning_of("low_polygons", "x", "l"),
+            ],
+            "failed": [{ "reason": "a" }, { "reason": "b" }],
+        });
+        let sticky: Vec<_> = report_toasts(&r, "aligners")
+            .into_iter()
+            .filter(|t| t.sticky)
+            .map(|t| t.toast.detail.unwrap())
+            .collect();
+        assert_eq!(sticky, ["a", "b", "p"]);
+        // the arch warning is recognised by its key too, whatever its code
+        let r =
+            json!({ "warnings": [warning_of("other", "aligners-arch-warn-to-be-checked", "k")] });
+        assert!(report_toasts(&r, "aligners")[0].sticky);
+    }
+
+    #[test]
+    fn a_crowd_of_sticky_notes_is_never_grouped_or_cut() {
+        let long = "x".repeat(GROUP_CHARS * 3);
+        let mut warnings: Vec<Value> = (0..6)
+            .map(|n| warning_of("arch_conflict", "x", &format!("{long}{n}")))
+            .collect();
+        warnings.extend((0..5).map(minor));
+        let r = json!({
+            "imported": [{}],
+            "failed": [{ "reason": "a" }, { "reason": "b" }],
+            "warnings": warnings,
+        });
+        let t = report_toasts(&r, "aligners");
+        let sticky: Vec<_> = t.iter().filter(|t| t.sticky).collect();
+        assert_eq!(sticky.len(), 8);
+        for (n, s) in sticky[2..].iter().enumerate() {
+            assert_eq!(
+                s.toast.detail.as_deref(),
+                Some(format!("{long}{n}").as_str())
+            );
+            assert!(!s.toast.detail.as_deref().unwrap().ends_with('…'));
+        }
+        // the others shrink to one note, one group line and the success line
+        let rest: Vec<_> = t.iter().filter(|t| !t.sticky).collect();
+        assert_eq!(rest.len(), MIN_OTHER_TOASTS);
+        assert_eq!(rest[1].toast.message_key, "ws-toast-import-more");
+        assert_eq!(rest[2].toast.message_key, "ws-toast-imported");
+    }
+
+    #[test]
+    fn a_long_arch_warning_is_not_cut_but_a_grouped_one_is() {
+        let long = format!("{} end-of-text", "word ".repeat(150));
+        let r = json!({ "warnings": [warning_of("provisional", "x", &long)] });
+        let t = report_toasts(&r, "aligners");
+        assert_eq!(t[0].toast.detail.as_deref(), Some(long.as_str()));
+        assert!(t[0].sticky);
+        let minor_long = |n: usize| warning_of("low_polygons", "x", &format!("{long}{n}"));
+        let r = json!({ "warnings": (0..6).map(minor_long).collect::<Vec<_>>() });
+        let t = report_toasts(&r, "aligners");
+        let more = t.last().unwrap().toast.detail.as_deref().unwrap();
+        assert!(more.ends_with('…'), "{more}");
+    }
+
+    #[test]
+    fn what_a_clear_says_depends_on_what_happened() {
+        let cleared = json!({ "module_cleared": ["seeds", "bite_registered"] });
+        let with = |extra: Value| {
+            let mut r = cleared.clone();
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            plain(&r, "no-such-module")
+        };
+        let replaced = with(json!({ "replaced": true }));
+        assert_eq!(replaced[0].message_key, "ws-toast-import-cleared");
+        let moved = with(json!({ "moved": [{ "from": "upper", "to": "lower" }] }));
+        assert_eq!(moved[0].message_key, "ws-toast-role-changed");
+        let added = with(json!({}));
+        assert_eq!(added[0].message_key, "ws-toast-import-affected");
+        // a replacement and a move at once: the replacement is what happened
+        let both = with(json!({ "replaced": true, "moved": [{}] }));
+        assert_eq!(both[0].message_key, "ws-toast-import-cleared");
+        // only the replaced wording talks about a scan being replaced
+        for t in moved.iter().chain(&added) {
+            let text = format!("{} {}", t.message_key, t.detail.as_deref().unwrap());
+            assert!(!text.contains("replace"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_role_change_says_only_what_happened() {
+        let report = json!({
+            "module_cleared": ["seeds", "bite_registered"],
+            "world_frame_reset": true,
+        });
+        let t = role_changed_toast("no-such-module", &report).expect("something was cleared");
+        assert_eq!(t.message_key, "ws-toast-role-changed");
+        assert_eq!(t.level, ToastLevel::Warning);
+        let d = t.detail.unwrap();
+        assert!(d.contains("seeds, bite_registered"), "{d}");
+        for word in ["replaced", "reset"] {
+            assert!(!d.to_lowercase().contains(word), "{d}");
+        }
+        // nothing cleared: no notice at all
+        assert!(role_changed_toast("no-such-module", &json!({ "module_cleared": [] })).is_none());
     }
 
     #[test]
     fn a_report_without_fields_shows_nothing() {
-        assert!(report_toasts(&json!({}), "x").is_empty());
-        assert!(report_toasts(&Value::Null, "x").is_empty());
+        assert!(plain(&json!({}), "x").is_empty());
+        assert!(plain(&Value::Null, "x").is_empty());
     }
 }

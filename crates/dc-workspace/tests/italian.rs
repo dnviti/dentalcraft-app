@@ -71,3 +71,27 @@ fn italian_import_report_and_scan_rows() {
     assert!(h.query_by_label("Ruolo delle prossime scansioni").is_some());
     assert!(h.query_by_label("Conferma").is_some());
 }
+
+#[test]
+fn italian_role_change_notice() {
+    dc_i18n::set_language(dc_i18n::Lang::It).unwrap();
+    let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
+    // an import that only moved a scan to the other arch, with a bite registration to redo
+    ws.show_import_report(&serde_json::json!({
+        "moved": [{ "from": "upper", "to": "lower" }],
+        "module_cleared": ["seeds", "bite_registered"],
+    }));
+    assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
+    let text = ws.toast_details()[0].1.clone().unwrap();
+    assert!(text.contains("semi dei denti"), "{text}");
+    assert!(
+        text.contains("registrazione del morso (da rifare"),
+        "{text}"
+    );
+    assert!(text.contains("Ctrl+Z riporta i ruoli precedenti"), "{text}");
+    assert!(!text.contains("sostituit"), "{text}");
+    assert_eq!(
+        dc_i18n::tr("ws-toast-role-changed"),
+        "Ruolo della scansione cambiato"
+    );
+}

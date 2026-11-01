@@ -901,7 +901,15 @@ fn setting_a_role_reports_what_the_module_cleared() {
     assert!(ws.wait_for_jobs(WAIT));
     assert_eq!(ws.state().case.scans[0].role, ScanRole::Lower);
     assert!(aligners(&ws).seeds.is_empty());
-    assert_eq!(ws.toast_keys(), ["ws-toast-import-cleared"]);
+    // a role change is not a replacement: the notice says what happened
+    assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
+    let text = ws.toast_details()[0].1.clone().unwrap();
+    assert!(text.contains("tooth seeds"), "{text}");
+    assert!(text.contains("Ctrl+Z brings the previous roles"), "{text}");
+    for word in ["replaced", "reset"] {
+        assert!(!text.to_lowercase().contains(word), "{text}");
+    }
+    assert!(ws.sticky_toast_keys().is_empty());
     // there is no scan on that role any more: the command fails with a toast
     ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
     assert!(ws.wait_for_jobs(WAIT));
@@ -937,4 +945,94 @@ fn show_import_report_is_bounded_and_public() {
     let mut ws = Workspace::new_headless(module(), None, None);
     ws.show_import_report(&json!({}));
     assert!(ws.toast_keys().is_empty());
+}
+
+#[test]
+fn a_move_without_replacement_is_a_role_change_and_the_bite_registration_is_to_redo() {
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.show_import_report(&json!({
+        "imported": [{ "scan_id": "x" }],
+        "replaced": false,
+        "moved": [{ "from": "upper", "to": "lower" }],
+        "module_cleared": ["seeds", "bite_registered"],
+    }));
+    let keys = ws.toast_keys();
+    assert_eq!(keys, ["ws-toast-role-changed", "ws-toast-imported"]);
+    let text = ws.toast_details()[0].1.clone().unwrap();
+    assert!(text.contains("tooth seeds"), "{text}");
+    assert!(
+        text.contains("bite registration (to be redone"),
+        "the registration is work to redo, not data removed: {text}"
+    );
+    assert!(!text.to_lowercase().contains("replaced"), "{text}");
+    // a replacement keeps its own wording
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.show_import_report(&json!({
+        "replaced": true,
+        "module_cleared": ["bite_registered"],
+    }));
+    assert_eq!(ws.toast_keys(), ["ws-toast-import-cleared"]);
+}
+
+#[test]
+fn arch_warnings_and_failed_files_stay_in_full_and_the_rest_is_grouped() {
+    let mut ws = Workspace::new_headless(module(), None, None);
+    let long = format!("{} fine", "parola ".repeat(80));
+    let mut warnings = vec![
+        json!({ "code": "bite_limit", "key": "k", "args": {}, "message": "limite" }),
+        json!({ "code": "tiny", "key": "k", "args": {}, "message": "piccolo" }),
+        json!({ "code": "provisional", "key": "aligners-arch-warn-to-be-checked", "args": {}, "message": long }),
+        json!({ "code": "arch_conflict", "key": "k", "args": {}, "message": "arcata occupata" }),
+    ];
+    warnings.extend(
+        (0..6).map(|n| json!({ "code": "low_polygons", "key": "k", "args": {}, "message": format!("poche {n}") })),
+    );
+    ws.show_import_report(&json!({
+        "imported": [{ "scan_id": "x" }],
+        "failed": [{ "reason": "a.stl: unreadable" }],
+        "module_cleared": ["seeds"],
+        "replaced": true,
+        "warnings": warnings,
+    }));
+    let keys = ws.toast_keys();
+    assert_eq!(
+        keys[..4],
+        [
+            "ws-toast-import-file-failed",
+            "ws-toast-warn-arch-conflict",
+            "ws-toast-warn-provisional",
+            "ws-toast-import-cleared"
+        ],
+        "{keys:?}"
+    );
+    assert_eq!(keys.last().map(String::as_str), Some("ws-toast-imported"));
+    // sticky: the failed file and the two arch warnings, none else
+    assert_eq!(
+        ws.sticky_toast_keys(),
+        [
+            "ws-toast-import-file-failed",
+            "ws-toast-warn-arch-conflict",
+            "ws-toast-warn-provisional"
+        ]
+    );
+    let details = ws.toast_details();
+    assert_eq!(details[1].1.as_deref(), Some("arcata occupata"));
+    assert_eq!(details[2].1.as_deref(), Some(long.as_str()), "not cut");
+}
+
+#[test]
+fn the_close_control_dismisses_a_sticky_arch_warning() {
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.show_import_report(&json!({
+        "warnings": [
+            { "code": "provisional", "key": "aligners-arch-warn-to-be-checked", "args": {}, "message": "check the arch" },
+        ],
+    }));
+    assert_eq!(ws.sticky_toast_keys(), ["ws-toast-warn-provisional"]);
+    let mut h = harness(ws);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Close Check the arch")
+        .click();
+    h.run();
+    assert!(h.state().ws.toast_keys().is_empty());
 }

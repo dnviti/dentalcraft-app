@@ -170,6 +170,10 @@ pub(crate) struct SceneInput<'a> {
     pub occlusal: bool,
 }
 
+/// Most notifications the stack draws, those that stay until closed (failed
+/// files, arch warnings) always included, even past this number.
+const MAX_TOASTS_ON_SCREEN: usize = 4;
+
 /// Seed marker size (mm).
 const SEED_RADIUS: f32 = 0.8;
 /// Opacity of the stage 0 ghost.
@@ -654,11 +658,16 @@ impl Workspace {
         let c = *colors(ui);
         let now = ui.input(|i| i.time);
         self.toasts
-            .retain(|t| t.toast.level == ToastLevel::Error || t.born.is_none_or(|b| now - b < 6.0));
+            .retain(|t| t.stays() || t.born.is_none_or(|b| now - b < 6.0));
+        // the newest few, and every one that stays until closed
+        let shown = crate::workspace::visible_toasts(&self.toasts, MAX_TOASTS_ON_SCREEN);
         let mut y = area.bottom();
         let mut close = None;
         let width = 340.0_f32.min(area.width());
-        for (i, st) in self.toasts.iter_mut().enumerate().rev().take(4) {
+        for (i, st) in self.toasts.iter_mut().enumerate().rev() {
+            if !shown.contains(&i) {
+                continue;
+            }
             st.born.get_or_insert(now);
             let tone = match st.toast.level {
                 ToastLevel::Info => c.select_blue,
@@ -680,6 +689,10 @@ impl Workspace {
             let h = detail.as_ref().map_or(44.0, |g| {
                 (34.0 + g.size().y.min(6.0 * 15.0) + 10.0).max(60.0)
             });
+            if !st.stays() && y - h < area.top() {
+                // no room left: only what stays until closed is never dropped
+                continue;
+            }
             let r = Rect::from_min_size(pos2(area.right() - width, y - h), vec2(width, h));
             y -= h + 8.0;
             let p = ui.painter();
