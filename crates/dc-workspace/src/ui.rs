@@ -494,6 +494,11 @@ impl Workspace {
                                 ic::SPARKLE,
                                 "ws-role-source-detected",
                             ),
+                            RoleSource::DetectedUnsure => (
+                                widgets::BadgeKind::Warning,
+                                ic::WARNING,
+                                "ws-role-source-detected-unsure",
+                            ),
                             RoleSource::Provisional => (
                                 widgets::BadgeKind::Warning,
                                 ic::WARNING,
@@ -501,7 +506,9 @@ impl Workspace {
                             ),
                         };
                         widgets::badge_icon(ui, kind, Some(icon), t(key));
-                        if source == RoleSource::Provisional
+                        // a guess, or a recognition worth a look: the same set-role
+                        // with the role it has confirms it
+                        if matches!(source, RoleSource::Provisional | RoleSource::DetectedUnsure)
                             && Button::ghost(t("ws-import-confirm-role"))
                                 .enabled(!busy)
                                 .show(ui)
@@ -510,8 +517,10 @@ impl Workspace {
                             change = Some((id, role, role));
                         }
                     });
-                    if source == RoleSource::Provisional {
-                        caption(ui, t("ws-import-provisional-hint"));
+                    match source {
+                        RoleSource::Provisional => caption(ui, t("ws-import-provisional-hint")),
+                        RoleSource::DetectedUnsure => caption(ui, t("ws-import-unsure-hint")),
+                        _ => {}
                     }
                     let roles = [ScanRole::Upper, ScanRole::Lower, ScanRole::Bite];
                     let mut idx = roles.iter().position(|r| *r == role).unwrap_or(0);

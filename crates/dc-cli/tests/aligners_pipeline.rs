@@ -391,6 +391,74 @@ fn the_import_of_the_module_is_a_superset_of_case_import() {
     assert!(module.contains_key("detections"));
 }
 
+/// The demo arches with a virtual bite applied: the upper arch has moved and
+/// the module remembers that registration.
+fn registered_session() -> Session {
+    let mut s = session();
+    s.execute("aligners.demo", json!({ "arch": "lower" }))
+        .unwrap();
+    s.execute("aligners.demo", json!({ "arch": "upper", "seed": 11 }))
+        .unwrap();
+    s.execute("aligners.occlusion.virtual-bite", Value::Null)
+        .unwrap();
+    assert!(aligners(s.state()).bite_registered);
+    s
+}
+
+fn cleared(out: &Value) -> Vec<&str> {
+    let ids = out["module_cleared"].as_array().unwrap();
+    ids.iter().map(|v| v.as_str().unwrap()).collect()
+}
+
+/// An arch changed after a bite registration: every surface says through
+/// `module_cleared` that the registration is stale (the other arch stays where
+/// it moved it), with an id the workspace translates, and says it once.
+#[test]
+fn a_stale_bite_registration_is_reported_by_case_set_role_and_case_import() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // case.set-role: the arches swap
+    let mut s = registered_session();
+    let out = s
+        .execute("case.set-role", json!({ "from": "lower", "to": "upper" }))
+        .unwrap();
+    assert!(cleared(&out).contains(&"bite_registered"), "{out}");
+    assert!(!aligners(s.state()).bite_registered);
+    assert!(s.undo());
+    assert!(aligners(s.state()).bite_registered, "undo brings it back");
+    // confirming a role changes no arch: the registration holds
+    let out = s
+        .execute("case.set-role", json!({ "from": "lower", "to": "lower" }))
+        .unwrap();
+    assert!(!cleared(&out).contains(&"bite_registered"), "{out}");
+
+    // case.import: a lower arch replaces the lower scan
+    let mut s = registered_session();
+    let state = s.state().clone();
+    let mesh = state
+        .blobs
+        .require(&state.case.scan(ScanRole::Lower).unwrap().mesh)
+        .unwrap();
+    let path = tmp.path().join("scan_a.stl");
+    dc_mesh::io::write(&path, mesh, dc_mesh::io::MeshFormat::Stl).unwrap();
+    let params = json!({ "path": path.display().to_string(), "role": "lower" });
+    let out = s.execute("case.import", params.clone()).unwrap();
+    assert!(cleared(&out).contains(&"bite_registered"), "{out}");
+    assert!(!aligners(s.state()).bite_registered);
+    // said once
+    let out = s.execute("case.import", params).unwrap();
+    assert!(!cleared(&out).contains(&"bite_registered"), "{out}");
+
+    // the module's own import reports it the same way
+    let mut s = registered_session();
+    let params = json!({ "path": path.display().to_string(), "role": "upper" });
+    let out = s.execute("aligners.case.import-scans", params).unwrap();
+    assert!(cleared(&out).contains(&"bite_registered"), "{out}");
+
+    // the id is a key the module translates, as the workspace reads it
+    assert!(dc_i18n::has("aligners-cleared-bite-registered"));
+}
+
 #[test]
 fn the_pipeline_stops_at_the_first_failing_step_and_leaves_the_case() {
     let mut s = session();
