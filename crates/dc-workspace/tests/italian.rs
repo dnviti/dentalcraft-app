@@ -1,5 +1,7 @@
 //! Italian labels (own test binary: the language is process-wide).
 
+mod common;
+
 use dc_mesh::{MeshFormat, TriMesh};
 use dc_workspace::Workspace;
 use dca_module::AlignersModule;
@@ -94,4 +96,15 @@ fn italian_role_change_notice() {
         dc_i18n::tr("ws-toast-role-changed"),
         "Ruolo della scansione cambiato"
     );
+}
+
+#[test]
+fn italian_toolbar_and_timeline_hold_at_every_width() {
+    dc_i18n::set_language(dc_i18n::Lang::It).unwrap();
+    common::assert_layout(&common::Labels {
+        views: ["Occlusale", "Frontale", "Sinistra", "Destra", "Posteriore"],
+        fit: "Inquadra tutto",
+        hint: "Nessuno stadio",
+        toggles: ["Superiore", "Inferiore", "Sovrapponi stadio 0"],
+    });
 }

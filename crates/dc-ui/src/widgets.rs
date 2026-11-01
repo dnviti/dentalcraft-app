@@ -524,6 +524,17 @@ pub fn hairline(ui: &mut Ui) -> Response {
 
 // ---------------------------------------------------------------- toggles
 
+/// Width of [`toggle`] with this label, to reserve room for it.
+pub fn toggle_width(ui: &Ui, label: &str) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        fonts::ui(13.0),
+        egui::Color32::PLACEHOLDER,
+    );
+    let gap = if label.is_empty() { 0.0 } else { 8.0 };
+    36.0 + gap + galley.size().x
+}
+
 /// Toggle switch (track 36 x 20, knob 14) with a label on its right.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
     let c = *colors(ui);
@@ -801,6 +812,7 @@ pub fn text_input(
     helper: Option<&str>,
     error: Option<&str>,
 ) -> Response {
+    let hint = placeholder(ui, hint);
     labeled_field(ui, label, helper, error, |ui| {
         egui::TextEdit::singleline(value)
             .hint_text(hint)
@@ -821,6 +833,7 @@ pub fn text_area(
     hint: &str,
     height: f32,
 ) -> Response {
+    let hint = placeholder(ui, hint);
     labeled_field(ui, label, None, None, |ui| {
         let rows = ((height - 18.0) / 19.0).max(1.0) as usize;
         egui::TextEdit::multiline(value)
@@ -833,6 +846,14 @@ pub fn text_area(
             .response
             .response
     })
+}
+
+/// Placeholder text of an input: the disabled colour, so it never reads as a
+/// value that was typed.
+fn placeholder(ui: &Ui, hint: &str) -> egui::RichText {
+    egui::RichText::new(hint)
+        .font(fonts::ui(13.0))
+        .color(colors(ui).text_disabled)
 }
 
 fn labeled_field(

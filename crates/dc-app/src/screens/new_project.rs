@@ -798,7 +798,7 @@ impl DentalCraftApp {
             ui,
             &t!("np-case-id"),
             &mut self.new_project.case_id,
-            "AL-2026-0001",
+            &t!("np-case-id-placeholder"),
             Some(&t!("np-case-id-help")),
             (show && probs.case_id).then_some(req.as_str()),
         );
@@ -807,7 +807,7 @@ impl DentalCraftApp {
             ui,
             &t!("np-alias"),
             &mut self.new_project.alias,
-            "BIA-07",
+            &t!("np-alias-placeholder"),
             Some(&t!("np-alias-help")),
             (show && probs.alias).then_some(req.as_str()),
         );
@@ -937,24 +937,32 @@ impl DentalCraftApp {
                                 .font(fonts::icon(18.0))
                                 .color(c.text_secondary),
                         );
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label(
-                                RichText::new(file_name(&s.path))
-                                    .font(fonts::semibold(13.0))
-                                    .color(c.text_primary),
-                            );
-                            probe_line(ui, c, &s.probe);
-                        });
+                        // the buttons take their room at the right first; the name
+                        // and the second line get what is left and wrap or cut there
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if widgets::icon_button_sized(ui, icons::X, t!("remove"), 26.0, true)
                                 .clicked()
                             {
                                 remove = Some(i);
                             }
-                            if role_badge(ui, s).clicked() {
+                            // a file that cannot be read has no role to choose
+                            if !failed && role_badge(ui, s).clicked() {
                                 cycle = Some(i);
                             }
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(file_name(&s.path))
+                                                .font(fonts::semibold(13.0))
+                                                .color(c.text_primary),
+                                        )
+                                        .truncate(),
+                                    );
+                                    probe_line(ui, c, &s.probe);
+                                });
+                            });
                         });
                     });
                 });

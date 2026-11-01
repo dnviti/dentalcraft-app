@@ -46,7 +46,7 @@ use egui_wgpu::wgpu;
 use glam::{Mat4, Vec2, Vec3};
 
 pub use bvh::Bvh;
-pub use camera::{Camera, Projection, Ray, Sphere, StdView};
+pub use camera::{Camera, FitInsets, Projection, Ray, Sphere, StdView};
 pub use coloring::{label_coloring, label_colors, resolve_colors};
 pub use pick::{Pick, PickTarget};
 
@@ -219,6 +219,9 @@ pub struct ViewportSettings {
     pub gizmo: Option<Corner>,
     /// Margin factor used by [`Viewport::fit`].
     pub fit_margin: f32,
+    /// What floats over the edges of the viewport (points): [`Viewport::fit`]
+    /// frames the meshes in the free area left inside it.
+    pub fit_insets: FitInsets,
 }
 
 impl Default for ViewportSettings {
@@ -232,6 +235,7 @@ impl Default for ViewportSettings {
             hover_pick: false,
             gizmo: Some(Corner::BottomLeft),
             fit_margin: 1.05,
+            fit_insets: FitInsets::NONE,
         }
     }
 }
@@ -491,8 +495,13 @@ impl Viewport {
         if self.pending_fit && rect.width() > 1.0 && rect.height() > 1.0 {
             self.pending_fit = false;
             if let Some((lo, hi)) = self.bounds {
-                self.camera
-                    .fit_box(lo, hi, aspect, self.settings.fit_margin);
+                self.camera.fit_box_in(
+                    lo,
+                    hi,
+                    Vec2::new(rect.width(), rect.height()),
+                    self.settings.fit_insets,
+                    self.settings.fit_margin,
+                );
                 self.fitted_once = true;
             }
         }
