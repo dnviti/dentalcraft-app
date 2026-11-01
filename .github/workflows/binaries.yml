@@ -1,6 +1,7 @@
 name: binaries
 
-# Builds the release binaries of the application and attaches them to the
+# Builds the release binaries of the application (the GUI `dentalcraft` and the
+# command line `dentalcraft-cli`, both in each archive) and attaches them to the
 # GitHub release of a tag:
 #   dentalcraft_<ver>_linux_x86_64.tar.gz    (golgari-dev)
 #   dentalcraft_<ver>_windows_x86_64.zip     (golgari-dev, cross-compiled with mingw-w64)
@@ -121,13 +122,16 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-          # GUI subsystem for the Windows build (no console window), also for tags
-          # that predate the windows_subsystem attribute in main.rs.
-          RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-gnu' && '-C link-arg=-Wl,--subsystem,windows' || '' }}
         # No --locked: release-please bumps the workspace version in Cargo.toml but not in
         # Cargo.lock, so the lock of a release tag is always stale for the workspace crates.
         # All dependencies stay pinned by the lock; only the workspace versions are rewritten.
-        run: cargo build -p dc-app --release --target "$TARGET"
+        # The remaps keep the runner paths out of the binaries (the cargo profile option
+        # trim-paths is not stable on this toolchain). The last matching prefix wins.
+        # The GUI subsystem on Windows comes from the windows_subsystem attribute in
+        # dc-app's main.rs, so dentalcraft-cli.exe stays a console program.
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/src"
+          cargo build -p dc-app -p dc-cli --release --target "$TARGET"
       - name: Package
         env:
           TAG: ${{ inputs.tag }}
@@ -145,11 +149,11 @@ jobs:
           cp README.md "$STAGE/"
           case "$TARGET" in
             x86_64-pc-windows-gnu)
-              cp "target/$TARGET/release/dentalcraft.exe" "$STAGE/"
+              cp "target/$TARGET/release/dentalcraft.exe" "target/$TARGET/release/dentalcraft-cli.exe" "$STAGE/"
               zip -qr "dist/$STAGE.zip" "$STAGE"
               ;;
             *)
-              cp "target/$TARGET/release/dentalcraft" "$STAGE/"
+              cp "target/$TARGET/release/dentalcraft" "target/$TARGET/release/dentalcraft-cli" "$STAGE/"
               tar -czf "dist/$STAGE.tar.gz" "$STAGE"
               ;;
           esac
@@ -316,6 +320,7 @@ jobs:
               echo
               # When macOS is re-enabled, append to the line below: "; macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`"
               echo "- Linux x86_64: \`.tar.gz\`; Windows x86_64: \`.zip\` (\`dentalcraft.exe\`)."
+              echo "- Each archive also holds \`dentalcraft-cli\`: the command line and MCP server that drive DentalCraft headless or through a running app."
               echo "- Verify the downloads against \`SHA256SUMS\`."
               echo "- **The binaries are not code-signed.** Windows: SmartScreen may warn."
             } >> notes.md
