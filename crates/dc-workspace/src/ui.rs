@@ -1,7 +1,10 @@
 //! Layout of the workspace: top bar, left menu, inspector, timeline, status
 //! bar, dialogs and keyboard shortcuts.
 
-use dc_module_api::MenuItem;
+use std::path::PathBuf;
+
+use dc_case::{RoleSource, ScanRole};
+use dc_module_api::{MenuItem, is_import_scans_command};
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
@@ -29,6 +32,17 @@ impl Workspace {
     pub fn show(&mut self, ui: &mut Ui) -> WorkspaceAction {
         self.egui_ctx = Some(ui.ctx().clone());
         self.poll();
+        // files dropped on the window go to the import (not under a dialog)
+        let dropped: Vec<PathBuf> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() && self.confirm_exit.is_none() && !self.show_help {
+            self.import_dropped(dropped);
+        }
         if self.confirm_exit.is_none() && !self.show_help {
             self.keyboard(ui);
         }
@@ -356,7 +370,163 @@ impl Workspace {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.module_ctx_run(|m, ctx| m.inspector(ui, ctx));
+                if item
+                    .as_ref()
+                    .and_then(|it| it.command_id())
+                    .is_some_and(is_import_scans_command)
+                {
+                    self.import_inspector(ui);
+                }
             });
+    }
+
+    /// The part of the inspector the workspace adds under the module's text
+    /// when "Import scans" is selected: the role of the next import and the
+    /// scans of the case, each with how its role was decided and a control
+    /// to change it.
+    fn import_inspector(&mut self, ui: &mut Ui) {
+        let c = *colors(ui);
+        ui.add_space(12.0);
+        widgets::hairline(ui);
+        ui.add_space(12.0);
+
+        let heading = |ui: &mut Ui, key: &str| {
+            ui.label(
+                RichText::new(t(key))
+                    .font(fonts::semibold(13.0))
+                    .color(c.text_primary),
+            );
+        };
+        let caption = |ui: &mut Ui, text: String| {
+            ui.label(
+                RichText::new(text)
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+        };
+
+        // role of the next import
+        heading(ui, "ws-import-role-title");
+        caption(ui, t("ws-import-role-hint"));
+        ui.add_space(6.0);
+        let choices = [
+            None,
+            Some(ScanRole::Upper),
+            Some(ScanRole::Lower),
+            Some(ScanRole::Bite),
+        ];
+        let mut idx = choices
+            .iter()
+            .position(|r| *r == self.import_role)
+            .unwrap_or(0);
+        let labels = [
+            t("ws-role-auto"),
+            role_label(ScanRole::Upper),
+            role_label(ScanRole::Lower),
+            role_label(ScanRole::Bite),
+        ];
+        if widgets::segmented_fill(ui, &mut idx, &labels, 32.0).changed() {
+            self.import_role = choices[idx];
+        }
+        ui.add_space(16.0);
+
+        // the scans of the case
+        heading(ui, "ws-import-scans-title");
+        ui.add_space(6.0);
+        let scans: Vec<_> = self
+            .undo
+            .current()
+            .case
+            .scans
+            .iter()
+            .map(|s| (s.id, s.source_name.clone(), s.role, s.role_source))
+            .collect();
+        if scans.is_empty() {
+            caption(ui, t("ws-import-no-scans"));
+            return;
+        }
+        let busy = self.is_busy();
+        let mut change = None;
+        for (id, name, role, source) in scans {
+            Frame::new()
+                .fill(c.bg_raised)
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(ic::CUBE)
+                                .font(fonts::icon(18.0))
+                                .color(c.text_secondary),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&name)
+                                    .font(fonts::semibold(13.0))
+                                    .color(c.text_primary),
+                            )
+                            .truncate(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(role_label(role))
+                                    .font(fonts::mono(12.0))
+                                    .color(c.text_secondary),
+                            );
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        let (kind, icon, key) = match source {
+                            RoleSource::Explicit => (
+                                widgets::BadgeKind::Neutral,
+                                ic::CHECK,
+                                "ws-role-source-explicit",
+                            ),
+                            RoleSource::FileName => (
+                                widgets::BadgeKind::Neutral,
+                                ic::FILE,
+                                "ws-role-source-file-name",
+                            ),
+                            RoleSource::Detected => (
+                                widgets::BadgeKind::Info,
+                                ic::SPARKLE,
+                                "ws-role-source-detected",
+                            ),
+                            RoleSource::Provisional => (
+                                widgets::BadgeKind::Warning,
+                                ic::WARNING,
+                                "ws-role-source-provisional",
+                            ),
+                        };
+                        widgets::badge_icon(ui, kind, Some(icon), t(key));
+                        if source == RoleSource::Provisional
+                            && Button::ghost(t("ws-import-confirm-role"))
+                                .enabled(!busy)
+                                .show(ui)
+                                .clicked()
+                        {
+                            change = Some((id, role, role));
+                        }
+                    });
+                    if source == RoleSource::Provisional {
+                        caption(ui, t("ws-import-provisional-hint"));
+                    }
+                    let roles = [ScanRole::Upper, ScanRole::Lower, ScanRole::Bite];
+                    let mut idx = roles.iter().position(|r| *r == role).unwrap_or(0);
+                    let labels = roles.map(role_label);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if widgets::segmented_fill(ui, &mut idx, &labels, 28.0).changed() {
+                            change = Some((id, role, roles[idx]));
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+        if let Some((id, from, to)) = change {
+            self.set_scan_role(id, from, to);
+        }
     }
 
     // ------------------------------------------------------------ status bar
@@ -516,6 +686,15 @@ impl Workspace {
             }
         }
     }
+}
+
+/// Translated name of a scan role.
+fn role_label(role: ScanRole) -> String {
+    t(match role {
+        ScanRole::Upper => "ws-role-upper",
+        ScanRole::Lower => "ws-role-lower",
+        ScanRole::Bite => "ws-role-bite",
+    })
 }
 
 const SHORTCUTS: &[(&str, &str)] = &[

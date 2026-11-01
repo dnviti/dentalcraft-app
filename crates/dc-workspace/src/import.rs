@@ -1,154 +1,227 @@
-//! "Import scans": reading STL / OBJ / PLY files in the background and the
-//! undoable command that adds them to the case.
+//! "Import scans": the files the workspace accepts, the parameters it gives
+//! the shared import command and the notifications it builds from the
+//! command's JSON report.
+//!
+//! The import itself is not here: the workspace runs the module's
+//! `*.import-scans` command (or the core `case.import`) in a background job,
+//! the same code the CLI and the MCP server run.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use dc_case::{CaseState, Pose, RoleSource, Scan, ScanRole};
-use dc_command::{Command, CommandError, JobCtx};
-use dc_mesh::{TriMesh, Units};
+use dc_case::ScanRole;
+use dc_module_api::{Toast, ToastLevel};
+use serde_json::{Value, json};
 
-/// Last segment of the command ids the workspace implements itself as
-/// "Import scans" (e.g. `aligners.case.import-scans`), whatever the module.
-pub const IMPORT_SCANS_SUFFIX: &str = "import-scans";
-
-/// Command id of the import, for the undo stack.
-pub const IMPORT_COMMAND_ID: &str = "workspace.import-scans";
-
-/// File extensions offered by the file dialog.
+/// File extensions offered by the file dialog and accepted by a drop.
 pub const EXTENSIONS: [&str; 3] = ["stl", "obj", "ply"];
 
-/// `true` when `command_id` is an "Import scans" entry.
-pub fn is_import_command(command_id: &str) -> bool {
-    command_id
-        .rsplit('.')
-        .next()
-        .is_some_and(|last| last == IMPORT_SCANS_SUFFIX)
+/// Most notifications one report puts on screen, the one-line group and the
+/// success line included (the stack draws four).
+pub const MAX_REPORT_TOASTS: usize = 4;
+
+/// Longest list of grouped messages in the "more" notification.
+const GROUP_CHARS: usize = 220;
+
+/// `true` when `path` has the extension of a mesh the import reads, in any
+/// letter case.
+pub fn is_scan_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// A scan read from disk, converted to millimetres.
-#[derive(Debug, Clone)]
-pub struct ImportedScan {
-    /// Arch or bite.
-    pub role: ScanRole,
-    /// File name without directory.
-    pub source_name: String,
-    /// Detected unit of the file.
-    pub source_units: Units,
-    /// The mesh in millimetres.
-    pub mesh: Arc<TriMesh>,
+/// Splits `paths` into the files the import reads and the ones it ignores.
+pub fn split_scan_files(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    paths.into_iter().partition(|p| is_scan_file(p))
 }
 
-/// Role suggested by the file name (`upper`, `maxil…`, `superior`,
-/// `lower`, `mandib…`, `inferior`, `bite`, `morso`), if any.
-pub fn role_from_name(name: &str) -> Option<ScanRole> {
-    let n = name.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
-    if has(&["bite", "morso"]) {
-        Some(ScanRole::Bite)
-    } else if has(&["upper", "maxil", "superior"]) {
-        Some(ScanRole::Upper)
-    } else if has(&["lower", "mandib", "inferior"]) {
-        Some(ScanRole::Lower)
-    } else {
-        None
+/// Id of `role` in the command parameters.
+pub(crate) fn role_id(role: ScanRole) -> &'static str {
+    match role {
+        ScanRole::Upper => "upper",
+        ScanRole::Lower => "lower",
+        ScanRole::Bite => "bite",
     }
 }
 
-/// Assigns a role to every file: the one its name suggests, otherwise the
-/// first of upper, lower, bite not taken yet (by the case or by an earlier
-/// file of the batch); upper when all are taken.
-pub fn assign_roles(names: &[String], existing: &[ScanRole]) -> Vec<ScanRole> {
-    let mut taken: Vec<ScanRole> = existing.to_vec();
-    let hinted: Vec<Option<ScanRole>> = names.iter().map(|n| role_from_name(n)).collect();
-    // hinted roles are reserved first, so an unhinted file does not grab them
-    taken.extend(hinted.iter().flatten().copied());
-    hinted
-        .into_iter()
-        .map(|h| {
-            h.unwrap_or_else(|| {
-                let free = [ScanRole::Upper, ScanRole::Lower, ScanRole::Bite]
-                    .into_iter()
-                    .find(|r| !taken.contains(r))
-                    .unwrap_or(ScanRole::Upper);
-                taken.push(free);
-                free
-            })
+/// Parameters of the import command: one entry per file, with the role the
+/// user chose (`None` = auto, left out so the import decides).
+pub(crate) fn params(paths: &[PathBuf], role: Option<ScanRole>) -> Value {
+    let files: Vec<Value> = paths
+        .iter()
+        .map(|p| {
+            let mut f = json!({ "path": p.to_string_lossy() });
+            if let Some(r) = role {
+                f["role"] = json!(role_id(r));
+            }
+            f
         })
+        .collect();
+    json!({ "files": files })
+}
+
+/// `key` of this crate (or any registered bundle) with Fluent arguments.
+fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
+    crate::loader();
+    dc_i18n::tr_args(key, args)
+}
+
+fn array<'a>(report: &'a Value, key: &str) -> &'a [Value] {
+    report
+        .get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// Title key of the notification of a warning with this `code`.
+fn warning_title_key(code: &str) -> &'static str {
+    match code {
+        "rescaled" => "ws-toast-warn-rescaled",
+        "tiny" => "ws-toast-warn-tiny",
+        "low_polygons" => "ws-toast-warn-low-polygons",
+        "obj_objects_merged" => "ws-toast-warn-obj-merged",
+        "bad_faces_removed" => "ws-toast-warn-bad-faces",
+        "replaced" => "ws-toast-warn-replaced",
+        "arch_conflict" => "ws-toast-warn-arch-conflict",
+        "provisional" => "ws-toast-warn-provisional",
+        "bite_limit" => "ws-toast-warn-bite-limit",
+        _ => "ws-toast-import-warning",
+    }
+}
+
+/// The message of a warning: its translated `message`, or its key looked up
+/// with its arguments.
+fn warning_message(w: &Value) -> Option<String> {
+    if let Some(m) = text(w, "message") {
+        return Some(m.to_owned());
+    }
+    let key = text(w, "key")?;
+    let args: Vec<(String, String)> = w
+        .get("args")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    Some(tr_args(key, &args))
+}
+
+/// The ids of `module_cleared` as a translated list. The module `module_id`
+/// names what it cleared with the keys `<module_id>-cleared-<id>` (`_` as `-`);
+/// an id without a key stays as it is.
+pub(crate) fn cleared_list(module_id: &str, ids: &[&str]) -> String {
+    ids.iter()
+        .map(|id| {
+            let key = format!("{module_id}-cleared-{}", id.replace('_', "-"));
+            if dc_i18n::has(&key) {
+                dc_i18n::tr(&key)
+            } else {
+                (*id).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The ids in the `module_cleared` array of `report`.
+fn cleared_ids(report: &Value) -> Vec<&str> {
+    array(report, "module_cleared")
+        .iter()
+        .filter_map(Value::as_str)
         .collect()
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+/// Notification for the results a module cleared because their scan changed.
+/// It names what was cleared and where to get it back; it never says the
+/// case was reset, because only these results were.
+pub(crate) fn cleared_toast(module_id: &str, report: &Value) -> Option<Toast> {
+    let ids = cleared_ids(report);
+    if ids.is_empty() {
+        return None;
+    }
+    let list = cleared_list(module_id, &ids);
+    Some(
+        Toast::new(ToastLevel::Warning, "ws-toast-import-cleared")
+            .with_detail(tr_args("ws-import-cleared-detail", &[("list", &list)])),
+    )
 }
 
-/// Reads `paths` (job body): each file is read, its unit detected and
-/// converted to millimetres. Fails on the first unreadable file.
-pub fn read_scans(
-    paths: &[PathBuf],
-    existing: &[ScanRole],
-    ctx: &JobCtx,
-) -> Result<Vec<ImportedScan>, String> {
-    let names: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
-    let roles = assign_roles(&names, existing);
-    let mut out = Vec::with_capacity(paths.len());
-    let n = paths.len().max(1) as f32;
-    for (i, ((path, name), role)) in paths.iter().zip(names).zip(roles).enumerate() {
-        ctx.check_cancelled().map_err(|e| e.to_string())?;
-        ctx.set_progress(i as f32 / n, Some("ws-job-import-reading"));
-        let mut mesh = dc_mesh::io::read(path).map_err(|e| format!("{name}: {e}"))?;
-        let units = dc_mesh::io::normalize_units(&mut mesh).map_err(|e| format!("{name}: {e}"))?;
-        out.push(ImportedScan {
-            role,
-            source_name: name,
-            source_units: units,
-            mesh: Arc::new(mesh),
-        });
+/// Notifications for the JSON report of an import (the output of the module's
+/// `import-scans` or of `case.import`), oldest first. Order of importance:
+/// failed files, the replaced or cleared notice, the warnings, then the
+/// success line last, so it stays at the bottom. At most
+/// [`MAX_REPORT_TOASTS`]: the surplus becomes one grouped line.
+pub(crate) fn report_toasts(report: &Value, module_id: &str) -> Vec<Toast> {
+    let mut notes: Vec<Toast> = Vec::new();
+    for f in array(report, "failed") {
+        let reason = text(f, "reason").unwrap_or("?");
+        notes
+            .push(Toast::new(ToastLevel::Error, "ws-toast-import-file-failed").with_detail(reason));
     }
-    ctx.check_cancelled().map_err(|e| e.to_string())?;
-    Ok(out)
+    if let Some(t) = cleared_toast(module_id, report) {
+        notes.push(t);
+    } else if report.get("replaced").and_then(Value::as_bool) == Some(true)
+        || !array(report, "replaced_roles").is_empty()
+    {
+        notes.push(
+            Toast::new(ToastLevel::Info, "ws-toast-import-replaced")
+                .with_detail(crate::t("ws-import-replaced-detail")),
+        );
+    }
+    for w in array(report, "warnings") {
+        let Some(message) = warning_message(w) else {
+            continue;
+        };
+        let key = warning_title_key(text(w, "code").unwrap_or_default());
+        notes.push(Toast::new(ToastLevel::Warning, key).with_detail(message));
+    }
+
+    let imported = array(report, "imported").len();
+    let budget = MAX_REPORT_TOASTS - usize::from(imported > 0);
+    if notes.len() > budget {
+        let rest = notes.split_off(budget - 1);
+        notes.push(group(&rest));
+    }
+    if imported > 0 {
+        let key = if imported == 1 {
+            "ws-import-added-one"
+        } else {
+            "ws-import-added-many"
+        };
+        notes.push(
+            Toast::new(ToastLevel::Success, "ws-toast-imported")
+                .with_detail(tr_args(key, &[("count", &imported.to_string())])),
+        );
+    }
+    notes
 }
 
-/// Adds scans to the case; a scan replaces an existing one with the same role.
-#[derive(Debug, Clone)]
-pub struct ImportScans {
-    /// The scans to add.
-    pub scans: Vec<ImportedScan>,
-}
-
-impl Command for ImportScans {
-    fn id(&self) -> &'static str {
-        IMPORT_COMMAND_ID
+/// One line for the notifications that did not fit.
+fn group(rest: &[Toast]) -> Toast {
+    let mut list = rest
+        .iter()
+        .filter_map(|t| t.detail.as_deref())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if list.chars().count() > GROUP_CHARS {
+        list = list.chars().take(GROUP_CHARS).collect::<String>() + "…";
     }
-
-    fn label_key(&self) -> &str {
-        "ws-import-scans"
-    }
-
-    fn apply(&self, state: &CaseState, ctx: &JobCtx) -> Result<CaseState, CommandError> {
-        if self.scans.is_empty() {
-            return Err(CommandError::Invalid("no scans to import".into()));
-        }
-        let mut next = state.clone();
-        for s in &self.scans {
-            ctx.check_cancelled()?;
-            let blob = next.blobs.insert_arc(s.mesh.clone());
-            next.case.scans.retain(|old| old.role != s.role);
-            next.case.scans.push(Scan {
-                id: uuid::Uuid::new_v4(),
-                role: s.role,
-                role_source: RoleSource::Explicit,
-                source_name: s.source_name.clone(),
-                source_units: s.source_units,
-                import_xform: Pose::default(),
-                mesh: blob,
-            });
-        }
-        next.case.scans.sort_by_key(|s| s.role);
-        Ok(next)
-    }
+    let level = if rest.iter().any(|t| t.level == ToastLevel::Error) {
+        ToastLevel::Error
+    } else {
+        ToastLevel::Warning
+    };
+    Toast::new(level, "ws-toast-import-more").with_detail(tr_args(
+        "ws-import-more-detail",
+        &[("count", &rest.len().to_string()), ("list", &list)],
+    ))
 }
 
 #[cfg(test)]
@@ -156,63 +229,100 @@ mod tests {
     use super::*;
 
     #[test]
-    fn import_command_ids() {
-        assert!(is_import_command("aligners.case.import-scans"));
-        assert!(is_import_command("import-scans"));
-        assert!(!is_import_command("aligners.case.import-scans-x"));
-        assert!(!is_import_command("aligners.case.case-info"));
-    }
-
-    #[test]
-    fn roles_from_names_and_free_slots() {
-        assert_eq!(
-            role_from_name("Patient_UpperJaw.stl"),
-            Some(ScanRole::Upper)
-        );
-        assert_eq!(role_from_name("mandibular.ply"), Some(ScanRole::Lower));
-        assert_eq!(role_from_name("bite_left.obj"), Some(ScanRole::Bite));
-        assert_eq!(role_from_name("scan1.stl"), None);
-        let names = vec![
-            "a.stl".to_owned(),
-            "lower.stl".to_owned(),
-            "b.stl".to_owned(),
-        ];
-        assert_eq!(
-            assign_roles(&names, &[]),
-            vec![ScanRole::Upper, ScanRole::Lower, ScanRole::Bite]
-        );
-        assert_eq!(
-            assign_roles(&["x.stl".to_owned()], &[ScanRole::Upper]),
-            vec![ScanRole::Lower]
-        );
-    }
-
-    #[test]
-    fn command_adds_and_replaces_by_role() {
-        let mesh = Arc::new(TriMesh::new(
-            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y],
-            vec![[0, 1, 2]],
-        ));
-        let scan = |role| ImportedScan {
-            role,
-            source_name: "s.stl".into(),
-            source_units: Units::Millimeters,
-            mesh: mesh.clone(),
-        };
-        let cmd = ImportScans {
-            scans: vec![scan(ScanRole::Lower), scan(ScanRole::Upper)],
-        };
-        let ctx = JobCtx::detached();
-        let s1 = cmd.apply(&CaseState::default(), &ctx).unwrap();
-        assert_eq!(s1.case.scans.len(), 2);
-        assert_eq!(s1.case.scans[0].role, ScanRole::Upper);
-        assert!(s1.blobs.contains(&s1.case.scans[0].mesh));
-        let s2 = ImportScans {
-            scans: vec![scan(ScanRole::Upper)],
+    fn scan_files_by_extension_in_any_case() {
+        for ok in ["a.stl", "a.STL", "dir/b.Obj", "c.ply", "d.PLY"] {
+            assert!(is_scan_file(Path::new(ok)), "{ok}");
         }
-        .apply(&s1, &ctx)
-        .unwrap();
-        assert_eq!(s2.case.scans.len(), 2);
-        assert!(ImportScans { scans: Vec::new() }.apply(&s2, &ctx).is_err());
+        for no in ["a.txt", "a", "a.stl.bak", "stl", ".stl", "a.3mf"] {
+            assert!(!is_scan_file(Path::new(no)), "{no}");
+        }
+        let (ok, ignored) = split_scan_files(vec!["x.STL".into(), "notes.txt".into()]);
+        assert_eq!(ok, vec![PathBuf::from("x.STL")]);
+        assert_eq!(ignored, vec![PathBuf::from("notes.txt")]);
+    }
+
+    #[test]
+    fn params_carry_the_role_only_when_chosen() {
+        let paths = vec![PathBuf::from("a.stl"), PathBuf::from("b.stl")];
+        let auto = params(&paths, None);
+        assert_eq!(auto["files"][0], json!({ "path": "a.stl" }));
+        let bite = params(&paths, Some(ScanRole::Bite));
+        assert_eq!(bite["files"][1], json!({ "path": "b.stl", "role": "bite" }));
+    }
+
+    fn warning(n: usize) -> Value {
+        json!({ "code": "provisional", "key": "x", "args": {}, "message": format!("w{n}") })
+    }
+
+    #[test]
+    fn a_clean_import_is_one_success_line() {
+        let r = json!({ "imported": [{}, {}], "warnings": [], "failed": [], "module_cleared": [] });
+        let t = report_toasts(&r, "aligners");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].level, ToastLevel::Success);
+        assert_eq!(t[0].message_key, "ws-toast-imported");
+    }
+
+    #[test]
+    fn failed_files_and_warnings_come_before_the_success_line() {
+        let r = json!({
+            "imported": [{}],
+            "failed": [{ "reason": "broken.stl: the file cannot be read." }],
+            "warnings": [warning(1)],
+        });
+        let t = report_toasts(&r, "aligners");
+        let keys: Vec<_> = t.iter().map(|t| t.message_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "ws-toast-import-file-failed",
+                "ws-toast-warn-provisional",
+                "ws-toast-imported"
+            ]
+        );
+        assert_eq!(
+            t[0].detail.as_deref(),
+            Some("broken.stl: the file cannot be read.")
+        );
+        assert_eq!(t[1].detail.as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn many_notes_are_grouped_in_one_line() {
+        let warnings: Vec<Value> = (0..9).map(warning).collect();
+        let r = json!({ "imported": [{}], "warnings": warnings });
+        let t = report_toasts(&r, "aligners");
+        assert_eq!(t.len(), MAX_REPORT_TOASTS);
+        assert_eq!(t[0].detail.as_deref(), Some("w0"));
+        assert_eq!(t[1].detail.as_deref(), Some("w1"));
+        assert_eq!(t[2].message_key, "ws-toast-import-more");
+        let more = t[2].detail.as_deref().unwrap();
+        assert!(more.contains('7') && more.contains("w8"), "{more}");
+        assert_eq!(t[3].message_key, "ws-toast-imported");
+        // nothing imported: the success slot goes to the notes
+        let r = json!({ "warnings": (0..9).map(warning).collect::<Vec<_>>() });
+        assert_eq!(report_toasts(&r, "aligners").len(), MAX_REPORT_TOASTS);
+    }
+
+    #[test]
+    fn the_cleared_notice_lists_only_what_was_cleared() {
+        let r = json!({ "imported": [{}], "replaced": true, "module_cleared": ["seeds", "nope"] });
+        let t = report_toasts(&r, "no-such-module");
+        assert_eq!(t[0].message_key, "ws-toast-import-cleared");
+        let d = t[0].detail.as_deref().unwrap();
+        assert!(d.contains("seeds, nope"), "{d}");
+        assert!(!d.to_lowercase().contains("reset"), "{d}");
+        // replaced without anything cleared
+        let r = json!({ "imported": [{}], "replaced": true });
+        assert_eq!(
+            report_toasts(&r, "x")[0].message_key,
+            "ws-toast-import-replaced"
+        );
+    }
+
+    #[test]
+    fn a_report_without_fields_shows_nothing() {
+        assert!(report_toasts(&json!({}), "x").is_empty());
+        assert!(report_toasts(&Value::Null, "x").is_empty());
     }
 }
