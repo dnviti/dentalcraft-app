@@ -1298,8 +1298,11 @@ mod tests {
         }
         harness.run();
         harness.get_by_label("Apply").click();
-        harness.run();
+        // the click starts a job and the app keeps repainting while it runs:
+        // take one frame, wait for the job, then let the UI settle
+        harness.step();
         assert!(harness.state_mut().ws.wait_for_jobs(WAIT));
+        harness.run();
         // the move is stored and undoable
         let poses = |ws: &Workspace| data(ws.undo.current()).setup.poses.len();
         assert_eq!(poses(&harness.state().ws), 1);
