@@ -33,11 +33,48 @@ A case is changed by running commands on it:
 `dentalcraft-cli help SUBCOMMAND`, or `dentalcraft-cli SUBCOMMAND --help`, explains one subcommand;
 `dentalcraft-cli help run` explains how to write a command.";
 
-const RUN_HELP: &str = "\
-Runs commands, in order, on one case: FILE with --in (a .dcprj project, or an STL/OBJ/PLY scan
-imported into a new case), else a new empty case. Then --save writes the project (.dcprj) and
+/// The `--in` / `--role` / import result paragraphs shared by the help of
+/// `info`, `run` and `render`.
+macro_rules! in_help {
+    () => {
+        "\
+--in FILE is repeatable: a .dcprj project (only as the first --in, it is opened) and/or STL, OBJ or
+PLY scans, all imported in one call into the case (a new one when there is no project). The import
+recognises the arch of a scan from its file name, else from the geometry when the Aligners module
+is there, else the scan takes a free arch and is marked provisional.
+
+--role auto|upper|lower|bite sets the role of the scans. Given once, it applies to every scan file;
+given once per scan file, it maps to them in --in order (a project is not counted); any other
+count is an error. `auto` (the default) lets the import decide.
+
+The import result is in the output under \"import\": {\"imported\": [{scan_id, role, role_source,
+source_name, faces, ...}], \"failed\": [{path, code, reason}], \"warnings\": [...], \"detections\":
+[...], \"moved\", \"cleanup\", ...}. A file that fails does not stop the others and is listed in
+\"failed\"; the exit status is non-zero only when no scan could be imported."
+    };
+}
+
+const INFO_HELP: &str = concat!(
+    "\
+Prints the engine, its modules and the number of commands as JSON; with --in, the summary of the
+case made from the inputs (and the import result under \"import\") instead.
+
+",
+    in_help!()
+);
+
+const RUN_HELP: &str = concat!(
+    "\
+Runs commands, in order, on one case: FILE with --in (a .dcprj project, and/or STL/OBJ/PLY scans
+imported into the case), else a new empty case. Then --save writes the project (.dcprj) and
 --print adds the case summary to the output. Prints one JSON object: {\"results\": [{\"id\",
-\"output\"}...], \"saved\": ..., \"case\": ...}.
+\"output\"}...], \"import\": ..., \"saved\": ..., \"case\": ...}.
+
+  dentalcraft-cli run --in a.stl --in b.stl --role upper --role lower --print
+
+",
+    in_help!(),
+    "
 
 Each --cmd is one command: COMMAND is a command id, then `=`, then the command's parameters as one
 JSON object. Quote it for the shell. A command that needs no parameters is just its id.
@@ -51,16 +88,25 @@ position or FILE:LINE.
     --cmd 'case.import={\"path\":\"upper.stl\",\"role\":\"upper\"}' --save case.dcprj --print
 
 `dentalcraft-cli commands` lists the command ids; `dentalcraft-cli describe COMMAND` explains one
-and its parameters. Coordinates are millimetres; changes to the case are undoable (edit.undo).";
+and its parameters. Coordinates are millimetres; changes to the case are undoable (edit.undo)."
+);
 
-const RENDER_HELP: &str = "\
+const RENDER_HELP: &str = concat!(
+    "\
 Draws the case as a PNG image with the CPU renderer, after the same --in / --cmd / --cmd-file
 steps as run. Scans are coloured by tooth label when the Aligners module has labels.
 
 Views: occlusal (upper arch, or the lower one when only that is shown), occlusal_lower, frontal,
 back, left, right, top, iso. Prints the image's path and size as JSON.
 
-  dentalcraft-cli render --in case.dcprj --view frontal --size 1600x1000 --out front.png";
+  dentalcraft-cli render --in case.dcprj --view frontal --size 1600x1000 --out front.png
+
+",
+    in_help!(),
+    "
+
+The output adds \"import\" to the image's path and size when scans were imported."
+);
 
 const MCP_HELP: &str = "\
 Runs a Model Context Protocol server (JSON-RPC, one message per line) on stdin and stdout. It works
@@ -89,10 +135,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Print the engine, its modules and commands, or a case summary, as JSON.
+    #[command(long_about = INFO_HELP)]
     Info {
-        /// Summarise this project or scan instead.
-        #[arg(long = "in", value_name = "FILE")]
-        input: Option<PathBuf>,
+        #[command(flatten)]
+        inputs: Inputs,
     },
     /// List the commands run can use, one per line.
     Commands {
@@ -137,12 +183,26 @@ enum Cmd {
     },
 }
 
+/// The project and the scans a case starts from.
+#[derive(Debug, Args)]
+struct Inputs {
+    /// Project (.dcprj, first only) or scan (STL, OBJ, PLY) to start from (repeatable).
+    #[arg(long = "in", value_name = "FILE")]
+    input: Vec<PathBuf>,
+    /// Role of the scans: once for all, or once per scan file (repeatable).
+    #[arg(
+        long,
+        value_name = "ROLE",
+        value_parser = ["auto", "upper", "lower", "bite"]
+    )]
+    role: Vec<String>,
+}
+
 /// The case and the commands to run on it.
 #[derive(Debug, Args)]
 struct Script {
-    /// Project (.dcprj) or scan (STL, OBJ, PLY) to start from.
-    #[arg(long = "in", value_name = "FILE")]
-    input: Option<PathBuf>,
+    #[command(flatten)]
+    inputs: Inputs,
     /// A command: COMMAND or COMMAND=JSON (repeatable).
     #[arg(long, value_name = "COMMAND[=PARAMS]")]
     cmd: Vec<String>,
@@ -208,7 +268,7 @@ fn main() -> ExitCode {
             // no subcommand: show what the tool is
             Cli::command().print_help().map_err(|e| e.to_string())
         }
-        Some(Cmd::Info { input }) => info(input.as_deref()),
+        Some(Cmd::Info { inputs }) => info(&inputs),
         Some(Cmd::Commands { json }) => commands(json),
         Some(Cmd::Describe { id, json }) => describe(&id, json),
         Some(Cmd::Run(args)) => sub.ok_or_else(String::new).and_then(|m| run(&args, m)),
@@ -237,25 +297,124 @@ fn new_host() -> Result<CliHost> {
     CliHost::new().map_err(host_err)
 }
 
-/// Opens a project or imports a scan into the new case of `host`.
-fn load_input(host: &mut CliHost, path: &Path) -> Result<Value> {
-    let is_project = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("dcprj"));
-    let p = path.to_string_lossy();
-    let r = if is_project {
-        Host::open(host, &p)
-    } else {
-        host.execute("case.import", json!({ "path": p }))
-    };
-    r.map_err(|e| format!("--in {}: {}", path.display(), e.0))
+/// `true` for a project file (`.dcprj`).
+fn is_project(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dcprj"))
 }
 
-fn info(input: Option<&Path>) -> Result<()> {
+/// One scan file of `--in`, with its `--role`.
+#[derive(Debug, PartialEq)]
+struct ScanInput<'a> {
+    path: &'a Path,
+    role: Option<&'a str>,
+}
+
+/// The `--in` and `--role` values, checked: an optional project to open
+/// (first `--in` only), then the scan files with their roles.
+#[derive(Debug, PartialEq)]
+struct InputPlan<'a> {
+    project: Option<&'a Path>,
+    scans: Vec<ScanInput<'a>>,
+}
+
+impl Inputs {
+    fn plan(&self) -> Result<InputPlan<'_>> {
+        let mut files = self.input.iter().map(PathBuf::as_path).peekable();
+        let project = files.next_if(|p| is_project(p));
+        let paths: Vec<&Path> = files.collect();
+        if let Some(p) = paths.iter().find(|p| is_project(p)) {
+            return Err(format!(
+                "--in {}: a project (.dcprj) is only allowed as the first --in; give scans after it",
+                p.display()
+            ));
+        }
+        let roles = &self.role;
+        let role_of = |i: usize| -> Option<&str> {
+            match roles.len() {
+                0 => None,
+                1 => Some(roles[0].as_str()),
+                _ => Some(roles[i].as_str()),
+            }
+        };
+        if roles.len() > 1 && roles.len() != paths.len() {
+            return Err(format!(
+                "--role was given {} times for {} scan file(s): give it once (for all the scans) or once per scan file",
+                roles.len(),
+                paths.len()
+            ));
+        }
+        if !roles.is_empty() && paths.is_empty() {
+            return Err("--role needs a scan file given with --in".to_owned());
+        }
+        let scans = paths
+            .into_iter()
+            .enumerate()
+            .map(|(i, path)| ScanInput {
+                path,
+                role: role_of(i),
+            })
+            .collect();
+        Ok(InputPlan { project, scans })
+    }
+}
+
+/// Id of the command that imports scans: the one a module registers with the
+/// [`IMPORT_SCANS_SUFFIX`](dc_module_api::IMPORT_SCANS_SUFFIX) convention (it
+/// can recognise the arch from the geometry), else `case.import`. Same choice
+/// as the MCP `import_scan` tool.
+fn import_command(host: &mut CliHost) -> String {
+    host.list()
+        .ok()
+        .and_then(|list| {
+            list.as_array()?
+                .iter()
+                .filter_map(|c| c.get("id").and_then(Value::as_str).or_else(|| c.as_str()))
+                .find(|id| dc_module_api::is_import_scans_command(id))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "case.import".to_owned())
+}
+
+/// Opens the project and imports the scans of `inputs` into the case of
+/// `host`, the scans in one call. Returns the output of the import, `None`
+/// when there are no scans. An import that brings in nothing is an error.
+fn load_inputs(host: &mut CliHost, inputs: &Inputs) -> Result<Option<Value>> {
+    let plan = inputs.plan()?;
+    if let Some(p) = plan.project {
+        Host::open(host, &p.to_string_lossy())
+            .map_err(|e| format!("--in {}: {}", p.display(), e.0))?;
+    }
+    if plan.scans.is_empty() {
+        return Ok(None);
+    }
+    let files: Vec<Value> = plan
+        .scans
+        .iter()
+        .map(|s| {
+            let mut f = json!({ "path": s.path.to_string_lossy() });
+            if let Some(role) = s.role {
+                f["role"] = json!(role);
+            }
+            f
+        })
+        .collect();
+    let id = import_command(host);
+    let out = host
+        .execute(&id, json!({ "files": files }))
+        .map_err(|e| format!("--in: {}", e.0))?;
+    Ok(Some(out))
+}
+
+fn info(inputs: &Inputs) -> Result<()> {
     let mut host = new_host()?;
-    if let Some(p) = input {
-        load_input(&mut host, p)?;
-        return print_json(&host.inspect(None).map_err(host_err)?);
+    if !inputs.input.is_empty() || !inputs.role.is_empty() {
+        let import = load_inputs(&mut host, inputs)?;
+        let mut out = host.inspect(None).map_err(host_err)?;
+        if let (Some(import), Some(obj)) = (import, out.as_object_mut()) {
+            obj.insert("import".to_owned(), import);
+        }
+        return print_json(&out);
     }
     let modules: Vec<Value> = host
         .session
@@ -335,13 +494,20 @@ fn steps(script: &Script, m: &ArgMatches) -> Result<Vec<Step>> {
     Ok(out)
 }
 
-/// Loads the input and runs the steps; returns the host and the results.
-fn run_script(script: &Script, m: &ArgMatches) -> Result<(CliHost, Vec<Value>)> {
+/// A case made by [`run_script`].
+struct Ran {
+    host: CliHost,
+    /// The `{id, output}` of the steps.
+    results: Vec<Value>,
+    /// The output of the scan import, when there were scans.
+    import: Option<Value>,
+}
+
+/// Loads the inputs and runs the steps.
+fn run_script(script: &Script, m: &ArgMatches) -> Result<Ran> {
     let steps = steps(script, m)?;
     let mut host = new_host()?;
-    if let Some(p) = &script.input {
-        load_input(&mut host, p)?;
-    }
+    let import = load_inputs(&mut host, &script.inputs)?;
     let mut results = Vec::with_capacity(steps.len());
     for s in steps {
         let out = host
@@ -349,12 +515,23 @@ fn run_script(script: &Script, m: &ArgMatches) -> Result<(CliHost, Vec<Value>)> 
             .map_err(|e| format!("{} ({}): {}", s.origin, s.id, e.0))?;
         results.push(json!({ "id": s.id, "output": out }));
     }
-    Ok((host, results))
+    Ok(Ran {
+        host,
+        results,
+        import,
+    })
 }
 
 fn run(args: &RunArgs, m: &ArgMatches) -> Result<()> {
-    let (mut host, results) = run_script(&args.script, m)?;
+    let Ran {
+        mut host,
+        results,
+        import,
+    } = run_script(&args.script, m)?;
     let mut out = json!({ "results": results });
+    if let Some(import) = import {
+        out["import"] = import;
+    }
     if let Some(p) = &args.save {
         let saved = Host::save(&mut host, Some(&p.to_string_lossy()))
             .map_err(|e| format!("--save {}: {}", p.display(), e.0))?;
@@ -369,7 +546,7 @@ fn run(args: &RunArgs, m: &ArgMatches) -> Result<()> {
 fn render(args: &RenderArgs, m: &ArgMatches) -> Result<()> {
     let (w, h) = dc_raster::parse_size(&args.size)
         .ok_or_else(|| format!("--size must look like 1024x768, not {:?}", args.size))?;
-    let (host, _) = run_script(&args.script, m)?;
+    let Ran { host, import, .. } = run_script(&args.script, m)?;
     let mut params = json!({
         "view": args.view,
         "width": w,
@@ -385,13 +562,17 @@ fn render(args: &RenderArgs, m: &ArgMatches) -> Result<()> {
     }
     let png = host.render_png(&params).map_err(host_err)?;
     std::fs::write(&args.out, &png).map_err(|e| format!("{}: {e}", args.out.display()))?;
-    print_json(&json!({
+    let mut out = json!({
         "path": args.out.display().to_string(),
         "width": w,
         "height": h,
         "view": args.view,
         "bytes": png.len(),
-    }))
+    });
+    if let Some(import) = import {
+        out["import"] = import;
+    }
+    print_json(&out)
 }
 
 fn mcp(connect: Option<&str>) -> Result<()> {
