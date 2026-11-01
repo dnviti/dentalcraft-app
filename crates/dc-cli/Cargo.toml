@@ -19,6 +19,7 @@ clap.workspace = true
 dc-case.workspace = true
 dc-i18n.workspace = true
 dc-mcp.workspace = true
+dc-module-api.workspace = true
 dc-raster.workspace = true
 dc-session.workspace = true
 dca-model.workspace = true
