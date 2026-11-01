@@ -56,9 +56,12 @@ fn module() -> Box<dyn Module> {
     Box::new(AlignersModule::new())
 }
 
-/// Number of leaves of the module's menu (the total of the workflow footer).
+/// Number of steps of the workflow (the total of the footer): not the
+/// shortcuts, the exports and the corrections.
 fn leaf_count() -> usize {
-    module().menu().command_ids().len()
+    let steps = module().menu().step_ids().len();
+    assert_eq!(steps, 8);
+    steps
 }
 
 /// The aligners module that records the ids passed to [`Module::select`].
@@ -83,8 +86,14 @@ impl Module for Spy {
     fn commands(&self) -> Vec<CommandDesc> {
         self.inner.commands()
     }
+    fn command_specs(&self) -> Vec<dc_module_api::CommandSpec> {
+        self.inner.command_specs()
+    }
     fn invoke(&mut self, id: &str, ctx: &mut ModuleCtx<'_>) -> Result<(), ModuleError> {
         self.inner.invoke(id, ctx)
+    }
+    fn leaf_done(&self, state: &CaseState, id: &str) -> bool {
+        self.inner.leaf_done(state, id)
     }
     fn select(&mut self, id: &str) {
         self.selected.lock().unwrap().push(id.to_owned());
@@ -253,13 +262,17 @@ fn the_corrections_stay_closed_until_opened() {
 }
 
 #[test]
-fn a_leaf_that_needs_an_answer_runs_nothing_until_it_has_it() {
-    // the dialog is not there yet: the click selects the leaf and nothing fails
+fn a_leaf_that_needs_an_answer_asks_for_it_and_runs_nothing_before() {
+    // headless: the dialog is counted, not shown; the click selects the leaf
     let mut ws = Workspace::new_headless(module(), None, None);
-    for id in ["aligners.output.export-all", "aligners.followup.visits"] {
+    for (n, id) in ["aligners.output.export-all", "aligners.followup.visits"]
+        .into_iter()
+        .enumerate()
+    {
         ws.activate(id);
         assert_eq!(ws.selected(), Some(id));
         assert!(!ws.is_busy(), "{id}");
+        assert_eq!(ws.dialog_requests(), n + 1, "{id}");
     }
     assert!(ws.toast_keys().is_empty());
 }
@@ -280,10 +293,12 @@ fn every_leaf_can_be_activated() {
     let keys = ws.toast_keys();
     assert!(
         keys.iter()
-            .all(|k| k == "ws-toast-busy" || k == "aligners-notice-bite-estimated"),
+            .all(|k| k == "ws-toast-busy" || k == "ws-toast-auto-long"),
         "{keys:?}"
     );
     assert!(keys.iter().any(|k| k == "ws-toast-busy"), "{keys:?}");
+    // the import asks for its files; the pipeline then runs, and the leaves
+    // after it find the workspace busy before they ask for anything
     assert_eq!(ws.dialog_requests(), 1);
     assert!(ws.wait_for_jobs(WAIT));
 }
@@ -1051,4 +1066,234 @@ fn the_close_control_dismisses_a_sticky_arch_warning() {
         .click();
     h.run();
     assert!(h.state().ws.toast_keys().is_empty());
+}
+
+// ---------------------------------------------------------------- simple menu
+
+/// A case with the two demo arches (marked, coloured), as a project.
+fn demo_project(arches: &[&str]) -> Project {
+    let mut state = CaseState::default();
+    for arch in arches {
+        state = dca_module::commands::find("aligners.demo")
+            .unwrap()
+            .execute(
+                &state,
+                &json!({ "arch": arch }),
+                &dc_command::JobCtx::detached(),
+            )
+            .unwrap()
+            .0;
+    }
+    Project::new(
+        AppInfo {
+            version: "0.1.0".into(),
+            commit: "test".into(),
+        },
+        dc_workspace::now_rfc3339(),
+        state,
+    )
+}
+
+fn footer(h: &Harness<'static, App>, done: usize) -> bool {
+    h.query_by_label(&format!("Treatment workflow {done}/8"))
+        .is_some()
+}
+
+#[test]
+fn the_footer_counts_the_eight_steps_that_have_their_result() {
+    // a new case: nothing done; the demo arch has its scans, tooth marks and colours
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.run();
+    assert!(footer(&h, 0));
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.run();
+    assert!(
+        footer(&h, 3),
+        "import, find the teeth, separate teeth and gum"
+    );
+}
+
+#[test]
+fn the_shortcuts_and_the_exports_do_not_count() {
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let menu = ws.module().menu();
+    let count = |id: &str| menu.find(id).unwrap().step_ids().len();
+    assert_eq!(
+        count("aligners.case"),
+        1,
+        "import; the automatic run is not a step"
+    );
+    assert_eq!(count("aligners.teeth"), 3, "the corrections are not steps");
+    assert_eq!(count("aligners.diagnosis"), 1);
+    assert_eq!(
+        count("aligners.planning"),
+        3,
+        "moving a tooth is not a step"
+    );
+    assert_eq!(
+        count("aligners.production"),
+        0,
+        "nothing to count: no counter"
+    );
+    assert_eq!(count("aligners.followup"), 0);
+}
+
+#[test]
+fn a_project_reopened_shows_the_ticks_of_what_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.dcprj");
+    let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    // load it back like Home does
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(&path, &codecs).unwrap();
+    assert!(!loaded.read_only, "{:?}", loaded.issues);
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(loaded.project),
+        Some(path),
+    ));
+    h.run();
+    assert!(footer(&h, 3));
+}
+
+#[test]
+fn run_everything_fills_the_steps_stops_on_a_guess_and_leads_to_the_analysis() {
+    // both arches from the demo, then the whole pipeline from the menu
+    let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower", "upper"])), None);
+    ws.activate("aligners.auto");
+    assert!(
+        ws.toast_keys().contains(&"ws-toast-auto-long".to_owned()),
+        "it says it takes a while"
+    );
+    assert!(ws.wait_for_jobs(Duration::from_secs(900)));
+    let keys = ws.toast_keys();
+    assert!(keys.contains(&"ws-toast-auto-done".to_owned()), "{keys:?}");
+    // the case analysis is where to look next, in the inspector
+    assert_eq!(ws.selected(), Some("aligners.diagnosis.space-analysis"));
+    let mut h = harness(ws);
+    h.run();
+    assert!(footer(&h, 8), "all the steps have their result");
+    assert_eq!(
+        h.get_all_by_label("Space available").count(),
+        2,
+        "one card per arch"
+    );
+    assert_eq!(h.get_all_by_label("Little index").count(), 2);
+    assert!(h.query_by_label("Bolton ratio").is_some());
+    assert!(h.query_by_label("Complexity of the case").is_some());
+    assert!(h.query_by_label("Run again").is_some());
+    // one undo step takes the whole run back
+    assert!(h.state_mut().ws.undo());
+    h.run();
+    assert!(footer(&h, 3));
+}
+
+#[test]
+fn run_everything_stops_with_a_clear_message_on_a_guessed_arch() {
+    let mut project = demo_project(&["lower"]);
+    // a scan the geometry cannot place stays a guess
+    project.case_state.case.scans[0].role_source = RoleSource::Provisional;
+    project.case_state.case.scans[0].source_name = "scan.stl".into();
+    let blob = project.case_state.blobs.insert(tetra(40.0));
+    project.case_state.case.scans[0].mesh = blob;
+    let mut ws = Workspace::new_headless(module(), Some(project), None);
+    ws.activate("aligners.auto");
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(!ws.toast_keys().contains(&"ws-toast-auto-done".to_owned()));
+    let details = ws.toast_details();
+    let (key, detail) = details.last().unwrap();
+    assert_eq!(key, "ws-toast-command-failed");
+    let detail = detail.as_deref().unwrap();
+    assert!(detail.contains("Stopped at Arch recognition"), "{detail}");
+    assert!(!detail.contains("aligners."), "{detail}");
+    assert!(!ws.is_dirty(), "the case is left as it was");
+}
+
+#[test]
+fn the_case_analysis_is_in_the_inspector_with_its_figures() {
+    let mut project = demo_project(&["lower"]);
+    let mut al = aligners_of(&project.case_state);
+    al.diagnosis.arches.insert(
+        ScanRole::Lower,
+        dca_model::ArchSpace {
+            available_mm: 62.4,
+            required_mm: 66.1,
+            little_index_mm: 4.2,
+        },
+    );
+    al.diagnosis.bolton_anterior = Some(77.9);
+    al.diagnosis.bolton_overall = Some(91.3);
+    al.diagnosis.complexity_score = Some(35.0);
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    let mut ws = Workspace::new_headless(module(), Some(project), None);
+    ws.select_item("aligners.diagnosis.space-analysis");
+    let mut h = harness(ws);
+    h.run();
+    for label in [
+        "Results of the case analysis",
+        "Space available",
+        "62.4 mm",
+        "Space needed",
+        "66.1 mm",
+        "Difference",
+        "+3.7 mm",
+        "Crowding",
+        "Little index",
+        "4.2 mm",
+        "Moderate irregularity",
+        "Bolton ratio",
+        "77.9 %",
+        "91.3 %",
+        "Complexity of the case",
+        "Moderate",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+}
+
+#[test]
+fn a_bolton_that_could_not_be_calculated_says_so() {
+    let mut project = demo_project(&["lower", "upper"]);
+    let mut al = aligners_of(&project.case_state);
+    for role in [ScanRole::Lower, ScanRole::Upper] {
+        al.diagnosis
+            .arches
+            .insert(role, dca_model::ArchSpace::default());
+    }
+    al.diagnosis.bolton_anterior = None;
+    al.diagnosis.bolton_overall = None;
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    let mut ws = Workspace::new_headless(module(), Some(project), None);
+    ws.select_item("aligners.diagnosis.space-analysis");
+    let mut h = harness(ws);
+    h.run();
+    assert!(h.query_by_label("Bolton ratio").is_some());
+    assert_eq!(h.get_all_by_label("Not calculated").count(), 2);
+    assert!(
+        h.query_by_label_contains("Bolton needs every tooth")
+            .is_some()
+    );
+}
+
+#[test]
+fn the_shortcut_list_names_the_leaves_in_key_order() {
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.run();
+    h.get_by_label("Help").click();
+    h.run();
+    for label in ["Separate teeth and gum", "Tooth brush", "Aligners"] {
+        assert!(h.get_all_by_label(label).count() >= 1, "{label}");
+    }
+    // the keys, in their order
+    for key in ["A", "B", "S"] {
+        assert_eq!(h.get_all_by_label(key).count(), 1, "{key}");
+    }
+    assert!(h.query_by_label("Keyboard shortcuts").is_some());
 }

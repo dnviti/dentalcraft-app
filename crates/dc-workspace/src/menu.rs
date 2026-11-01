@@ -57,11 +57,20 @@ pub fn filter_ids(
 }
 
 /// Command ids of the leaves under `item` (itself when it is a leaf).
+#[cfg(test)]
 pub(crate) fn leaf_commands(item: &MenuItem) -> Vec<&'static str> {
     match item.command_id() {
         Some(c) => vec![c],
         None => item.children().iter().flat_map(leaf_commands).collect(),
     }
+}
+
+/// The counter of a group: how many of its workflow steps are done out of how
+/// many it has, `None` for a group with no step (the shortcuts and the
+/// corrections do not count).
+pub(crate) fn progress_of(item: &MenuItem, done: &dyn Fn(&str) -> bool) -> Option<(usize, usize)> {
+    let steps = item.step_ids();
+    (!steps.is_empty()).then(|| (steps.iter().filter(|id| done(id)).count(), steps.len()))
 }
 
 /// What the user did in the menu this frame.
@@ -160,8 +169,8 @@ pub(crate) fn show(ui: &mut Ui, view: &mut MenuView, mc: &MenuCtx<'_>) -> Vec<Me
             }
         });
 
-    // footer: treatment workflow progress
-    let all: Vec<&'static str> = mc.tree.command_ids();
+    // footer: treatment workflow progress, in the steps of the workflow
+    let all: Vec<&'static str> = mc.tree.step_ids();
     let done = all.iter().filter(|id| (mc.done)(id)).count();
     let rect = Rect::from_min_size(
         pos2(ui.min_rect().left(), ui.max_rect().bottom() - footer_h),
@@ -271,8 +280,7 @@ fn rows(
     }
     let has_children = !item.children().is_empty();
     let expanded = has_children && (visible.is_some() || view.expanded.contains(item.id));
-    let leaves = leaf_commands(item);
-    let done = leaves.iter().filter(|c| (mc.done)(c)).count();
+    let progress = progress_of(item, mc.done);
     let resp = row(
         ui,
         &Row {
@@ -281,8 +289,15 @@ fn rows(
             icon: item.icon,
             expandable: has_children,
             expanded,
-            meta: (depth == 0).then(|| format!("{done}/{}", leaves.len())),
-            done: !leaves.is_empty() && done == leaves.len(),
+            meta: progress
+                .filter(|_| depth == 0)
+                .map(|(done, all)| format!("{done}/{all}")),
+            // a leaf has its tick when the case holds its result; a group
+            // when all its steps are done
+            done: match item.command_id() {
+                Some(cmd) => (mc.done)(cmd),
+                None => progress.is_some_and(|(done, all)| done == all),
+            },
             stub: item.status == MenuStatus::Stub,
             selected: mc.selected == Some(item.id),
             shortcut: item
@@ -428,7 +443,10 @@ fn row(ui: &mut Ui, r: &Row<'_>) -> Response {
                 c.text_secondary,
             );
         }
-        let (glyph_s, color) = if r.done {
+        // a sub-group shows its own icon: it has no result to tick
+        let (glyph_s, color) = if r.expandable && r.icon.is_some() {
+            (r.icon.map_or(ic::DOT_OUTLINE, glyph), c.text_secondary)
+        } else if r.done {
             (ic::CHECK_CIRCLE, c.status_success)
         } else if r.stub {
             (ic::CIRCLE_DASHED, c.text_disabled)
@@ -527,5 +545,35 @@ mod tests {
         assert!(v.expanded.contains("plan") && v.expanded.contains("plan.stage"));
         v.expand_all(&t);
         assert_eq!(v.expanded.len(), 3);
+    }
+
+    #[test]
+    fn a_group_counts_its_steps_and_one_without_steps_has_no_counter() {
+        let t = MenuTree::new(vec![
+            MenuItem::submenu(
+                "g",
+                "G",
+                vec![
+                    MenuItem::command("a", "A", "a"),
+                    MenuItem::command("b", "B", "b").not_a_step(),
+                    MenuItem::command("c", "C", "c"),
+                    MenuItem::submenu(
+                        "m",
+                        "M",
+                        vec![MenuItem::command("d", "D", "d").not_a_step()],
+                    ),
+                ],
+            ),
+            MenuItem::submenu(
+                "e",
+                "E",
+                vec![MenuItem::command("f", "F", "f").not_a_step()],
+            ),
+        ]);
+        // what is done among the shortcuts does not count
+        let done = |id: &str| id == "a" || id == "b" || id == "f";
+        assert_eq!(progress_of(&t.roots[0], &done), Some((1, 2)));
+        assert_eq!(progress_of(&t.roots[1], &done), None);
+        assert_eq!(progress_of(&t.roots[0].children()[3], &done), None);
     }
 }

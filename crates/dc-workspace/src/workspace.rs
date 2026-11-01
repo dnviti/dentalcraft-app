@@ -9,7 +9,7 @@ use dc_case::{Case, CaseState, RoleSource, ScanRole};
 use dc_command::{Command, CommandError, StepHistory, UndoStack};
 use dc_jobs::{JobError, JobHandle, JobSystem, Progress};
 use dc_module_api::{
-    CommandDesc, CommandOutput, CommandSpec, MenuStatus, MenuTree, Module, ModuleCtx,
+    CommandDesc, CommandOutput, CommandSpec, LeafInput, MenuStatus, MenuTree, Module, ModuleCtx,
     NOT_AVAILABLE_KEY, Toast, ToastLevel, is_import_scans_command,
 };
 use dc_project::{Manifest, Project};
@@ -18,10 +18,10 @@ use egui::KeyboardShortcut;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::import;
 use crate::menu::MenuView;
 use crate::timeline::TimelineState;
 use crate::view::ViewState;
+use crate::{import, leaf};
 use crate::{keys, project};
 
 /// What the shell must do after a frame of the workspace.
@@ -96,6 +96,9 @@ pub(crate) enum SpecKind {
     Import,
     /// `case.set-role`: its output tells what the module cleared.
     SetRole,
+    /// The command of a menu leaf (by its id): the output of some is shown
+    /// ([`leaf::report`]).
+    Leaf(&'static str),
 }
 
 impl SpecKind {
@@ -103,7 +106,7 @@ impl SpecKind {
     fn error_key(self) -> &'static str {
         match self {
             SpecKind::Import => "ws-toast-import-failed",
-            SpecKind::SetRole => "ws-toast-command-failed",
+            SpecKind::SetRole | SpecKind::Leaf(_) => "ws-toast-command-failed",
         }
     }
 }
@@ -160,6 +163,16 @@ impl Running {
         !matches!(self.task, Task::Save(_))
     }
 
+    /// `true` once the user asked to stop it and it has not stopped yet (a
+    /// job stops at its next look at the flag, which can take a while).
+    pub fn cancelling(&self) -> bool {
+        match &self.task {
+            Task::Spec { handle, .. } => handle.is_cancelled(),
+            Task::Command { handle, .. } => handle.is_cancelled(),
+            Task::Save(_) => false,
+        }
+    }
+
     fn is_finished(&self) -> bool {
         match &self.task {
             Task::Spec { handle, .. } => handle.is_finished(),
@@ -173,6 +186,8 @@ impl Running {
 pub(crate) enum DialogAnswer {
     Import(Vec<PathBuf>),
     SaveAs(Option<PathBuf>, Option<Exit>),
+    /// The folder or file a menu leaf asked for (`None`: cancelled).
+    Leaf(&'static str, Option<PathBuf>),
 }
 
 /// The workspace screen of an open project: menu tree, viewport, inspector,
@@ -181,6 +196,8 @@ pub struct Workspace {
     pub(crate) module: Box<dyn Module>,
     pub(crate) menu: MenuTree,
     pub(crate) commands: Vec<CommandDesc>,
+    /// The registered commands of the module, to run a leaf with its output.
+    specs: Vec<CommandSpec>,
     pub(crate) shortcuts: Vec<(&'static str, KeyboardShortcut)>,
     pub(crate) shortcut_text: HashMap<&'static str, String>,
     pub(crate) undo: UndoStack,
@@ -256,6 +273,7 @@ impl Workspace {
         let state = Arc::new(state);
         let menu = module.menu();
         let commands = module.commands();
+        let specs = module.command_specs();
         let mut shortcuts = Vec::new();
         let mut shortcut_text = HashMap::new();
         for c in &commands {
@@ -269,9 +287,9 @@ impl Workspace {
         // the module's own import when it has one, the core's otherwise
         let builtins = dc_session::builtins::specs();
         let builtin = |id: &str| builtins.iter().find(|s| s.id == id).copied();
-        let import_spec = module
-            .command_specs()
-            .into_iter()
+        let import_spec = specs
+            .iter()
+            .copied()
             .find(|s| is_import_scans_command(s.id))
             .or_else(|| builtin(CASE_IMPORT));
         let set_role_spec = builtin(CASE_SET_ROLE);
@@ -283,6 +301,7 @@ impl Workspace {
             module,
             menu,
             commands,
+            specs,
             shortcuts,
             shortcut_text,
             undo: UndoStack::new(state.clone(), UndoStack::DEFAULT_BUDGET),
@@ -458,19 +477,24 @@ impl Workspace {
     }
 
     /// Runs menu command `command_id`: "Import scans" entries open the file
-    /// dialog (handled by the workspace); everything else goes to the
-    /// module, whose commands run in the background and whose toasts are
-    /// shown.
+    /// dialog (handled by the workspace), and so do the leaves that need a
+    /// folder or a file ([`LeafInput`]); everything else goes to the module,
+    /// whose commands run in the background (the output of the ones that have
+    /// something to say is shown) and whose toasts are shown.
     pub fn activate(&mut self, command_id: &str) {
-        if let Some(id) = self
+        let mut input = None;
+        let mut leaf_id = None;
+        if let Some((id, cmd, i)) = self
             .menu
             .iter()
             .map(|(_, i)| i)
             .find(|i| i.command_id() == Some(command_id))
-            .map(|i| i.id)
+            .and_then(|i| Some((i.id, i.command_id()?, i.input)))
         {
             self.select_item(id);
             self.menu_view.reveal(&self.menu, id);
+            input = i;
+            leaf_id = Some(cmd);
         }
         // a manual tool opens its panel and works on the pointer; its command runs from there
         if let Some(tool) = crate::manual::Tool::from_command(command_id)
@@ -492,6 +516,21 @@ impl Workspace {
             }
             return;
         }
+        // a leaf that needs a folder or a file: ask, then run the command with
+        // the answer
+        if let (Some(input), Some(id)) = (input, leaf_id)
+            && self
+                .commands
+                .iter()
+                .any(|c| c.id == command_id && c.status == MenuStatus::Ready)
+        {
+            if self.command_running() {
+                self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            } else {
+                self.request_leaf_dialog(id, input);
+            }
+            return;
+        }
         let state = self.undo.current().clone();
         let mut ctx = ModuleCtx::new(&state, &self.jobs);
         let result = self.module.invoke(command_id, &mut ctx);
@@ -499,8 +538,21 @@ impl Workspace {
         for toast in toasts {
             self.toast(toast);
         }
-        for cmd in cmds {
-            self.run_command(cmd);
+        // a leaf's one command runs as a spec, to read its output
+        let spec = leaf_id.filter(|_| cmds.len() == 1).and_then(|id| {
+            self.specs
+                .iter()
+                .copied()
+                .find(|s| s.id == id)
+                .map(|s| (id, s))
+        });
+        match spec {
+            Some((id, spec)) => self.run_leaf(id, spec, Value::Null),
+            None => {
+                for cmd in cmds {
+                    self.run_command(cmd);
+                }
+            }
         }
         if let Err(e) = result {
             let stub = self
@@ -514,6 +566,50 @@ impl Workspace {
                 );
             }
         }
+    }
+
+    /// The answer to the folder or file dialog of leaf `command_id` (the
+    /// workspace calls it when the dialog closes): runs the command with the
+    /// path as the parameter the leaf names, in the background, one undo step
+    /// when the command changes the case. `None` is a cancelled dialog and
+    /// does nothing. Refused (with a notification) while another command
+    /// runs.
+    pub fn answer_leaf_input(&mut self, command_id: &str, path: Option<PathBuf>) {
+        let Some(path) = path else { return };
+        let Some((id, input)) = self
+            .menu
+            .iter()
+            .map(|(_, i)| i)
+            .find(|i| i.command_id() == Some(command_id))
+            .and_then(|i| Some((i.command_id()?, i.input?)))
+        else {
+            return;
+        };
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        let Some(spec) = self.specs.iter().copied().find(|s| s.id == id) else {
+            self.job_error("ws-toast-command-failed", format!("no command {id} to run"));
+            return;
+        };
+        let (LeafInput::Folder { param } | LeafInput::ScanFile { param }) = input;
+        let params = json!({ param: path.to_string_lossy() });
+        self.run_leaf(id, spec, params);
+    }
+
+    /// Runs the command of menu leaf `id` as a job and shows its output when
+    /// it ends ([`leaf::report`]). The caller has checked that it is idle
+    /// (here too: busy gets the notification).
+    fn run_leaf(&mut self, id: &'static str, spec: CommandSpec, params: Value) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some((title, line)) = leaf::long_notice(id) {
+            self.toast(Toast::new(ToastLevel::Info, title).with_detail(crate::t(line)));
+        }
+        self.run_spec(spec, params, SpecKind::Leaf(id), leaf::job_name_key(id));
     }
 
     /// Imports `paths` (STL / OBJ / PLY) in the background with the shared
@@ -783,18 +879,23 @@ impl Workspace {
         }
     }
 
-    /// `true` when command `id` counts as done: its step has a successful
-    /// record in the step history ("Import scans" = the case has scans and
-    /// none is still a guess to check).
+    /// `true` when command `id` counts as done: the case holds its result
+    /// ([`Module::leaf_done`]), it is "Import scans" and the case has scans
+    /// none of which is still a guess to check, or its step has a successful
+    /// record in the step history.
     pub(crate) fn is_done(&self, id: &str) -> bool {
         if is_import_scans_command(id) {
             let scans = &self.undo.current().case.scans;
-            return !scans.is_empty()
+            if !scans.is_empty()
                 && scans
                     .iter()
-                    .all(|s| s.role_source != RoleSource::Provisional);
+                    .all(|s| s.role_source != RoleSource::Provisional)
+            {
+                return true;
+            }
         }
-        self.history.record(id).is_some_and(|r| r.failed.is_none())
+        self.module.leaf_done(self.undo.current(), id)
+            || self.history.record(id).is_some_and(|r| r.failed.is_none())
     }
 
     // ------------------------------------------------------------ dialogs
@@ -815,6 +916,21 @@ impl Workspace {
                 c.request_repaint();
             }
             DialogAnswer::Import(files)
+        });
+    }
+
+    fn request_leaf_dialog(&mut self, id: &'static str, input: LeafInput) {
+        if !self.native_dialogs {
+            self.dialog_requests += 1;
+            return;
+        }
+        let ctx = self.egui_ctx.clone();
+        self.spawn_dialog(move || {
+            let path = leaf::pick(input);
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+            DialogAnswer::Leaf(id, path)
         });
     }
 
@@ -874,6 +990,7 @@ impl Workspace {
                         DialogAnswer::Import(files) => self.import_files(files),
                         DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then),
                         DialogAnswer::SaveAs(None, _) => {}
+                        DialogAnswer::Leaf(id, path) => self.answer_leaf_input(id, path),
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.dialog = None,
@@ -896,17 +1013,23 @@ impl Workspace {
                 handle,
             } => match handle.try_take() {
                 Some(Ok(Ok((state, out)))) => {
-                    self.undo.push(Arc::new(state), label);
+                    if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
+                        self.undo.push(Arc::new(state), label);
+                    }
                     match kind {
                         SpecKind::Import => {
                             self.view.refit = true;
                             self.show_import_report(&out);
                         }
                         SpecKind::SetRole => self.show_role_report(&out),
+                        SpecKind::Leaf(id) => self.show_leaf_report(id, &out),
                     }
                 }
                 Some(Ok(Err(CommandError::Cancelled))) => {
                     self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
+                }
+                Some(Ok(Err(CommandError::NotAvailable(_)))) => {
+                    self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 }
                 Some(Ok(Err(e))) => self.job_error(kind.error_key(), error_text(e)),
                 Some(Err(e)) => self.job_panic(&e),
@@ -947,6 +1070,74 @@ impl Workspace {
                 Some(Err(e)) => self.job_panic(&e),
                 None => {}
             },
+        }
+    }
+
+    /// What a leaf's command says when it ends: the sentence of its output,
+    /// and for the whole pipeline the summary and the next leaf.
+    fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        if id == leaf::AUTO {
+            self.show_auto_report(out);
+        } else if let Some(r) = leaf::report(id, out) {
+            if r.sticky {
+                self.toast_sticky(r.toast);
+            } else {
+                self.toast(r.toast);
+            }
+        }
+    }
+
+    /// The first step of the workflow the case has no result for.
+    pub(crate) fn next_step(&self) -> Option<&'static str> {
+        self.menu
+            .step_ids()
+            .into_iter()
+            .find(|id| !self.is_done(id))
+    }
+
+    /// The pipeline ended well: refresh the viewport, say how many steps ran
+    /// and how long they took, and select what comes next.
+    fn show_auto_report(&mut self, out: &Value) {
+        self.view.refit = true;
+        let steps = out["steps"].as_array().map_or(0, Vec::len);
+        let time = leaf::duration_text(out["seconds"].as_f64().unwrap_or(0.0));
+        let label = |ws: &Self, id: &str| {
+            ws.menu
+                .find(id)
+                .map_or_else(|| id.to_owned(), |i| crate::t(i.label_key))
+        };
+        let (next, detail) = match self.next_step() {
+            Some(next) => {
+                let text = dc_i18n::tr_args(
+                    "ws-auto-done-next",
+                    &[
+                        ("steps", &steps.to_string()),
+                        ("time", &time),
+                        ("next", &label(self, next)),
+                    ],
+                );
+                (next, text)
+            }
+            None => {
+                let text = dc_i18n::tr_args(
+                    "ws-auto-done-review",
+                    &[
+                        ("steps", &steps.to_string()),
+                        ("time", &time),
+                        ("analysis", &label(self, leaf::CASE_ANALYSIS)),
+                        ("export", &label(self, leaf::EXPORT_ALL)),
+                    ],
+                );
+                (leaf::CASE_ANALYSIS, text)
+            }
+        };
+        self.toast_sticky(
+            Toast::new(ToastLevel::Success, "ws-toast-auto-done").with_detail(detail),
+        );
+        if let Some(item) = self.menu.find(next) {
+            let id = item.id;
+            self.select_item(id);
+            self.menu_view.reveal(&self.menu, id);
         }
     }
 
