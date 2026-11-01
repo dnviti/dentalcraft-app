@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use dc_case::{Case, CaseState, Fdi, ModuleState, Pose, RoleSource, Scan, ScanRole};
 use dc_mesh::{MeshFormat, TriMesh, Units};
-use dc_module_api::{
-    CommandDesc, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError, NOT_AVAILABLE_KEY,
-};
+use dc_module_api::{CommandDesc, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError};
 use dc_project::{AppInfo, Project};
 use dc_workspace::{Workspace, WorkspaceAction};
 use dca_model::{AlignersState, IprStep, Seed, Stage};
@@ -209,16 +207,17 @@ fn renders_with_synthetic_project() {
 fn menu_search_filters() {
     let mut h = harness(Workspace::new_headless(module(), None, None));
     h.run();
-    assert!(h.query_by_label("Case info").is_some());
+    assert!(h.query_by_label("Run everything automatically").is_some());
     // `/` focuses the filter, typing filters the tree
     h.key_press(Key::Slash);
     h.run();
     h.event(egui::Event::Text("brush".into()));
     h.run();
     assert_eq!(h.state().ws.filter(), "brush");
-    assert!(h.query_by_label("Case info").is_none());
-    assert!(h.query_by_label("Manual brush").is_some());
-    assert!(h.query_by_label("Preparation").is_some());
+    assert!(h.query_by_label("Run everything automatically").is_none());
+    assert!(h.query_by_label("Tooth brush").is_some());
+    assert!(h.query_by_label("Manual corrections").is_some());
+    assert!(h.query_by_label("Teeth").is_some());
     // Escape clears the filter
     h.key_press(Key::Escape);
     h.run();
@@ -229,41 +228,62 @@ fn menu_search_filters() {
     assert!(h.query_by_label("No tool matches the search.").is_some());
     let ids = h.state().ws.visible_menu_ids();
     assert!(ids.is_empty());
-    h.state_mut().ws.set_filter("ipr");
+    h.state_mut().ws.set_filter("bite");
     assert!(
         h.state()
             .ws
             .visible_menu_ids()
-            .contains(&"aligners.planning.ipr")
+            .contains(&"aligners.occlusion.align")
     );
+}
+
+#[test]
+fn the_corrections_stay_closed_until_opened() {
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.run();
+    assert!(h.query_by_label("Manual corrections").is_none());
+    h.get_by_label("Teeth").click();
+    settle(&mut h);
+    assert!(h.query_by_label("Find the teeth").is_some());
+    assert!(h.query_by_label("Manual corrections").is_some());
+    assert!(h.query_by_label("Tooth brush").is_none());
+    h.get_by_label("Manual corrections").click();
+    settle(&mut h);
+    assert!(h.query_by_label("Tooth brush").is_some());
+}
+
+#[test]
+fn a_leaf_that_needs_an_answer_runs_nothing_until_it_has_it() {
+    // the dialog is not there yet: the click selects the leaf and nothing fails
+    let mut ws = Workspace::new_headless(module(), None, None);
+    for id in ["aligners.output.export-all", "aligners.followup.visits"] {
+        ws.activate(id);
+        assert_eq!(ws.selected(), Some(id));
+        assert!(!ws.is_busy(), "{id}");
+    }
+    assert!(ws.toast_keys().is_empty());
 }
 
 #[test]
 fn every_leaf_can_be_activated() {
     let mut ws = Workspace::new_headless(module(), None, None);
     let leaves = ws.module().menu().command_ids();
-    assert!(leaves.len() > 40);
+    assert_eq!(leaves.len(), 19);
     for id in &leaves {
+        assert!(dca_module::commands::is_registered(id), "{id}");
         ws.activate(id);
         assert_eq!(ws.selected(), Some(*id));
     }
-    // placeholders say they are not available; a leaf with a registered
-    // command runs it as a job (the next ones find the workspace busy) and
-    // the import asks for its files
-    let stubs = leaves
-        .iter()
-        .filter(|id| {
-            !dca_module::commands::is_registered(id) && !dc_module_api::is_import_scans_command(id)
-        })
-        .count();
+    // nothing is a placeholder: a leaf runs its command as a job (the next
+    // ones find the workspace busy), a manual tool opens its panel and the
+    // import asks for its files
     let keys = ws.toast_keys();
-    let not_available = keys.iter().filter(|k| *k == NOT_AVAILABLE_KEY).count();
-    assert_eq!(not_available, stubs, "{keys:?}");
     assert!(
         keys.iter()
-            .all(|k| k == NOT_AVAILABLE_KEY || k == "ws-toast-busy"),
+            .all(|k| k == "ws-toast-busy" || k == "aligners-notice-bite-estimated"),
         "{keys:?}"
     );
+    assert!(keys.iter().any(|k| k == "ws-toast-busy"), "{keys:?}");
     assert_eq!(ws.dialog_requests(), 1);
     assert!(ws.wait_for_jobs(WAIT));
 }
@@ -275,7 +295,7 @@ fn clicking_every_row_does_not_panic() {
     let mut h = harness(ws);
     h.run();
     let n = h.get_all_by_role(Role::TreeItem).count();
-    assert!(n > 50);
+    assert_eq!(n, 19 + 7, "the leaves, the groups and the corrections");
     // bottom-up: collapsing a group only removes rows below it
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
@@ -323,7 +343,8 @@ fn menu_clicks_select_in_the_module() {
     // a group header and a leaf
     assert!(log.iter().any(|id| id == "aligners.diagnosis"), "{log:?}");
     assert!(
-        log.iter().any(|id| id == "aligners.diagnosis.bolton"),
+        log.iter()
+            .any(|id| id == "aligners.diagnosis.space-analysis"),
         "{log:?}"
     );
 }
@@ -335,13 +356,10 @@ fn module_shortcuts_run_their_command() {
     h.run();
     h.key_press(Key::S);
     settle(&mut h);
-    assert_eq!(
-        h.state().ws.selected(),
-        Some("aligners.planning.staging.automatic")
-    );
+    assert_eq!(h.state().ws.selected(), Some("aligners.planning.aligners"));
     assert_eq!(
         log.lock().unwrap().last().map(String::as_str),
-        Some("aligners.planning.staging.automatic")
+        Some("aligners.planning.aligners")
     );
     h.key_press(Key::A);
     settle(&mut h);
@@ -349,13 +367,11 @@ fn module_shortcuts_run_their_command() {
         h.state().ws.selected(),
         Some("aligners.preparation.segmentation.automatic")
     );
-    // a placeholder says it is not available; a registered command runs and
-    // fails on the empty case
+    // a registered command runs and fails on the empty case
     assert!(h.state_mut().ws.wait_for_jobs(WAIT));
     let keys = h.state().ws.toast_keys();
     assert!(
-        keys.iter()
-            .any(|k| k == NOT_AVAILABLE_KEY || k == "ws-toast-command-failed"),
+        keys.iter().any(|k| k == "ws-toast-command-failed"),
         "{keys:?}"
     );
 }
@@ -754,8 +770,8 @@ fn replacing_a_scan_says_what_was_cleared_and_undo_restores_everything() {
             .find(|(k, _)| k == "ws-toast-import-cleared")
             .unwrap_or_else(|| panic!("{details:?}"));
         let text = cleared.1.as_deref().unwrap();
-        assert!(text.contains("tooth seeds"), "{text}");
-        assert!(text.contains("aligner stages"), "{text}");
+        assert!(text.contains("tooth marks"), "{text}");
+        assert!(text.contains("aligner sequence"), "{text}");
         assert!(!text.to_lowercase().contains("reset"), "{text}");
         let keys = ws.toast_keys();
         assert!(
@@ -904,7 +920,7 @@ fn setting_a_role_reports_what_the_module_cleared() {
     // a role change is not a replacement: the notice says what happened
     assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
     let text = ws.toast_details()[0].1.clone().unwrap();
-    assert!(text.contains("tooth seeds"), "{text}");
+    assert!(text.contains("tooth marks"), "{text}");
     assert!(text.contains("Ctrl+Z brings the previous roles"), "{text}");
     for word in ["replaced", "reset"] {
         assert!(!text.to_lowercase().contains(word), "{text}");
@@ -959,7 +975,7 @@ fn a_move_without_replacement_is_a_role_change_and_the_bite_registration_is_to_r
     let keys = ws.toast_keys();
     assert_eq!(keys, ["ws-toast-role-changed", "ws-toast-imported"]);
     let text = ws.toast_details()[0].1.clone().unwrap();
-    assert!(text.contains("tooth seeds"), "{text}");
+    assert!(text.contains("tooth marks"), "{text}");
     assert!(
         text.contains("bite registration (to be redone"),
         "the registration is work to redo, not data removed: {text}"

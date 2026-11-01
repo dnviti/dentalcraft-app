@@ -85,7 +85,7 @@ fn italian_role_change_notice() {
     }));
     assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
     let text = ws.toast_details()[0].1.clone().unwrap();
-    assert!(text.contains("semi dei denti"), "{text}");
+    assert!(text.contains("punti dente"), "{text}");
     assert!(
         text.contains("registrazione del morso (da rifare"),
         "{text}"

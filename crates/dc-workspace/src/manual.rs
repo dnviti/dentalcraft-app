@@ -1290,7 +1290,7 @@ mod tests {
         harness.state_mut().ws.activate(ADJUST);
         harness.run();
         // the panel of the tool is on screen
-        harness.get_by_label("Adjust a tooth");
+        harness.get_by_label("Mesial");
         {
             let ws = &mut harness.state_mut().ws;
             ws.manual.tooth = 32;

@@ -479,7 +479,7 @@ fn the_pipeline_stops_at_the_first_failing_step_and_leaves_the_case() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("aligners.auto stopped at step") && err.contains("aligners.output.export-stl"),
+        err.contains("Stopped at Export moved scans and calendar"),
         "{err}"
     );
     assert_eq!(s.state().case, before.case);
