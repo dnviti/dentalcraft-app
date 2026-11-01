@@ -266,7 +266,7 @@ impl Workspace {
         self.menu
             .command_ids()
             .into_iter()
-            .find(|c| crate::import::is_import_command(c))
+            .find(|c| dc_module_api::is_import_scans_command(c))
     }
 
     /// Contact map of the current state (computed once per state); `None`
@@ -463,6 +463,11 @@ impl Workspace {
             scale_bar(ui, inner, px);
         }
 
+        // files held over the window: where they will go
+        if self.confirm_exit.is_none() && ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
+            drop_overlay(ui, rect);
+        }
+
         // toasts (bottom right, above the scale bar)
         self.toasts_ui(
             ui,
@@ -640,7 +645,7 @@ impl Workspace {
         if import {
             match self.import_command_id() {
                 Some(id) => self.activate(id),
-                None => self.activate(crate::import::IMPORT_SCANS_SUFFIX),
+                None => self.activate(dc_module_api::IMPORT_SCANS_SUFFIX),
             }
         }
     }
@@ -667,11 +672,14 @@ impl Workspace {
                 ToastLevel::Warning => ic::WARNING,
                 ToastLevel::Error => ic::WARNING_CIRCLE,
             };
-            let h = if st.toast.detail.is_some() {
-                60.0
-            } else {
-                44.0
-            };
+            // the detail wraps: the card grows with it (at most six lines)
+            let detail = st.toast.detail.as_ref().map(|d| {
+                ui.painter()
+                    .layout(d.clone(), fonts::ui(12.0), c.text_secondary, width - 80.0)
+            });
+            let h = detail.as_ref().map_or(44.0, |g| {
+                (34.0 + g.size().y.min(6.0 * 15.0) + 10.0).max(60.0)
+            });
             let r = Rect::from_min_size(pos2(area.right() - width, y - h), vec2(width, h));
             y -= h + 8.0;
             let p = ui.painter();
@@ -707,13 +715,7 @@ impl Workspace {
                 fonts::semibold(13.0),
                 c.text_primary,
             );
-            if let Some(d) = &st.toast.detail {
-                let g = p.layout(
-                    d.clone(),
-                    fonts::ui(12.0),
-                    c.text_secondary,
-                    r.width() - 80.0,
-                );
+            if let Some(g) = detail {
                 p.with_clip_rect(r).galley(
                     pos2(r.left() + 44.0, r.top() + 34.0),
                     g,
@@ -755,6 +757,55 @@ impl Workspace {
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
+}
+
+/// Overlay of the viewport while files are held over the window: a dashed
+/// blue frame on a faint blue wash, the way the drop zones of the forms
+/// light up, with what to do.
+fn drop_overlay(ui: &mut Ui, rect: Rect) {
+    let c = *colors(ui);
+    let frame = rect.shrink(8.0);
+    let p = ui.painter();
+    p.rect_filled(
+        frame,
+        CornerRadius::same(8),
+        c.select_blue.gamma_multiply(0.10),
+    );
+    let corners = [
+        frame.left_top(),
+        frame.right_top(),
+        frame.right_bottom(),
+        frame.left_bottom(),
+        frame.left_top(),
+    ];
+    p.extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(2.0, c.select_blue),
+        6.0,
+        6.0,
+    ));
+    let mid = frame.center();
+    p.text(
+        mid - vec2(0.0, 36.0),
+        Align2::CENTER_CENTER,
+        ic::UPLOAD_SIMPLE,
+        fonts::icon(40.0),
+        c.select_blue,
+    );
+    p.text(
+        mid + vec2(0.0, 4.0),
+        Align2::CENTER_CENTER,
+        t("ws-drop-title"),
+        fonts::semibold(18.0),
+        c.text_primary,
+    );
+    p.text(
+        mid + vec2(0.0, 30.0),
+        Align2::CENTER_CENTER,
+        t("ws-drop-body"),
+        fonts::ui(13.0),
+        c.text_secondary,
+    );
 }
 
 fn separator(ui: &mut Ui) {

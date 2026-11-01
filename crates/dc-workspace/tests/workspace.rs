@@ -12,12 +12,13 @@ use dc_module_api::{
 };
 use dc_project::{AppInfo, Project};
 use dc_workspace::{Workspace, WorkspaceAction};
-use dca_model::{AlignersState, IprStep, Stage};
+use dca_model::{AlignersState, IprStep, Seed, Stage};
 use dca_module::AlignersModule;
 use egui::{Key, Modifiers, Role, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use glam::Vec3;
+use glam::{DVec3, Vec3};
+use serde_json::json;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -248,11 +249,11 @@ fn every_leaf_can_be_activated() {
     }
     // placeholders say they are not available; a leaf with a registered
     // command runs it as a job (the next ones find the workspace busy) and
-    // the import is run by the workspace
+    // the import asks for its files
     let stubs = leaves
         .iter()
         .filter(|id| {
-            !dca_module::commands::is_registered(id) && !dc_workspace::import::is_import_command(id)
+            !dca_module::commands::is_registered(id) && !dc_module_api::is_import_scans_command(id)
         })
         .count();
     let keys = ws.toast_keys();
@@ -385,7 +386,14 @@ fn import_then_undo_redo() {
             .max_element();
         assert!((size - 50.0).abs() < 1e-3, "size {size}");
         assert!(ws.is_dirty());
-        assert!(ws.toast_keys().contains(&"ws-toast-imported".to_owned()));
+        // named upper: the role comes from the file name
+        assert_eq!(scan.role_source, RoleSource::FileName);
+        // the report of the shared pipeline: what it noticed, then the count
+        let keys = ws.toast_keys();
+        for k in ["ws-toast-warn-rescaled", "ws-toast-warn-low-polygons"] {
+            assert!(keys.contains(&k.to_owned()), "{keys:?}");
+        }
+        assert_eq!(keys.last().map(String::as_str), Some("ws-toast-imported"));
     }
     assert!(h.query_by_label("Unsaved changes").is_some());
     assert!(h.query_by_label("No scans yet").is_none());
@@ -527,4 +535,406 @@ fn ui_with_context_entry_point() {
             .drop_without_applying_deltas();
         assert_eq!(action, WorkspaceAction::None);
     }
+}
+
+// ---------------------------------------------------------------- scan import
+
+const IMPORT_ID: &str = "aligners.case.import-scans";
+
+/// A mesh with an extra vertex per call so two files differ.
+fn scan_mesh(size: f32) -> TriMesh {
+    tetra(size)
+}
+
+/// Project whose upper scan has results the module clears when it changes.
+fn project_with_results() -> Project {
+    let mut p = synthetic_project();
+    let mut al = p
+        .case_state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.seeds.push(Seed {
+        fdi: Fdi::new(11).unwrap(),
+        position: DVec3::new(1.0, -30.0, 2.0),
+    });
+    p.case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    p
+}
+
+fn aligners(ws: &Workspace) -> AlignersState {
+    ws.state()
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone()
+}
+
+/// A file handle for `Event`-less drops.
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
+
+#[test]
+fn import_leaf_asks_for_files_and_queues_nothing() {
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.activate(IMPORT_ID);
+    assert_eq!(ws.selected(), Some(IMPORT_ID));
+    assert_eq!(ws.dialog_requests(), 1);
+    assert!(!ws.is_busy(), "no command was queued");
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+}
+
+#[test]
+fn partial_batch_imports_the_good_file_and_reports_the_bad_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = write_stl(dir.path(), "patient_lower.stl", &scan_mesh(40.0));
+    let bad = dir.path().join("broken.stl");
+    std::fs::write(&bad, b"solid nope\nfacet garbage\n").unwrap();
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.import_files(vec![good, bad]);
+    assert!(ws.wait_for_jobs(WAIT));
+    let st = ws.state();
+    assert_eq!(st.case.scans.len(), 1);
+    assert_eq!(st.case.scans[0].role, ScanRole::Lower);
+    assert_eq!(st.case.scans[0].role_source, RoleSource::FileName);
+    let details = ws.toast_details();
+    let failed: Vec<_> = details
+        .iter()
+        .filter(|(k, _)| k == "ws-toast-import-file-failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "{details:?}");
+    assert!(
+        failed[0].1.as_deref().unwrap().contains("broken.stl"),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|(k, d)| k == "ws-toast-imported"
+                && d.as_deref().is_some_and(|d| d.starts_with('1')))
+    );
+    // one undo step for the whole batch
+    assert!(ws.undo());
+    assert!(ws.state().case.scans.is_empty());
+}
+
+#[test]
+fn dropped_files_are_filtered_by_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let stl = write_stl(dir.path(), "UPPER.STL", &scan_mesh(40.0));
+    let txt = dir.path().join("notes.txt");
+    std::fs::write(&txt, b"not a scan").unwrap();
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.run();
+    h.input_mut().dropped_files.extend([
+        Arc::new(Dropped(txt)) as egui::DroppedFileHandle,
+        Arc::new(Dropped(stl)),
+    ]);
+    settle(&mut h);
+    let ws = &h.state().ws;
+    assert_eq!(ws.state().case.scans.len(), 1);
+    assert_eq!(ws.state().case.scans[0].source_name, "UPPER.STL");
+    let details = ws.toast_details();
+    let ignored = details
+        .iter()
+        .find(|(k, _)| k == "ws-toast-drop-ignored")
+        .unwrap_or_else(|| panic!("{details:?}"));
+    assert_eq!(ignored.1.as_deref(), Some("notes.txt"));
+
+    // only unsupported files: nothing is imported, nothing runs
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.import_dropped(vec![PathBuf::from("a.txt"), PathBuf::from("b.3mf")]);
+    assert!(!ws.is_busy());
+    assert!(ws.state().case.scans.is_empty());
+    assert_eq!(ws.toast_keys(), ["ws-toast-drop-ignored"]);
+}
+
+#[test]
+fn dropped_files_are_ignored_while_busy_and_hovering_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_stl(dir.path(), "a_upper.stl", &scan_mesh(40.0));
+    let b = write_stl(dir.path(), "b_lower.stl", &scan_mesh(41.0));
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.import_files(vec![a]);
+    assert!(ws.is_busy());
+    ws.import_dropped(vec![b]);
+    assert_eq!(ws.toast_keys(), ["ws-toast-busy"]);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans.len(), 1);
+
+    // the overlay while files are held over the window
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.input_mut().hovered_files.push(egui::HoveredFile {
+        path: None,
+        mime: String::new(),
+    });
+    h.step();
+    h.input_mut().hovered_files.clear();
+    h.run();
+}
+
+#[test]
+fn import_and_commands_exclude_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_stl(dir.path(), "a_upper.stl", &scan_mesh(40.0));
+    let b = write_stl(dir.path(), "b_lower.stl", &scan_mesh(41.0));
+    let c = write_stl(dir.path(), "c_bite.stl", &scan_mesh(42.0));
+    let command = |path: &Path| {
+        let spec = dca_module::commands::find(IMPORT_ID).unwrap();
+        Box::new(spec.command(json!({ "path": path.display().to_string() })))
+    };
+
+    // an import runs: a command, a second import and undo wait
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.import_files(vec![a.clone()]);
+    ws.run_command(command(&b));
+    ws.import_files(vec![c.clone()]);
+    assert!(!ws.undo());
+    assert!(!ws.redo());
+    let busy = ws
+        .toast_keys()
+        .iter()
+        .filter(|k| *k == "ws-toast-busy")
+        .count();
+    assert_eq!(busy, 2, "{:?}", ws.toast_keys());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans.len(), 1);
+    assert_eq!(ws.state().case.scans[0].source_name, "a_upper.stl");
+
+    // a command runs: an import and undo wait
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.run_command(command(&a));
+    ws.import_files(vec![b]);
+    assert!(!ws.undo());
+    assert_eq!(ws.toast_keys(), ["ws-toast-busy"]);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans.len(), 1);
+    assert_eq!(ws.state().case.scans[0].source_name, "a_upper.stl");
+    // the one result is one undo step
+    assert!(ws.undo());
+    assert!(ws.state().case.scans.is_empty());
+    assert!(!ws.undo());
+}
+
+#[test]
+fn replacing_a_scan_says_what_was_cleared_and_undo_restores_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let new_upper = write_stl(dir.path(), "new_upper.stl", &scan_mesh(55.0));
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(project_with_results()),
+        None,
+    ));
+    h.run();
+    let before = h.state().ws.state().clone();
+    let old_id = before.case.scans[0].id;
+    assert!(!aligners(&h.state().ws).seeds.is_empty());
+
+    h.state_mut().ws.import_files(vec![new_upper]);
+    settle(&mut h);
+    {
+        let ws = &h.state().ws;
+        assert_eq!(ws.state().case.scans.len(), 1);
+        assert_ne!(ws.state().case.scans[0].id, old_id);
+        assert_eq!(ws.state().case.scans[0].source_name, "new_upper.stl");
+        let al = aligners(ws);
+        assert!(al.seeds.is_empty() && al.stages.is_empty());
+        let details = ws.toast_details();
+        let cleared = details
+            .iter()
+            .find(|(k, _)| k == "ws-toast-import-cleared")
+            .unwrap_or_else(|| panic!("{details:?}"));
+        let text = cleared.1.as_deref().unwrap();
+        assert!(text.contains("tooth seeds"), "{text}");
+        assert!(text.contains("aligner stages"), "{text}");
+        assert!(!text.to_lowercase().contains("reset"), "{text}");
+        let keys = ws.toast_keys();
+        assert!(
+            keys.contains(&"ws-toast-warn-replaced".to_owned()),
+            "{keys:?}"
+        );
+        assert_eq!(keys.last().map(String::as_str), Some("ws-toast-imported"));
+    }
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    let ws = &h.state().ws;
+    assert_eq!(ws.state().case.scans.len(), 1);
+    assert_eq!(ws.state().case.scans[0].id, old_id);
+    assert_eq!(aligners(ws), aligners_of(&before));
+    assert!(!ws.is_dirty());
+}
+
+fn aligners_of(state: &CaseState) -> AlignersState {
+    state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn the_role_choice_reaches_the_command_and_resets() {
+    let dir = tempfile::tempdir().unwrap();
+    // no hint in the name: "auto" would make it provisional
+    let a = write_stl(dir.path(), "scan1.stl", &scan_mesh(40.0));
+    let b = write_stl(dir.path(), "scan2.stl", &scan_mesh(41.0));
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.state_mut().ws.activate(IMPORT_ID);
+    h.run();
+    assert_eq!(h.state().ws.import_role(), None);
+    // the control in the inspector
+    h.get_by_label("Bite").click();
+    h.run();
+    assert_eq!(h.state().ws.import_role(), Some(ScanRole::Bite));
+
+    h.state_mut().ws.import_files(vec![a]);
+    settle(&mut h);
+    {
+        let scan = &h.state().ws.state().case.scans[0];
+        assert_eq!(scan.role, ScanRole::Bite);
+        assert_eq!(scan.role_source, RoleSource::Explicit);
+    }
+    // back to auto: the next file is a guess
+    assert_eq!(h.state().ws.import_role(), None);
+    h.state_mut().ws.import_files(vec![b]);
+    settle(&mut h);
+    let st = h.state().ws.state().clone();
+    let second = st.case.scans.iter().find(|s| s.source_name == "scan2.stl");
+    assert_eq!(second.unwrap().role_source, RoleSource::Provisional);
+
+    // an import refused as busy keeps the choice
+    h.state_mut().ws.import_files(vec![PathBuf::from("x.stl")]);
+    h.state_mut().ws.set_import_role(Some(ScanRole::Upper));
+    h.state_mut().ws.import_files(vec![PathBuf::from("y.stl")]);
+    assert_eq!(h.state().ws.import_role(), Some(ScanRole::Upper));
+    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
+    // a file that cannot be read still used the choice
+    h.state_mut().ws.import_files(vec![PathBuf::from("z.stl")]);
+    assert_eq!(h.state().ws.import_role(), None);
+    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
+}
+
+#[test]
+fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_stl(dir.path(), "scanA.stl", &scan_mesh(40.0));
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.state_mut().ws.activate(IMPORT_ID);
+    h.state_mut().ws.import_files(vec![a]);
+    settle(&mut h);
+    assert_eq!(h.state().ws.state().case.scans[0].role, ScanRole::Lower);
+    assert!(h.query_by_label("scanA.stl").is_some());
+    assert!(h.query_by_label("Provisional").is_some());
+    assert!(h.query_by_label_contains("The arch is a guess").is_some());
+    // a guess is not a finished step
+    let label = format!("Treatment workflow 0/{}", leaf_count());
+    assert!(h.query_by_label(&label).is_some());
+
+    // confirming it settles the step, and one undo takes it back
+    h.get_by_label("Confirm").click();
+    settle(&mut h);
+    assert_eq!(
+        h.state().ws.state().case.scans[0].role_source,
+        RoleSource::Explicit
+    );
+    assert!(h.query_by_label("Provisional").is_none());
+    let label = format!("Treatment workflow 1/{}", leaf_count());
+    assert!(h.query_by_label(&label).is_some());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().ws.state().case.scans[0].role_source,
+        RoleSource::Provisional
+    );
+    assert!(h.query_by_label("Provisional").is_some());
+}
+
+#[test]
+fn changing_a_role_in_the_inspector_is_undoable() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_stl(dir.path(), "scanA.stl", &scan_mesh(40.0));
+    let mut h = harness(Workspace::new_headless(module(), None, None));
+    h.state_mut().ws.activate(IMPORT_ID);
+    h.state_mut().ws.import_files(vec![a]);
+    settle(&mut h);
+    let id = h.state().ws.state().case.scans[0].id;
+    assert_eq!(h.state().ws.state().case.scans[0].role, ScanRole::Lower);
+
+    // the scan's row comes after the control for the next import
+    let uppers: Vec<_> = h
+        .get_all_by_role_and_label(Role::RadioButton, "Upper")
+        .collect();
+    assert_eq!(uppers.len(), 2);
+    uppers.last().unwrap().click();
+    settle(&mut h);
+    {
+        let scan = &h.state().ws.state().case.scans[0];
+        assert_eq!(scan.id, id);
+        assert_eq!(scan.role, ScanRole::Upper);
+        assert_eq!(scan.role_source, RoleSource::Explicit);
+    }
+    assert!(h.state().ws.is_dirty());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    let scan = &h.state().ws.state().case.scans[0];
+    assert_eq!(scan.role, ScanRole::Lower);
+    assert_eq!(scan.role_source, RoleSource::Provisional);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.run();
+    assert_eq!(h.state().ws.state().case.scans[0].role, ScanRole::Upper);
+}
+
+#[test]
+fn setting_a_role_reports_what_the_module_cleared() {
+    let mut ws = Workspace::new_headless(module(), Some(project_with_results()), None);
+    let upper = ws.state().case.scans[0].id;
+    ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans[0].role, ScanRole::Lower);
+    assert!(aligners(&ws).seeds.is_empty());
+    assert_eq!(ws.toast_keys(), ["ws-toast-import-cleared"]);
+    // there is no scan on that role any more: the command fails with a toast
+    ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(
+        ws.toast_keys()
+            .contains(&"ws-toast-command-failed".to_owned())
+    );
+    assert!(ws.undo());
+    assert_eq!(ws.state().case.scans[0].role, ScanRole::Upper);
+    assert!(!aligners(&ws).seeds.is_empty());
+}
+
+#[test]
+fn show_import_report_is_bounded_and_public() {
+    let mut ws = Workspace::new_headless(module(), None, None);
+    let warnings: Vec<_> = (0..12)
+        .map(|n| json!({ "code": "tiny", "key": "k", "args": {}, "message": format!("warning {n}") }))
+        .collect();
+    ws.show_import_report(&json!({
+        "imported": [{ "scan_id": "x" }, { "scan_id": "y" }],
+        "warnings": warnings,
+        "failed": [{ "path": "a.stl", "code": "unreadable", "reason": "a.stl: cannot read", "detail": null }],
+        "module_cleared": [],
+    }));
+    let keys = ws.toast_keys();
+    assert_eq!(keys.len(), 4, "{keys:?}");
+    assert_eq!(keys[0], "ws-toast-import-file-failed");
+    assert!(keys.contains(&"ws-toast-import-more".to_owned()));
+    assert_eq!(keys[3], "ws-toast-imported");
+    let details = ws.toast_details();
+    assert_eq!(details[3].1.as_deref(), Some("2 scans added to the case."));
+    // nothing imported and nothing to say
+    let mut ws = Workspace::new_headless(module(), None, None);
+    ws.show_import_report(&json!({}));
+    assert!(ws.toast_keys().is_empty());
 }

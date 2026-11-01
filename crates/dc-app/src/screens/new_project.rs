@@ -106,11 +106,15 @@ impl NewProjectState {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let role = dc_workspace::import::assign_roles(&[name], &existing)[0];
-            let role = match (
-                self.jaw,
-                dc_workspace::import::role_from_name(&p.to_string_lossy()),
-            ) {
+            let hint = dc_case::role_from_name(&name);
+            // the name's role, else the first of upper, lower, bite not taken
+            let role = hint.unwrap_or_else(|| {
+                [ScanRole::Upper, ScanRole::Lower, ScanRole::Bite]
+                    .into_iter()
+                    .find(|r| !existing.contains(r))
+                    .unwrap_or(ScanRole::Upper)
+            });
+            let role = match (self.jaw, hint) {
                 (Jaw::Lower, None) if role == ScanRole::Upper => ScanRole::Lower,
                 _ => role,
             };
