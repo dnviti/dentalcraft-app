@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dc_case::{Case, CaseState, Fdi, ModuleState, Pose, Scan, ScanRole};
+use dc_case::{Case, CaseState, Fdi, ModuleState, Pose, RoleSource, Scan, ScanRole};
 use dc_mesh::{MeshFormat, TriMesh, Units};
 use dc_module_api::{
     CommandDesc, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError, NOT_AVAILABLE_KEY,
@@ -131,6 +131,7 @@ fn synthetic_project() -> Project {
     state.case.scans.push(Scan {
         id: uuid::Uuid::new_v4(),
         role: ScanRole::Upper,
+        role_source: RoleSource::Explicit,
         source_name: "upper.stl".into(),
         source_units: Units::Millimeters,
         import_xform: Pose::default(),

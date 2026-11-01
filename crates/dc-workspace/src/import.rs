@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dc_case::{CaseState, Pose, Scan, ScanRole};
+use dc_case::{CaseState, Pose, RoleSource, Scan, ScanRole};
 use dc_command::{Command, CommandError, JobCtx};
 use dc_mesh::{TriMesh, Units};
 
@@ -139,6 +139,7 @@ impl Command for ImportScans {
             next.case.scans.push(Scan {
                 id: uuid::Uuid::new_v4(),
                 role: s.role,
+                role_source: RoleSource::Explicit,
                 source_name: s.source_name.clone(),
                 source_units: s.source_units,
                 import_xform: Pose::default(),
