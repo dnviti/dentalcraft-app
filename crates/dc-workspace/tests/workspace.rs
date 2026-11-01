@@ -44,6 +44,15 @@ fn harness(ws: Workspace) -> Harness<'static, App> {
         )
 }
 
+/// Settle the UI after an action that may have started a job: the app keeps
+/// repainting while a job runs, so `Harness::run` alone can exceed max_steps.
+/// Take one frame, wait for the job, then let the UI settle.
+fn settle(h: &mut Harness<'static, App>) {
+    h.step();
+    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
+    h.run();
+}
+
 fn module() -> Box<dyn Module> {
     Box::new(AlignersModule::new())
 }
@@ -269,7 +278,7 @@ fn clicking_every_row_does_not_panic() {
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
         nodes[i].click();
-        h.run();
+        settle(&mut h);
     }
     assert!(h.state().ws.dialog_requests() >= 1);
     assert!(!h.state().ws.toast_keys().is_empty());
@@ -285,7 +294,7 @@ fn clicking_every_row_does_not_panic() {
         "Help",
     ] {
         h.get_by_label(label).click();
-        h.run();
+        settle(&mut h);
         if label == "Help" {
             assert!(h.query_by_label("Keyboard shortcuts").is_some());
             h.key_press(Key::Escape);
@@ -306,7 +315,7 @@ fn menu_clicks_select_in_the_module() {
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
         nodes[i].click();
-        h.run();
+        settle(&mut h);
     }
     let log = log.lock().unwrap();
     // a group header and a leaf
@@ -323,7 +332,7 @@ fn module_shortcuts_run_their_command() {
     let mut h = harness(Workspace::new_headless(m, None, None));
     h.run();
     h.key_press(Key::S);
-    h.run();
+    settle(&mut h);
     assert_eq!(
         h.state().ws.selected(),
         Some("aligners.planning.staging.automatic")
@@ -333,7 +342,7 @@ fn module_shortcuts_run_their_command() {
         Some("aligners.planning.staging.automatic")
     );
     h.key_press(Key::A);
-    h.run();
+    settle(&mut h);
     assert_eq!(
         h.state().ws.selected(),
         Some("aligners.preparation.segmentation.automatic")
