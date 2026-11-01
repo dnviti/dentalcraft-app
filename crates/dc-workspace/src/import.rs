@@ -12,8 +12,13 @@ use dc_case::ScanRole;
 use dc_module_api::{Toast, ToastLevel};
 use serde_json::{Value, json};
 
-/// File extensions offered by the file dialog and accepted by a drop.
+/// File extensions accepted by a drop (compared without regard to letter case).
 pub const EXTENSIONS: [&str; 3] = ["stl", "obj", "ply"];
+
+/// Extensions the file dialog filter lists: the portal matches them case
+/// sensitively, so each one is there in lower and upper case (as in the New
+/// project dialog).
+pub const DIALOG_EXTENSIONS: [&str; 6] = ["stl", "ply", "obj", "STL", "PLY", "OBJ"];
 
 /// Most notifications one report puts on screen, the one-line group and the
 /// success line included (the stack draws four).
@@ -239,6 +244,18 @@ mod tests {
         let (ok, ignored) = split_scan_files(vec!["x.STL".into(), "notes.txt".into()]);
         assert_eq!(ok, vec![PathBuf::from("x.STL")]);
         assert_eq!(ignored, vec![PathBuf::from("notes.txt")]);
+    }
+
+    #[test]
+    fn the_dialog_filter_lists_every_extension_in_both_cases() {
+        for e in EXTENSIONS {
+            assert!(DIALOG_EXTENSIONS.contains(&e), "{e}");
+            assert!(
+                DIALOG_EXTENSIONS.contains(&e.to_uppercase().as_str()),
+                "{e}"
+            );
+        }
+        assert_eq!(DIALOG_EXTENSIONS.len(), 2 * EXTENSIONS.len());
     }
 
     #[test]

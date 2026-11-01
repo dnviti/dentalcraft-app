@@ -749,7 +749,7 @@ impl Workspace {
         self.spawn_dialog(move || {
             let files = rfd::FileDialog::new()
                 .set_title(crate::t("ws-import-scans"))
-                .add_filter(crate::t("ws-filter-meshes"), &import::EXTENSIONS)
+                .add_filter(crate::t("ws-filter-meshes"), &import::DIALOG_EXTENSIONS)
                 .pick_files()
                 .unwrap_or_default();
             if let Some(c) = ctx {
