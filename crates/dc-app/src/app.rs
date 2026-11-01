@@ -20,7 +20,9 @@ use egui::{
 };
 
 use crate::config::{RecentList, Settings, Store, ThemePref};
-use crate::create_job::{CreateJob, NewProjectRequest};
+use crate::create_job::{
+    CreateError, CreateJob, Created, NewProjectRequest, Stage, base_state_report,
+};
 use crate::diagnostics::{GpuInfo, SystemInfo};
 use crate::dialogs::{self, PendingDialog, Purpose, Spec};
 use crate::modules::{self, ModuleInfo};
@@ -499,14 +501,26 @@ impl DentalCraftApp {
             let req = job.request.clone();
             self.create_job = None;
             match result {
-                Ok(project) => {
+                Ok(created) => {
+                    let Created { project, report } = *created;
                     self.remember(&req.path, &req.module_id);
                     self.new_project = NewProjectState::new(&self.store.dirs().projects);
-                    self.enter_workspace(&req.module_id, Some(*project), Some(req.path), false);
+                    self.enter_workspace(&req.module_id, Some(project), Some(req.path), false);
+                    // the scans are the base state of this project: nothing to
+                    // undo, so the report never says "Ctrl+Z"
+                    if let Some(ws) = &mut self.workspace {
+                        ws.show_import_report(&base_state_report(report));
+                    }
                 }
-                Err(e) if e == "cancelled" => {}
-                Err(e) => {
+                Err(CreateError::Cancelled) => {}
+                Err(CreateError::NothingImported(reasons)) => {
+                    tracing::warn!("no scan could be imported: {reasons:?}");
+                    self.new_project.error = None;
+                    self.new_project.failures = reasons;
+                }
+                Err(CreateError::Failed(e)) => {
                     tracing::warn!("cannot create the project: {e}");
+                    self.new_project.failures.clear();
                     self.new_project.error = Some(e);
                 }
             }
@@ -849,15 +863,14 @@ impl DentalCraftApp {
         // project creation progress
         let mut cancel = false;
         if let Some(job) = &self.create_job {
-            let text = match &job.last {
-                Some(crate::create_job::JobMsg::Reading { index, total, name }) => t!(
+            let text = match job.stage() {
+                Stage::Reading { index, total } => t!(
                     "create-progress-reading",
                     index = (index + 1).to_string(),
-                    total = total.to_string(),
-                    name = name.clone()
+                    total = total.to_string()
                 ),
-                Some(crate::create_job::JobMsg::Saving) => t!("create-progress-saving"),
-                _ => t!("create-progress-starting"),
+                Stage::Saving => t!("create-progress-saving"),
+                Stage::Starting => t!("create-progress-starting"),
             };
             let fraction = job.fraction();
             egui::Modal::new(egui::Id::unique("dc-create-job")).show(ctx, |ui| {
@@ -1038,5 +1051,101 @@ fn read_thumbnail(path: &Path) -> Option<egui::ColorImage> {
 impl eframe::App for DentalCraftApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    const TRI_STL: &str = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 10 0\nendloop\nendfacet\nendsolid t\n";
+
+    fn form_harness(dir: &Path, files: &[(&str, &str)]) -> Harness<'static, DentalCraftApp> {
+        let mut app = DentalCraftApp::new(AppDeps::headless(dir));
+        let scans = dir.join("scans");
+        std::fs::create_dir_all(&scans).unwrap();
+        let paths = files
+            .iter()
+            .map(|(name, body)| {
+                let p = scans.join(name);
+                std::fs::write(&p, body).unwrap();
+                p
+            })
+            .collect();
+        app.new_project.case_id = "AL-1".into();
+        app.new_project.alias = "BIA-07".into();
+        app.new_project.add_scans(paths);
+        // built on Home: the notes field of the form has no accessible name
+        // (dc-ui `text_area`), which the harness checks when it settles
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .build_ui_state(|ui, app: &mut DentalCraftApp| app.show(ui), app);
+        h.state_mut().go(Screen::NewProject);
+        h
+    }
+
+    fn run_until(h: &mut Harness<'static, DentalCraftApp>, done: impl Fn(&DentalCraftApp) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done(h.state()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screen never got there"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.run_steps(1);
+        }
+    }
+
+    #[test]
+    fn a_bad_file_with_a_good_one_opens_the_workspace_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = form_harness(dir.path(), &[("upper.stl", TRI_STL), ("empty.stl", "")]);
+        h.run_steps(3);
+        run_until(&mut h, |a| !a.new_project.probing());
+        h.get_by_label("Create project").click();
+        run_until(&mut h, |a| a.screen() == Screen::Workspace);
+        let ws = h.state().workspace().unwrap();
+        let keys = ws.toast_keys();
+        assert!(
+            keys.contains(&"ws-toast-import-file-failed".to_owned()),
+            "{keys:?}"
+        );
+        assert!(keys.contains(&"ws-toast-imported".to_owned()), "{keys:?}");
+        // the scans are the base state of the new project: no undo, no Ctrl+Z
+        assert!(
+            !keys
+                .iter()
+                .any(|k| k.contains("replaced") || k.contains("cleared"))
+        );
+        let details = ws.toast_details();
+        assert!(
+            details
+                .iter()
+                .all(|(_, d)| d.as_deref().is_none_or(|d| !d.contains("Ctrl")))
+        );
+    }
+
+    #[test]
+    fn all_bad_files_stay_on_the_form_with_the_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = form_harness(dir.path(), &[("a.stl", ""), ("b.stl", "junk")]);
+        h.run_steps(3);
+        run_until(&mut h, |a| !a.new_project.probing());
+        h.get_by_label("Create project").click();
+        run_until(&mut h, |a| !a.new_project.failures.is_empty());
+        let app = h.state();
+        assert_eq!(app.screen(), Screen::NewProject);
+        assert_eq!(app.new_project.failures.len(), 2);
+        assert!(app.workspace().is_none());
+        assert!(!app.new_project.path().exists());
+        assert!(app.create_job.is_none());
+        // the banner is on the form
+        h.run_steps(2);
+        assert!(
+            h.query_by_label_contains("No project was created")
+                .is_some()
+        );
     }
 }
