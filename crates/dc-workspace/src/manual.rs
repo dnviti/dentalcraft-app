@@ -456,6 +456,23 @@ pub(crate) fn scan_mesh_id(scan: &dc_case::Scan) -> u64 {
     (a ^ b) >> 2
 }
 
+/// Bit of the viewport mesh ids of the built teeth ([`tooth_mesh_id`]).
+const TOOTH_MESH: u64 = 1 << 60;
+
+/// Id of the viewport mesh of the built tooth `fdi` (as `view::scene_meshes`
+/// assigns it to the module's tooth entries).
+pub(crate) fn tooth_mesh_id(fdi: u8) -> u64 {
+    TOOTH_MESH | u64::from(fdi)
+}
+
+/// The FDI number of the built tooth whose viewport mesh is `id`.
+pub(crate) fn tooth_of_mesh(id: u64) -> Option<u8> {
+    (id & !0xff == TOOTH_MESH)
+        .then(|| u8::try_from(id & 0xff).ok())
+        .flatten()
+        .filter(|&f| f != 0)
+}
+
 /// The scan, point, vertex and label that a pick of the viewport hits. The
 /// meshes are drawn with `world * import_xform`; the commands work in the
 /// coordinates of the scan mesh, so the hit goes back through that transform.
@@ -542,6 +559,16 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
     // never paints, places or picks
     if mods.alt {
         return Action::None;
+    }
+    // a click on a built tooth (the scan is not drawn) names it
+    if let (
+        Tool::Clean | Tool::Renumber | Tool::Missing | Tool::Rebuild | Tool::Adjust,
+        Event::Click(p, _),
+    ) = (tool, ev)
+        && let Some(f) = tooth_of_mesh(p.mesh_id)
+    {
+        m.tooth = f;
+        return Action::Chose(f);
     }
     let Some(first) = picks.first().and_then(|p| target_of(state, p, eye)) else {
         return Action::None;

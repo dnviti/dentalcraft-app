@@ -105,8 +105,17 @@ pub(crate) fn crown_spots(
 }
 
 /// The anchors of the teeth of the case, in world coordinates, sorted by
-/// tooth number. A tooth marked missing has none.
+/// tooth number, with the crown tops of the built teeth. A tooth marked
+/// missing has none.
+#[cfg(test)]
 pub(crate) fn anchors(state: &CaseState) -> Vec<Anchor> {
+    anchors_of(state, true)
+}
+
+/// [`anchors`] for what the viewport draws: with `built` the crown top of a
+/// built tooth is the top of its closed mesh (the 3D teeth are drawn), else
+/// the top of its crown painted on the scan (the scan is drawn).
+pub(crate) fn anchors_of(state: &CaseState, built: bool) -> Vec<Anchor> {
     let Some(al) = overlay::aligners(state) else {
         return Vec::new();
     };
@@ -134,6 +143,15 @@ pub(crate) fn anchors(state: &CaseState) -> Vec<Anchor> {
         };
         let xform = wm * scan.import_xform.to_mat4().as_mat4();
         crowns.extend(crown_spots(&mesh.positions, labels, xform, up));
+    }
+    // a built tooth: the top of its closed mesh (drawn instead of the scan)
+    for (f, blob) in al.crowns.iter().filter(|_| built) {
+        let Some(mesh) = state.mesh(blob) else {
+            continue;
+        };
+        let up = if f.is_upper() { Vec3::NEG_Z } else { Vec3::Z };
+        let l = vec![u16::from(f.get()); mesh.vertex_count()];
+        crowns.extend(crown_spots(&mesh.positions, &l, wm, up));
     }
     let mut fdis: Vec<u8> = crowns
         .keys()

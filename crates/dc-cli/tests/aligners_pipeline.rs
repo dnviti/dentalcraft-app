@@ -16,11 +16,14 @@ use dca_model::{AlignersState, MODULE_ID};
 use serde_json::{Value, json};
 
 /// The pipeline steps `aligners.auto` runs on a case with both arches and
-/// their seeds, with the full export.
+/// their seeds, with the full export (the check of the segmentation runs
+/// once per arch).
 const STEPS: &[&str] = &[
     "aligners.case.detect-arch",
     "aligners.preparation.orientation.automatic",
     "aligners.preparation.segmentation.automatic",
+    "aligners.preparation.segmentation.check",
+    "aligners.preparation.segmentation.check",
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.gingiva",
     "aligners.diagnosis.space-analysis",

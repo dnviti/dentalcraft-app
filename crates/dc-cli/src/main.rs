@@ -94,7 +94,9 @@ and its parameters. Coordinates are millimetres; changes to the case are undoabl
 const RENDER_HELP: &str = concat!(
     "\
 Draws the case as a PNG image with the CPU renderer, after the same --in / --cmd / --cmd-file
-steps as run. Scans are coloured by tooth label when the Aligners module has labels.
+steps as run. Scans are coloured by tooth label when the Aligners module has labels. An arch
+whose teeth were built draws the 3D teeth and gingiva (--model teeth, the default) or its scan
+(--model scan); --stage N poses the 3D teeth at treatment stage N (the scans stay at rest).
 
 Views: occlusal (upper arch, or the lower one when only that is shown), occlusal_lower, frontal,
 back, left, right, top, iso. Prints the image's path and size as JSON.
@@ -248,6 +250,12 @@ struct RenderArgs {
     /// Background colour, #RRGGBB or #RRGGBBAA.
     #[arg(long)]
     background: Option<String>,
+    /// What to draw of an arch whose teeth were built: its scan, or the 3D teeth and gingiva.
+    #[arg(long, value_parser = ["scan", "teeth"], default_value = "teeth")]
+    model: String,
+    /// Treatment stage that poses the 3D teeth (0: the initial position; default: no stage).
+    #[arg(long, value_name = "N")]
+    stage: Option<u32>,
 }
 
 type Result<T, E = String> = std::result::Result<T, E>;
@@ -559,6 +567,10 @@ fn render(args: &RenderArgs, m: &ArgMatches) -> Result<()> {
     }
     if let Some(bg) = &args.background {
         params["background"] = json!(bg);
+    }
+    params["model"] = json!(args.model);
+    if let Some(stage) = args.stage {
+        params["stage"] = json!(stage);
     }
     let png = host.render_png(&params).map_err(host_err)?;
     std::fs::write(&args.out, &png).map_err(|e| format!("{}: {e}", args.out.display()))?;

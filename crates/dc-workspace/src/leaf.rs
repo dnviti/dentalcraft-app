@@ -29,6 +29,8 @@ pub(crate) const CASE_ANALYSIS: &str = "aligners.diagnosis.space-analysis";
 pub(crate) const EXPORT_ALL: &str = "aligners.output.export-all";
 /// "Control visit".
 pub(crate) const VISITS: &str = "aligners.followup.visits";
+/// "3D teeth".
+pub(crate) const BUILD_TEETH: &str = "aligners.teeth.build";
 /// "Find the teeth".
 pub(crate) const FIND_TEETH: &str = "aligners.teeth.find";
 
@@ -52,6 +54,7 @@ pub(crate) fn job_name_key(id: &str) -> &'static str {
     match id {
         EXPORT_ALL => "ws-job-export",
         AUTO => "ws-job-auto",
+        BUILD_TEETH => "ws-job-teeth",
         _ => "ws-job-command",
     }
 }
@@ -141,7 +144,68 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
                 sticky: false,
             })
         }
+        BUILD_TEETH => Some(teeth_report(out)),
         _ => None,
+    }
+}
+
+/// The output of the step `id` in the `steps` of a wrapper command.
+fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
+    out["steps"]
+        .as_array()?
+        .iter()
+        .find(|s| s["id"] == id)
+        .map(|s| &s["output"])
+}
+
+/// What "3D teeth" built: the teeth built per arch and the gingivas. Read
+/// from `arches` (per arch: `rebuilt` the tooth numbers built this time,
+/// else `teeth` their count, and `gingiva`), so a partial rebuild counts the
+/// teeth it rebuilt; the old output (the crowns and gingiva steps) is the
+/// fallback. A field the output lacks counts as nothing.
+fn teeth_report(out: &Value) -> Reported {
+    let (upper, lower, gum) = match out["arches"].as_object() {
+        Some(arches) => {
+            let of = |arch: &str| arches.get(arch).unwrap_or(&Value::Null);
+            let count = |arch: &str| {
+                let a = of(arch);
+                a["rebuilt"]
+                    .as_array()
+                    .map(Vec::len)
+                    .or_else(|| a["teeth"].as_u64().map(|n| n as usize))
+                    .unwrap_or(0)
+            };
+            let gum = |arch: &str| of(arch)["gingiva"].as_bool().unwrap_or(false);
+            (count("upper"), count("lower"), [gum("upper"), gum("lower")])
+        }
+        None => {
+            let crowns = step_output(out, "aligners.preparation.reconstruction.automatic");
+            let gums = step_output(out, "aligners.preparation.gingiva");
+            let count = |arch: &str| {
+                crowns
+                    .and_then(|c| c[arch]["teeth"].as_object())
+                    .map_or(0, |m| m.len())
+            };
+            let gum = |arch: &str| gums.is_some_and(|g| g.get(arch).is_some_and(|v| !v.is_null()));
+            (count("upper"), count("lower"), [gum("upper"), gum("lower")])
+        }
+    };
+    let key = match (gum[0], gum[1]) {
+        (true, true) => "ws-teeth-detail-both",
+        (true, false) => "ws-teeth-detail-upper",
+        (false, true) => "ws-teeth-detail-lower",
+        (false, false) => "ws-teeth-detail-none",
+    };
+    Reported {
+        toast: Toast::new(ToastLevel::Success, "ws-toast-teeth-built").with_detail(tr_args(
+            key,
+            &[
+                ("count", &(upper + lower).to_string()),
+                ("upper", &upper.to_string()),
+                ("lower", &lower.to_string()),
+            ],
+        )),
+        sticky: false,
     }
 }
 
@@ -447,6 +511,57 @@ mod tests {
             "{detail}"
         );
         assert!(r.sticky);
-        assert!(report("aligners.teeth.build", &json!({})).is_none());
+    }
+
+    #[test]
+    fn the_teeth_report_counts_the_crowns_and_names_the_gingivas() {
+        crate::loader();
+        let teeth = |n: usize| {
+            let m: serde_json::Map<String, Value> =
+                (0..n).map(|k| (k.to_string(), json!({}))).collect();
+            json!({ "teeth": m, "seconds": 1.0 })
+        };
+        let out = json!({ "steps": [
+            { "id": "aligners.preparation.reconstruction.automatic",
+              "output": { "upper": teeth(14), "lower": teeth(13) } },
+            { "id": "aligners.preparation.gingiva",
+              "output": { "upper": { "faces": 1 }, "lower": { "faces": 1 } } },
+        ] });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.message_key, "ws-toast-teeth-built");
+        let detail = r.toast.detail.unwrap();
+        assert!(
+            detail.contains("27") && detail.contains("14") && detail.contains("13"),
+            "{detail}"
+        );
+        // a missing field is nothing, not a failure
+        let r = report(BUILD_TEETH, &json!({})).unwrap();
+        assert!(r.toast.detail.unwrap().contains('0'));
+    }
+
+    #[test]
+    fn the_teeth_report_reads_the_arches_and_counts_a_partial_rebuild() {
+        crate::loader();
+        // every tooth of the upper arch, two teeth of the lower one
+        let out = json!({ "arches": {
+            "upper": { "mode": "all", "teeth": 14, "rebuilt": (11..=24).collect::<Vec<u8>>(),
+                       "gingiva": true },
+            "lower": { "mode": "some", "teeth": 13, "rebuilt": [41, 42], "gingiva": true },
+        } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.message_key, "ws-toast-teeth-built");
+        let both = tr_args(
+            "ws-teeth-detail-both",
+            &[("count", "16"), ("upper", "14"), ("lower", "2")],
+        );
+        assert_eq!(r.toast.detail.unwrap(), both);
+        // one arch, no gingiva; without `rebuilt` the count of teeth
+        let out = json!({ "arches": { "lower": { "teeth": 13, "gingiva": false } } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        let none = tr_args(
+            "ws-teeth-detail-none",
+            &[("count", "13"), ("upper", "0"), ("lower", "13")],
+        );
+        assert_eq!(r.toast.detail.unwrap(), none);
     }
 }
