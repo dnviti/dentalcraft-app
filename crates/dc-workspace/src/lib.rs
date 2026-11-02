@@ -23,6 +23,7 @@
 mod icons;
 pub mod import;
 mod keys;
+mod labels;
 mod leaf;
 mod manual;
 mod menu;

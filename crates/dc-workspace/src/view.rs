@@ -17,6 +17,8 @@ use egui::{
 };
 use glam::{Quat, Vec3};
 
+use crate::labels::{self, Anchor, Drawn, Gem, Hit};
+use crate::manual::{self, Action};
 use crate::overlay::{self, ContactColors, Layers};
 use crate::t;
 use crate::timeline::TimelineModel;
@@ -102,6 +104,9 @@ struct SceneKey {
 /// Contact map computed for one case state (by pointer).
 type ContactCache = Option<(usize, Result<Arc<ContactColors>, String>)>;
 
+/// Anchors of the tooth numbers computed for one case state (by pointer).
+type AnchorCache = Option<(usize, Arc<Vec<Anchor>>)>;
+
 /// Viewport and view options.
 #[derive(Default)]
 pub(crate) struct ViewState {
@@ -119,6 +124,8 @@ pub(crate) struct ViewState {
     pub layers: Layers,
     /// Contact map of the last state it was asked for.
     contacts: ContactCache,
+    /// Anchors of the tooth numbers for the case state (by pointer).
+    anchors: AnchorCache,
     /// Scans of the last scene (a new set is framed).
     scan_ids: Vec<uuid::Uuid>,
     /// The meshes of the last scene (also without a viewport).
@@ -178,6 +185,125 @@ const MAX_TOASTS_ON_SCREEN: usize = 4;
 const SEED_RADIUS: f32 = 0.8;
 /// Opacity of the stage 0 ghost.
 const GHOST_OPACITY: f32 = 0.25;
+
+/// What the tooth numbers and the Alt+click need of the workspace.
+struct TeethOnScreen<'a> {
+    state: &'a CaseState,
+    anchors: &'a [Anchor],
+    /// Stage shown, when it moves the teeth (`None` = initial position).
+    stage: Option<&'a dca_model::Stage>,
+    layers: Layers,
+    meshes: &'a [ViewMesh],
+    /// The tooth the brush works on, while the brush is open.
+    brush: Option<u8>,
+}
+
+/// Draws the number chips over the viewport and returns what an Alt+click
+/// did (choosing the brush tooth), or [`Action::None`].
+///
+/// Occlusion: a number (or a gem) is hidden when a ray from the camera to
+/// its anchor meets the scan more than [`labels::OCCLUSION_TOLERANCE_MM`]
+/// before it (`Viewport::pick_at` on the BVH of the scans, one ray per
+/// tooth).
+fn tooth_labels(
+    ui: &Ui,
+    vp: &Viewport,
+    vr: &dc_viewport::ViewportResponse,
+    s: &TeethOnScreen<'_>,
+) -> Action {
+    let rect = vr.response.rect;
+    let c = *colors(ui);
+    let cam = vp.camera();
+    let eye = cam.eye();
+    let fwd = (cam.target - eye).normalize_or_zero();
+    let shown = |upper: bool| {
+        let role = if upper {
+            ScanRole::Upper
+        } else {
+            ScanRole::Lower
+        };
+        s.state.case.scan(role).is_some_and(|sc| {
+            let id = manual::scan_mesh_id(sc);
+            s.meshes.iter().any(|m| m.id == id && m.visible)
+        })
+    };
+    let (upper_shown, lower_shown) = (shown(true), shown(false));
+    let arch_shown = |upper: bool| if upper { upper_shown } else { lower_shown };
+    // in front of the camera, and not behind the scan
+    let visible = |p: Vec3, tol: f32| -> bool {
+        if fwd.dot(p - eye) <= 0.0 {
+            return false;
+        }
+        let hit = vp.pick_at(rect, vp.screen_pos(rect, p)).map(|h| h.point);
+        !labels::covers(fwd, hit, p, tol)
+    };
+    let mut drawn = Drawn::default();
+    if s.layers.numbers {
+        let mut spots: Vec<(f32, u8, Pos2)> = Vec::new();
+        for a in s.anchors.iter().filter(|a| arch_shown(a.upper)) {
+            let p = match s.stage {
+                Some(st) => labels::posed_point(s.state, st, a.fdi, a.world),
+                None => a.world,
+            };
+            if visible(p, labels::OCCLUSION_TOLERANCE_MM) {
+                spots.push((fwd.dot(p - eye), a.fdi, vp.screen_pos(rect, p)));
+            }
+        }
+        // the nearest keep their place when two numbers meet
+        spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let spots: Vec<(u8, Pos2)> = spots.into_iter().map(|(_, f, p)| (f, p)).collect();
+        drawn.chips = labels::place_chips(&spots, labels::CHIP_SIZE, labels::LIFT, rect);
+    }
+    if s.layers.seeds
+        && let Some(al) = overlay::aligners(s.state)
+    {
+        let world = s.state.case.world_frame.from_case;
+        for sd in al
+            .seeds
+            .iter()
+            .filter(|sd| arch_shown(labels::upper_tooth(sd.fdi.get())))
+        {
+            let p = world.apply_point(sd.position).as_vec3();
+            if visible(p, 2.0 * SEED_RADIUS) {
+                drawn.gems.push(Gem {
+                    fdi: sd.fdi.get(),
+                    center: vp.screen_pos(rect, p),
+                    radius: vp.screen_length(rect, p, SEED_RADIUS),
+                });
+            }
+        }
+    }
+    let alt = ui.input(|i| i.modifiers.alt);
+    let hot =
+        alt.then(|| vr.response.hover_pos())
+            .flatten()
+            .and_then(
+                |pos| match labels::hit_test(pos, &drawn.chips, &drawn.gems, None) {
+                    Hit::Label(f) | Hit::Gem(f) => Some(f),
+                    _ => None,
+                },
+            );
+    labels::paint(
+        ui,
+        rect,
+        &drawn.chips,
+        c.border_strong,
+        c.select_blue,
+        s.brush,
+        hot,
+    );
+    if alt
+        && vr.response.clicked_by(egui::PointerButton::Primary)
+        && let Some(pos) = vr.response.interact_pointer_pos()
+    {
+        let surface = vr
+            .pick
+            .and_then(|p| manual::target_of(s.state, &p, eye))
+            .map(|t| t.label);
+        return labels::alt_click_action(labels::hit_test(pos, &drawn.chips, &drawn.gems, surface));
+    }
+    Action::None
+}
 
 /// Meshes to show: the scans in the world frame (upper and lower arch per
 /// the toggles, the bite scan with both), coloured by tooth label or by the
@@ -359,6 +485,21 @@ impl Workspace {
         }
     }
 
+    /// Anchors of the tooth numbers of the current state (computed once per
+    /// state: the crown tops read every label of the scans).
+    fn tooth_anchors(&mut self) -> Arc<Vec<Anchor>> {
+        let state = self.undo.current();
+        let ptr = Arc::as_ptr(state) as usize;
+        match &self.view.anchors {
+            Some((p, a)) if *p == ptr => Arc::clone(a),
+            _ => {
+                let a = Arc::new(labels::anchors(state));
+                self.view.anchors = Some((ptr, Arc::clone(&a)));
+                a
+            }
+        }
+    }
+
     /// The occlusal view looks at the upper arch: it is shown and exists
     /// (or the case has no lower arch either).
     fn upper_looked_at(&self) -> bool {
@@ -408,6 +549,8 @@ impl Workspace {
         let toolbar_rows = toolbar_rows(ui, toolbar_max_width(inner.width()));
         let mut px_per_mm = None;
         let mut manual_events = Vec::new();
+        let mut alt_action = Action::None;
+        let anchors = self.tooth_anchors();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
@@ -418,6 +561,23 @@ impl Workspace {
                 }
                 // the clicks and strokes go to the manual tool that is open
                 let vr = vp.ui(ui);
+                // the tooth numbers, and the Alt+click that chooses the brush tooth
+                alt_action = tooth_labels(
+                    ui,
+                    vp,
+                    &vr,
+                    &TeethOnScreen {
+                        state: self.undo.current(),
+                        anchors: &anchors,
+                        stage: overlay::aligners(self.undo.current())
+                            .and_then(|a| overlay::stage(a, self.timeline.current))
+                            .filter(|_| self.timeline.current > 0),
+                        layers: self.view.layers,
+                        meshes: &self.view.meshes,
+                        brush: (self.manual.tool == Some(manual::Tool::Brush))
+                            .then_some(self.manual.tooth),
+                    },
+                );
                 manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr);
                 let half = vp.camera().half_height();
                 if half > 0.0 {
@@ -431,6 +591,7 @@ impl Workspace {
             }
         }
 
+        self.manual_action(alt_action);
         self.manual_events(manual_events);
         self.manual_feedback();
 
@@ -550,6 +711,7 @@ impl Workspace {
                 for (icon, key, on) in [
                     (ic::TOOTH, "ws-layer-labels", &mut layers.labels),
                     (ic::MAP_PIN, "ws-layer-seeds", &mut layers.seeds),
+                    (ic::HASH, "ws-layer-numbers", &mut layers.numbers),
                     (ic::GRID_NINE, "ws-layer-contacts", &mut layers.contacts),
                 ] {
                     if icon_toggle(ui, icon, &t(key), *on).clicked() {
@@ -908,6 +1070,7 @@ impl ToolbarItem {
         match self {
             ToolbarItem::View(v) => text_segment_width(ui, &t(v.key())),
             ToolbarItem::Group(ToolbarGroup::Fit) => buttons(1),
+            ToolbarItem::Group(ToolbarGroup::Layers) => buttons(4),
             ToolbarItem::Group(_) => buttons(3),
         }
     }

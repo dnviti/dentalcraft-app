@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use dc_case::{CaseState, Fdi, ScanRole};
 use dc_command::{Command, CommandError, JobCtx};
-use dc_module_api::{CommandSpec, Toast, ToastLevel};
+use dc_module_api::{CommandSpec, MenuStatus, Toast, ToastLevel};
 use dc_ui::theme::colors;
 use dc_ui::widgets::Button;
 use dc_viewport::{Pick, Viewport, ViewportResponse};
@@ -220,6 +220,9 @@ pub(crate) struct Mods {
     pub shift: bool,
     /// Ctrl (or Cmd): fill the crown.
     pub ctrl: bool,
+    /// Alt: choose the brush tooth instead of acting (nothing is painted or
+    /// placed).
+    pub alt: bool,
 }
 
 impl From<egui::Modifiers> for Mods {
@@ -227,6 +230,7 @@ impl From<egui::Modifiers> for Mods {
         Self {
             shift: m.shift,
             ctrl: m.command || m.ctrl,
+            alt: m.alt,
         }
     }
 }
@@ -247,6 +251,9 @@ pub(crate) enum Action {
     Run(&'static str, Value),
     /// A tooth was chosen on the scan.
     Chose(u8),
+    /// Alt+click: the brush works on this tooth (`0` = gingiva), whatever
+    /// tool is open.
+    SelectBrush(u8),
     /// Tell the user (i18n key).
     Hint(&'static str),
     /// Nothing to do.
@@ -531,6 +538,11 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
         Event::Click(p, mods) => (std::slice::from_ref(p), *mods),
         Event::Stroke(p, mods) => (p.as_slice(), *mods),
     };
+    // Alt+click chooses the brush tooth (see `labels::alt_click_action`): it
+    // never paints, places or picks
+    if mods.alt {
+        return Action::None;
+    }
     let Some(first) = picks.first().and_then(|p| target_of(state, p, eye)) else {
         return Action::None;
     };
@@ -858,7 +870,7 @@ impl Command for FeedbackCommand {
     }
 }
 
-fn pos_color(c: dc_scene::Color) -> Color32 {
+pub(crate) fn pos_color(c: dc_scene::Color) -> Color32 {
     let f = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgba_unmultiplied(f(c.r), f(c.g), f(c.b), 255)
 }
@@ -910,6 +922,12 @@ pub(crate) fn collect(m: &mut Manual, ui: &Ui, vp: &Viewport, vr: &ViewportRespo
         }
     }
     let mut out = Vec::new();
+    if mods.alt {
+        // Alt+click chooses the brush tooth: no stroke, no click for the tool
+        m.stroke.clear();
+        m.stroke_screen.clear();
+        return out;
+    }
     if tool == Tool::Brush {
         if vr.response.dragged_by(PointerButton::Primary) {
             if let Some(pos) = vr.response.interact_pointer_pos()
@@ -996,6 +1014,11 @@ impl Workspace {
             .as_ref()
             .map_or(Vec3::ZERO, |vp| vp.camera().eye());
         for ev in events {
+            let (Event::Click(_, mods) | Event::Stroke(_, mods)) = &ev;
+            if mods.alt {
+                // Alt chooses the brush tooth (handled from the click itself)
+                continue;
+            }
             let state = Arc::clone(self.undo.current());
             let action = match (&ev, self.manual.sequence.is_some()) {
                 (Event::Click(pick, _), true) => {
@@ -1008,12 +1031,45 @@ impl Workspace {
         }
     }
 
-    fn manual_action(&mut self, action: Action) {
+    pub(crate) fn manual_action(&mut self, action: Action) {
         match action {
             Action::Run(id, params) => self.run_manual(id, params),
             Action::Hint(key) => self.toast(Toast::new(ToastLevel::Info, key)),
+            Action::SelectBrush(fdi) => self.choose_brush(fdi),
             Action::Chose(_) | Action::None => {}
         }
+    }
+
+    /// Alt+click on a tooth number, a tooth mark or the scan: the brush works
+    /// on that tooth (`0` = gingiva). Opens the brush when another tool (or
+    /// none, as in Find the teeth) is open. The numbering in order keeps the
+    /// pointer: finishing it comes first.
+    pub(crate) fn choose_brush(&mut self, fdi: u8) {
+        if self.manual.sequence.is_some() {
+            self.toast(Toast::new(ToastLevel::Info, "ws-manual-brush-busy"));
+            return;
+        }
+        if self.manual.tool != Some(Tool::Brush) {
+            let ready = self
+                .commands
+                .iter()
+                .any(|c| c.id == BRUSH && c.status == MenuStatus::Ready);
+            if !ready {
+                self.toast(Toast::new(
+                    ToastLevel::Info,
+                    dc_module_api::NOT_AVAILABLE_KEY,
+                ));
+                return;
+            }
+            self.open_manual_tool(Tool::Brush);
+        }
+        self.manual.tooth = fdi;
+        let detail = if fdi == 0 {
+            t("ws-manual-brush-gingiva")
+        } else {
+            dc_i18n::tr_args("ws-manual-brush-tooth", &[("fdi", &fdi.to_string())])
+        };
+        self.toast(Toast::new(ToastLevel::Info, "ws-manual-brush-chosen").with_detail(detail));
     }
 
     /// The keys of the numbering in order: `S` (skip the tooth), Backspace (back),
@@ -1385,7 +1441,7 @@ mod tests {
             pick,
             Mods {
                 shift: true,
-                ctrl: false,
+                ..Mods::default()
             },
         );
         let Action::Run(_, p) = handle(&mut m, &state, &shift, eye) else {
@@ -1396,8 +1452,8 @@ mod tests {
         let ctrl = Event::Click(
             pick,
             Mods {
-                shift: false,
                 ctrl: true,
+                ..Mods::default()
             },
         );
         let Action::Run(id, p) = handle(&mut m, &state, &ctrl, eye) else {
@@ -1415,6 +1471,7 @@ mod tests {
             Mods {
                 shift: true,
                 ctrl: true,
+                ..Mods::default()
             },
         );
         let Action::Run(_, p) = handle(&mut m, &state, &both, eye) else {
@@ -1491,7 +1548,7 @@ mod tests {
             pick,
             Mods {
                 shift: true,
-                ctrl: false,
+                ..Mods::default()
             },
         );
         let Action::Run(_, p) = handle(&mut m, &added, &shift, eye) else {
@@ -1703,6 +1760,150 @@ mod tests {
         ws.manual_events(vec![Event::Click(other, Mods::default())]);
         assert!(ws.wait_for_jobs(WAIT));
         assert_eq!(labels_ref(&ws), after);
+    }
+
+    #[test]
+    fn alt_is_read_from_the_egui_modifiers() {
+        let m = egui::Modifiers {
+            alt: true,
+            ..egui::Modifiers::NONE
+        };
+        assert_eq!(
+            Mods::from(m),
+            Mods {
+                alt: true,
+                ..Mods::default()
+            }
+        );
+        assert_eq!(Mods::from(egui::Modifiers::NONE), Mods::default());
+    }
+
+    #[test]
+    fn alt_never_paints_places_or_picks() {
+        let state = lower_demo();
+        let v = vertex_of(&state, 36);
+        let pick = pick_vertex(&state, v);
+        let eye = eye_above(&state, v);
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        for tool in [
+            Tool::Brush,
+            Tool::Clean,
+            Tool::Seeds,
+            Tool::Renumber,
+            Tool::Missing,
+            Tool::Rebuild,
+            Tool::Adjust,
+        ] {
+            for mods in [alt, Mods { shift: true, ..alt }, Mods { ctrl: true, ..alt }] {
+                for ev in [
+                    Event::Click(pick, mods),
+                    Event::Stroke(vec![pick, pick], mods),
+                ] {
+                    let mut m = manual(tool, 35);
+                    assert_eq!(handle(&mut m, &state, &ev, eye), Action::None, "{tool:?}");
+                    assert_eq!(m.tooth, 35, "{tool:?} keeps the tooth");
+                }
+            }
+        }
+        // the same click without Alt paints
+        let mut m = manual(Tool::Brush, 35);
+        assert!(matches!(
+            handle(&mut m, &state, &Event::Click(pick, Mods::default()), eye),
+            Action::Run(BRUSH, _)
+        ));
+    }
+
+    #[test]
+    fn an_alt_event_reaching_the_workspace_changes_nothing() {
+        let state = lower_demo();
+        let v = vertex_of(&state, 36);
+        let pick = pick_vertex(&state, v);
+        let mut ws = workspace(state);
+        ws.activate(BRUSH);
+        ws.manual.tooth = 35;
+        let before = labels_ref(&ws);
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        ws.manual_events(vec![
+            Event::Click(pick, alt),
+            Event::Stroke(vec![pick], alt),
+        ]);
+        assert!(ws.wait_for_jobs(WAIT));
+        assert_eq!(labels_ref(&ws), before);
+    }
+
+    #[test]
+    fn alt_click_opens_the_brush_from_any_tool_or_none_and_chooses_the_tooth() {
+        let mut ws = workspace(lower_demo());
+        // no tool open (Find the teeth): the brush opens on the tooth
+        assert_eq!(ws.manual.tool, None);
+        ws.manual_action(Action::SelectBrush(36));
+        assert_eq!(ws.manual.tool, Some(Tool::Brush));
+        assert_eq!(ws.manual.tooth, 36);
+        assert_eq!(ws.toast_keys().last().unwrap(), "ws-manual-brush-chosen");
+        // the brush keeps its settings and takes the next tooth, or the gingiva
+        ws.manual.radius_mm = 2.5;
+        ws.manual_action(Action::SelectBrush(0));
+        assert_eq!((ws.manual.tool, ws.manual.tooth), (Some(Tool::Brush), 0));
+        assert_eq!(ws.manual.radius_mm, 2.5);
+        // from another tool
+        ws.activate(MISSING);
+        assert_eq!(ws.manual.tool, Some(Tool::Missing));
+        ws.manual_action(Action::SelectBrush(21));
+        assert_eq!((ws.manual.tool, ws.manual.tooth), (Some(Tool::Brush), 21));
+        // nothing was run
+        assert!(ws.wait_for_jobs(WAIT));
+    }
+
+    #[test]
+    fn alt_click_leaves_the_numbering_in_order_alone() {
+        let mut ws = workspace(lower_demo());
+        ws.activate(SEEDS);
+        ws.manual.sequence = Some(Sequence::default());
+        ws.manual_action(Action::SelectBrush(36));
+        assert_eq!(ws.manual.tool, Some(Tool::Seeds));
+        assert!(ws.manual.sequence.is_some());
+        assert_eq!(ws.toast_keys().last().unwrap(), "ws-manual-brush-busy");
+    }
+
+    #[test]
+    fn every_seeded_tooth_has_an_anchor_on_the_scan_and_the_crown_beats_the_seed() {
+        use crate::labels::{self, AnchorKind};
+        let state = lower_demo();
+        let anchors = labels::anchors(&state);
+        let seeds = &data(&state).seeds;
+        assert!(!seeds.is_empty());
+        // sorted, one per tooth, the lower arch
+        assert!(anchors.windows(2).all(|w| w[0].fdi < w[1].fdi));
+        for s in seeds {
+            let a = anchors.iter().find(|a| a.fdi == s.fdi.get()).unwrap();
+            assert!(!a.upper);
+            // labelled crowns: the top of the crown, not the seed
+            assert_ne!(a.kind, AnchorKind::Seed, "tooth {}", a.fdi);
+            // and near the seed (the same tooth)
+            let world = state.case.world_frame.from_case.apply_point(s.position);
+            assert!(
+                a.world.as_dvec3().distance(world) < 15.0,
+                "tooth {}: {:?} vs {:?}",
+                a.fdi,
+                a.world,
+                world
+            );
+        }
+        // without the labels the seeds are the anchors
+        let mut bare = state.clone();
+        let mut al = data(&bare).clone();
+        al.labels.clear();
+        al.tooth_geometry.clear();
+        bare.set_module(MODULE_ID, dc_case::ModuleState::new(al));
+        let anchors = labels::anchors(&bare);
+        assert_eq!(anchors.len(), data(&bare).seeds.len());
+        assert!(anchors.iter().all(|a| a.kind == AnchorKind::Seed));
     }
 
     #[test]
