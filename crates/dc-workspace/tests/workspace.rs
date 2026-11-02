@@ -134,17 +134,24 @@ fn tetra(size: f32) -> TriMesh {
 
 /// Project with an upper scan and three stages (IPR at stage 2).
 fn synthetic_project() -> Project {
+    synthetic_project_with(&[ScanRole::Upper])
+}
+
+/// The synthetic project with one tetrahedron scan per role.
+fn synthetic_project_with(roles: &[ScanRole]) -> Project {
     let mut state = CaseState::new(Case::new("AL-TEST-01"));
     let blob = state.blobs.insert(tetra(50.0));
-    state.case.scans.push(Scan {
-        id: uuid::Uuid::new_v4(),
-        role: ScanRole::Upper,
-        role_source: RoleSource::Explicit,
-        source_name: "upper.stl".into(),
-        source_units: Units::Millimeters,
-        import_xform: Pose::default(),
-        mesh: blob,
-    });
+    for role in roles {
+        state.case.scans.push(Scan {
+            id: uuid::Uuid::new_v4(),
+            role: *role,
+            role_source: RoleSource::Explicit,
+            source_name: format!("{role:?}.stl").to_lowercase(),
+            source_units: Units::Millimeters,
+            import_xform: Pose::default(),
+            mesh: blob,
+        });
+    }
     let mut al = AlignersState::default();
     for i in 0..3 {
         al.stages.push(Stage::new(i));
@@ -206,10 +213,41 @@ fn renders_with_synthetic_project() {
     h.key_press(Key::Comma);
     h.run();
     assert!(h.query_by_label("Stage 01").is_some());
-    // jaw toggle changes the caption
+    // the arch button in the toolbar changes the caption
     h.get_by_label("Lower").click();
     h.run();
     assert!(h.query_by_label_contains("Upper jaw, occlusal").is_some());
+}
+
+#[test]
+fn the_arch_buttons_choose_the_arches_and_no_view_changes_them() {
+    let project = synthetic_project_with(&[ScanRole::Upper, ScanRole::Lower]);
+    let ws = Workspace::new_headless(module(), Some(project), None);
+    let mut h = harness(ws);
+    h.run();
+    let click = |h: &mut Harness<'static, App>, label: &str| {
+        h.get_by_label(label).click();
+        h.run();
+    };
+    let caption = |h: &Harness<'static, App>, s: &str| h.query_by_label_contains(s).is_some();
+    assert!(caption(&h, "Both jaws, occlusal"));
+    // the occlusal view keeps both arches
+    click(&mut h, "Occlusal");
+    assert!(caption(&h, "Both jaws, occlusal"));
+    // lower only: the occlusal view looks at it from above
+    click(&mut h, "Upper");
+    assert!(caption(&h, "Lower jaw, occlusal view from above"));
+    // front, left, back: the choice stays
+    for (view, word) in [("Front", "front"), ("Left", "left"), ("Back", "back")] {
+        click(&mut h, view);
+        assert!(caption(&h, &format!("Lower jaw, {word} view")), "{view}");
+    }
+    // the last arch stays on
+    click(&mut h, "Lower");
+    assert!(caption(&h, "Lower jaw, back view"));
+    // both again
+    click(&mut h, "Upper");
+    assert!(caption(&h, "Both jaws, back view"));
 }
 
 #[test]

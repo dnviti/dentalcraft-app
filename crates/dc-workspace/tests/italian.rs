@@ -110,7 +110,8 @@ fn italian_toolbar_and_timeline_hold_at_every_width() {
         views: ["Occlusale", "Frontale", "Sinistra", "Destra", "Posteriore"],
         fit: "Inquadra tutto",
         hint: "Nessuno stadio",
-        toggles: ["Superiore", "Inferiore", "Sovrapponi stadio 0"],
+        arches: ["Superiore", "Inferiore"],
+        overlay: "Sovrapponi stadio 0",
     });
 }
 

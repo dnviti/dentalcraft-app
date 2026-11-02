@@ -98,7 +98,6 @@ struct SceneKey {
     stage: u32,
     overlay0: bool,
     layers: Layers,
-    occlusal: bool,
 }
 
 /// Contact map computed for one case state (by pointer).
@@ -114,6 +113,8 @@ pub(crate) struct ViewState {
     synced: Option<SceneKey>,
     pub display: Display,
     pub view: ViewChoice,
+    /// Arches shown, whatever the view (a view preset only moves the camera).
+    pub arches: Arches,
     /// Camera orientation shown by the view cube when there is no viewport.
     pub headless_view: Option<StdView>,
     /// Frame the meshes at the next frame.
@@ -130,6 +131,46 @@ pub(crate) struct ViewState {
     scan_ids: Vec<uuid::Uuid>,
     /// The meshes of the last scene (also without a viewport).
     pub meshes: Vec<ViewMesh>,
+}
+
+/// Which arches are shown. Kept for the workspace session, apart from the
+/// camera: choosing a view never changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Arches {
+    pub upper: bool,
+    pub lower: bool,
+}
+
+impl Default for Arches {
+    fn default() -> Self {
+        Self {
+            upper: true,
+            lower: true,
+        }
+    }
+}
+
+impl Arches {
+    /// Whether the arch is shown.
+    pub fn shown(self, upper: bool) -> bool {
+        if upper { self.upper } else { self.lower }
+    }
+
+    /// The arches after a click on one of them. The last arch that can be
+    /// seen stays on: `other_available` says whether the other one can be
+    /// (it has a scan, or the case has none yet). Returns `false` when the
+    /// click was refused.
+    pub fn toggle(&mut self, upper: bool, other_available: bool) -> bool {
+        if self.shown(upper) && !(self.shown(!upper) && other_available) {
+            return false;
+        }
+        if upper {
+            self.upper = !self.upper;
+        } else {
+            self.lower = !self.lower;
+        }
+        true
+    }
 }
 
 impl ViewState {
@@ -172,9 +213,6 @@ pub(crate) struct SceneInput<'a> {
     pub layers: Layers,
     /// Contact map colours (drawn instead of the labels when given).
     pub contacts: Option<&'a ContactColors>,
-    /// Occlusal view: only the arch looked at is shown (the other one would
-    /// cover its occlusal surface).
-    pub occlusal: bool,
 }
 
 /// Most notifications the stack draws, those that stay until closed (failed
@@ -198,6 +236,20 @@ struct TeethOnScreen<'a> {
     brush: Option<u8>,
 }
 
+/// The scan of the arch is among the meshes shown. The numbers, the seed
+/// gems and the Alt+click of a hidden arch are left out with it.
+fn arch_mesh_shown(state: &CaseState, meshes: &[ViewMesh], upper: bool) -> bool {
+    let role = if upper {
+        ScanRole::Upper
+    } else {
+        ScanRole::Lower
+    };
+    state.case.scan(role).is_some_and(|sc| {
+        let id = manual::scan_mesh_id(sc);
+        meshes.iter().any(|m| m.id == id && m.visible)
+    })
+}
+
 /// Draws the number chips over the viewport and returns what an Alt+click
 /// did (choosing the brush tooth), or [`Action::None`].
 ///
@@ -216,19 +268,7 @@ fn tooth_labels(
     let cam = vp.camera();
     let eye = cam.eye();
     let fwd = (cam.target - eye).normalize_or_zero();
-    let shown = |upper: bool| {
-        let role = if upper {
-            ScanRole::Upper
-        } else {
-            ScanRole::Lower
-        };
-        s.state.case.scan(role).is_some_and(|sc| {
-            let id = manual::scan_mesh_id(sc);
-            s.meshes.iter().any(|m| m.id == id && m.visible)
-        })
-    };
-    let (upper_shown, lower_shown) = (shown(true), shown(false));
-    let arch_shown = |upper: bool| if upper { upper_shown } else { lower_shown };
+    let arch_shown = |upper: bool| arch_mesh_shown(s.state, s.meshes, upper);
     // in front of the camera, and not behind the scan
     let visible = |p: Vec3, tol: f32| -> bool {
         if fwd.dot(p - eye) <= 0.0 {
@@ -314,13 +354,8 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> Vec<ViewMesh> {
     let world = state.case.world_frame.from_case.to_mat4().as_mat4();
     let al = overlay::aligners(state);
     let palette = overlay::palette();
-    // in the occlusal view the antagonist hides the arch looked at
-    let looks_at_upper = input.upper && state.case.scan(ScanRole::Upper).is_some();
-    let (upper, lower) = if input.occlusal && looks_at_upper {
-        (true, false)
-    } else {
-        (input.upper, input.lower)
-    };
+    // the arches shown are the user's choice: no view changes them
+    let (upper, lower) = (input.upper, input.lower);
     let shown = |role: ScanRole| match role {
         ScanRole::Upper => upper,
         ScanRole::Lower => lower,
@@ -439,13 +474,12 @@ impl Workspace {
         let contacts = self.contact_map();
         let key = SceneKey {
             state: Arc::as_ptr(self.undo.current()) as usize,
-            upper: self.timeline.upper,
-            lower: self.timeline.lower,
+            upper: self.view.arches.upper,
+            lower: self.view.arches.lower,
             display: self.view.display,
             stage: self.timeline.current,
             overlay0: self.timeline.overlay0,
             layers: self.view.layers,
-            occlusal: self.view.view == ViewChoice::Occlusal,
         };
         if self.view.synced == Some(key) {
             return;
@@ -460,15 +494,14 @@ impl Workspace {
         let meshes = scene_meshes(&SceneInput {
             state: &state,
             module: self.module.as_ref(),
-            upper: self.timeline.upper,
-            lower: self.timeline.lower,
+            upper: self.view.arches.upper,
+            lower: self.view.arches.lower,
             opacity,
             enamel,
             stage: self.timeline.current,
             overlay0: self.timeline.overlay0,
             layers: self.view.layers,
             contacts: contacts.as_deref(),
-            occlusal: key.occlusal,
         });
         self.view.mesh_count = meshes.iter().filter(|m| m.visible).count();
         // a new set of scans (import, demo, a command through the bridge) is framed
@@ -504,8 +537,43 @@ impl Workspace {
     /// (or the case has no lower arch either).
     fn upper_looked_at(&self) -> bool {
         let case = &self.undo.current().case;
-        self.timeline.upper
+        self.view.arches.upper
             && (case.scan(ScanRole::Upper).is_some() || case.scan(ScanRole::Lower).is_none())
+    }
+
+    /// The arch can be seen: it has a scan (or the case has none yet).
+    fn arch_has_scan(&self, upper: bool) -> bool {
+        let case = &self.undo.current().case;
+        let role = if upper {
+            ScanRole::Upper
+        } else {
+            ScanRole::Lower
+        };
+        case.scan(role).is_some() || case.scans.is_empty()
+    }
+
+    /// The arch can be hidden: the other one is shown and can be seen.
+    fn can_hide_arch(&self, upper: bool) -> bool {
+        self.view.arches.shown(!upper) && self.arch_has_scan(!upper)
+    }
+
+    /// Shows or hides an arch. The last arch that can be seen stays on. The
+    /// occlusal camera follows the arch it looks at (from below at the upper
+    /// one, from above at the lower one); every other view stays as it is.
+    /// Returns whether the arch changed.
+    pub(crate) fn toggle_arch(&mut self, upper: bool) -> bool {
+        let changed = self.view.arches.toggle(upper, self.arch_has_scan(!upper));
+        if changed {
+            let rot = self.camera_rotation();
+            let occlusal = [StdView::OcclusalUpper, StdView::OcclusalLower];
+            if occlusal.iter().any(|v| v.rotation() == rot) {
+                let sv = ViewChoice::Occlusal.std_view(self.upper_looked_at());
+                if sv.rotation() != rot {
+                    self.apply_std_view(sv);
+                }
+            }
+        }
+        changed
     }
 
     fn set_view(&mut self, choice: ViewChoice) {
@@ -666,7 +734,14 @@ impl Workspace {
                         }
                         match item {
                             ToolbarItem::View(v) => {
-                                if text_segment(ui, &t(v.key()), self.view.view == *v).clicked() {
+                                if text_segment(
+                                    ui,
+                                    &t(v.key()),
+                                    Role::RadioButton,
+                                    self.view.view == *v,
+                                )
+                                .clicked()
+                                {
                                     self.set_view(*v);
                                 }
                             }
@@ -680,6 +755,27 @@ impl Workspace {
 
     fn toolbar_group(&mut self, ui: &mut Ui, group: ToolbarGroup) {
         match group {
+            ToolbarGroup::Arch => {
+                for upper in [true, false] {
+                    let (label, tip) = if upper {
+                        ("ws-arch-upper", "ws-arch-upper-tip")
+                    } else {
+                        ("ws-arch-lower", "ws-arch-lower-tip")
+                    };
+                    let on = self.view.arches.shown(upper);
+                    let locked = on && !self.can_hide_arch(upper);
+                    let mut tooltip = t(tip);
+                    if locked {
+                        tooltip = format!("{tooltip}. {}", t("ws-arch-keep"));
+                    }
+                    if text_segment(ui, &t(label), Role::CheckBox, on)
+                        .on_hover_text(tooltip)
+                        .clicked()
+                    {
+                        self.toggle_arch(upper);
+                    }
+                }
+            }
             ToolbarGroup::Display => {
                 for (d, icon, key) in [
                     (Display::Solid, ic::CUBE, "ws-display-solid"),
@@ -740,7 +836,7 @@ impl Workspace {
 
     /// Text of the viewport caption chip.
     pub(crate) fn caption_text(&self) -> String {
-        let jaw = match (self.timeline.upper, self.timeline.lower) {
+        let jaw = match (self.view.arches.upper, self.view.arches.lower) {
             (true, true) => t("ws-jaw-both"),
             (true, false) => t("ws-jaw-upper"),
             (false, true) => t("ws-jaw-lower"),
@@ -1030,6 +1126,8 @@ const FIT_MARGIN: f32 = 16.0;
 /// A run of related toolbar widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolbarGroup {
+    /// Upper / Lower: which arches are shown (not a view).
+    Arch,
     Display,
     Tools,
     Layers,
@@ -1051,6 +1149,7 @@ impl ToolbarItem {
     fn all() -> Vec<ToolbarItem> {
         let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
         let groups = [
+            ToolbarGroup::Arch,
             ToolbarGroup::Display,
             ToolbarGroup::Tools,
             ToolbarGroup::Layers,
@@ -1069,6 +1168,11 @@ impl ToolbarItem {
             |n: usize| n as f32 * TOOLBAR_BUTTON + n.saturating_sub(1) as f32 * TOOLBAR_SPACING;
         match self {
             ToolbarItem::View(v) => text_segment_width(ui, &t(v.key())),
+            ToolbarItem::Group(ToolbarGroup::Arch) => {
+                text_segment_width(ui, &t("ws-arch-upper"))
+                    + text_segment_width(ui, &t("ws-arch-lower"))
+                    + TOOLBAR_SPACING
+            }
             ToolbarItem::Group(ToolbarGroup::Fit) => buttons(1),
             ToolbarItem::Group(ToolbarGroup::Layers) => buttons(4),
             ToolbarItem::Group(_) => buttons(3),
@@ -1162,7 +1266,7 @@ fn text_segment_width(ui: &Ui, label: &str) -> f32 {
     g.size().x + 20.0
 }
 
-fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+fn text_segment(ui: &mut Ui, label: &str, role: Role, selected: bool) -> egui::Response {
     let c = *colors(ui);
     let font = if selected {
         fonts::semibold(13.0)
@@ -1174,7 +1278,7 @@ fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, TOOLBAR_BUTTON), Sense::click());
     let l = label.to_owned();
-    resp.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, &l));
+    resp.widget_info(|| WidgetInfo::selected(role, true, selected, &l));
     let p = ui.painter();
     if selected {
         p.rect_filled(r, CornerRadius::same(4), c.bg_hover);
@@ -1687,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn view_presets_follow_the_world_frame_and_the_occlusal_view_shows_one_arch() {
+    fn view_presets_follow_the_world_frame() {
         let mut ws = workspace(staged_case());
         for (choice, sv) in [
             (ViewChoice::Front, StdView::Front),
@@ -1704,23 +1808,119 @@ mod tests {
         let (dir, up) = StdView::Front.direction_and_up();
         assert_eq!(dir, -dc_case::WorldFrame::ANTERIOR.as_vec3());
         assert_eq!(up, -dc_case::WorldFrame::TOWARDS_LOWER.as_vec3());
-        // occlusal view of the upper arch: the lower arch would cover it
-        ws.set_view(ViewChoice::Occlusal);
+    }
+
+    fn shown(ws: &Workspace) -> (bool, bool) {
+        (
+            scan_mesh(ws, ScanRole::Upper).visible,
+            scan_mesh(ws, ScanRole::Lower).visible,
+        )
+    }
+
+    #[test]
+    fn the_arch_buttons_are_not_a_view_and_no_view_overrides_them() {
+        let mut ws = workspace(staged_case());
         ws.sync_scene_with(Color::TOOTH);
-        assert!(scan_mesh(&ws, ScanRole::Upper).visible);
-        assert!(!scan_mesh(&ws, ScanRole::Lower).visible);
+        assert_eq!(shown(&ws), (true, true));
+        // every preset keeps both arches, the occlusal one too
+        for choice in ViewChoice::ALL {
+            ws.set_view(choice);
+            ws.sync_scene_with(Color::TOOTH);
+            assert_eq!(shown(&ws), (true, true), "{choice:?}");
+        }
+        // hide the upper arch in the front view: the camera stays
+        ws.set_view(ViewChoice::Front);
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (false, true));
+        assert_eq!(ws.camera_rotation(), StdView::Front.rotation());
+        // the other presets leave the choice alone
+        for choice in ViewChoice::ALL {
+            ws.set_view(choice);
+            ws.sync_scene_with(Color::TOOTH);
+            assert_eq!(shown(&ws), (false, true), "{choice:?}");
+        }
         // only the lower arch shown: the occlusal view looks at it from above
-        ws.timeline.upper = false;
+        assert_eq!(ws.view.headless_view, Some(StdView::Back));
         ws.set_view(ViewChoice::Occlusal);
         assert_eq!(ws.view.headless_view, Some(StdView::OcclusalLower));
+        // the lower arch is the last one: it stays
+        assert!(!ws.toggle_arch(false));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (false, true));
+        // the upper arch back: the occlusal camera follows it
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (true, true));
+        assert_eq!(ws.view.headless_view, Some(StdView::OcclusalUpper));
+        // and the lower one hidden: still the upper arch from below
+        assert!(ws.toggle_arch(false));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (true, false));
+        assert_eq!(ws.view.headless_view, Some(StdView::OcclusalUpper));
+    }
+
+    #[test]
+    fn the_last_arch_that_exists_cannot_be_hidden() {
+        let mut arches = Arches::default();
+        assert!(arches.toggle(true, true));
+        assert_eq!((arches.upper, arches.lower), (false, true));
+        // the lower one is the last shown
+        assert!(!arches.toggle(false, true));
+        assert!(arches.toggle(true, true));
+        // the other arch is on but has no scan: it cannot replace this one
+        assert!(!arches.toggle(true, false));
+        assert_eq!((arches.upper, arches.lower), (true, true));
+        // a case with the lower scan only: the lower arch stays
+        let mut ws = workspace(lower_demo());
+        assert!(!ws.toggle_arch(false));
         ws.sync_scene_with(Color::TOOTH);
         assert!(scan_mesh(&ws, ScanRole::Lower).visible);
-        assert!(!scan_mesh(&ws, ScanRole::Upper).visible);
-        // the front view shows both arches
-        ws.timeline.upper = true;
-        ws.set_view(ViewChoice::Front);
+    }
+
+    #[test]
+    fn a_hidden_arch_is_not_drawn_picked_numbered_or_seeded() {
+        let mut ws = workspace(staged_case());
         ws.sync_scene_with(Color::TOOTH);
-        assert!(scan_mesh(&ws, ScanRole::Lower).visible && scan_mesh(&ws, ScanRole::Upper).visible);
+        let state = Arc::clone(ws.undo.current());
+        let seed_vertices = |ws: &Workspace| {
+            ws.view
+                .meshes
+                .iter()
+                .find(|m| m.id == 1 << 61)
+                .map_or(0, |m| m.mesh.vertex_count())
+        };
+        let both = seed_vertices(&ws);
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, true));
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, false));
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        let upper = scan_mesh(&ws, ScanRole::Upper);
+        // the viewport draws and picks only the visible meshes
+        assert!(!upper.visible);
+        assert!(!arch_mesh_shown(&state, &ws.view.meshes, true));
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, false));
+        // the seeds of the hidden arch go with it (the demo seeds one tooth)
+        assert!(both > 0 && seed_vertices(&ws) < both);
+        let pickable = |ws: &Workspace| {
+            ws.view
+                .meshes
+                .iter()
+                .filter(|m| m.visible && m.pickable)
+                .count()
+        };
+        assert_eq!(pickable(&ws), 1);
+        // the stage 0 ghost follows its arch
+        ws.timeline.overlay0 = true;
+        ws.timeline.current = 1;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(
+            ws.view
+                .meshes
+                .iter()
+                .filter(|m| m.id & (1 << 62) != 0)
+                .all(|m| m.visible == (m.id == (scan_mesh(&ws, ScanRole::Lower).id | (1 << 62))))
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ fn toolbar_and_timeline_hold_at_every_width() {
         views: ["Occlusal", "Front", "Left", "Right", "Back"],
         fit: "Fit to view",
         hint: "No stages yet",
-        toggles: ["Upper", "Lower", "Overlay stage 0"],
+        arches: ["Upper", "Lower"],
+        overlay: "Overlay stage 0",
     });
 }
