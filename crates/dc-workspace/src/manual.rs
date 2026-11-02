@@ -10,6 +10,8 @@
 //! | --- | --- |
 //! | click or drag on the scan with the brush (Shift: gingiva, Ctrl: fill the crown) | `aligners.preparation.segmentation.manual-brush` |
 //! | click with the seed tool (Shift: delete the nearest seed) | `aligners.preparation.numbering.place-seeds` |
+//! | number in order: click each tooth, `S` skip the tooth, Backspace back, Enter or Esc done | `aligners.preparation.numbering.sequence` (once, at the end) |
+//! | clear the tooth marks (seed tool panel) | `aligners.preparation.numbering.clear-seeds` |
 //! | Apply in the renumber / missing / rebuild / clean / adjust panels | the command of the tool |
 //!
 //! Clicking a tooth with any of the picking tools chooses its number. The
@@ -19,11 +21,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use dc_case::{CaseState, ScanRole};
+use dc_case::{CaseState, Fdi, ScanRole};
 use dc_command::{Command, CommandError, JobCtx};
 use dc_module_api::{CommandSpec, Toast, ToastLevel};
 use dc_ui::theme::colors;
+use dc_ui::widgets::Button;
 use dc_viewport::{Pick, Viewport, ViewportResponse};
+use dca_algo::anatomy::{Arch, numbering_sequence};
 use egui::{Color32, PointerButton, Pos2, Stroke, Ui};
 use glam::{DVec3, Vec3};
 use serde_json::{Map, Value, json};
@@ -35,6 +39,8 @@ use crate::workspace::Workspace;
 pub(crate) const BRUSH: &str = "aligners.preparation.segmentation.manual-brush";
 pub(crate) const CLEAN: &str = "aligners.preparation.segmentation.clean-borders";
 pub(crate) const SEEDS: &str = "aligners.preparation.numbering.place-seeds";
+pub(crate) const SEQUENCE: &str = "aligners.preparation.numbering.sequence";
+pub(crate) const CLEAR_SEEDS: &str = "aligners.preparation.numbering.clear-seeds";
 pub(crate) const RENUMBER: &str = "aligners.preparation.numbering.renumber";
 pub(crate) const MISSING: &str = "aligners.preparation.numbering.mark-missing";
 pub(crate) const REBUILD: &str = "aligners.manual.rebuild-tooth";
@@ -160,6 +166,13 @@ pub(crate) struct Manual {
     pub lock: bool,
     /// Refuse a move that makes the tooth collide.
     pub refuse_on_collision: bool,
+    /// The numbering in order that is going on, if any (seed tool).
+    pub sequence: Option<Sequence>,
+    /// The case the numbering in order started on: when the undo stack moves
+    /// away from it (undo, redo, another command) the numbering stops.
+    seq_base: Option<Arc<CaseState>>,
+    /// Number the third molars too in the next numbering in order.
+    pub third_molars: bool,
     /// Picks of the stroke being drawn.
     stroke: Vec<Pick>,
     /// Their screen positions (for the feedback while drawing).
@@ -190,6 +203,9 @@ impl Default for Manual {
             at_stage: false,
             lock: false,
             refuse_on_collision: false,
+            sequence: None,
+            seq_base: None,
+            third_molars: false,
             stroke: Vec::new(),
             stroke_screen: Vec::new(),
             sink: Arc::default(),
@@ -235,6 +251,181 @@ pub(crate) enum Action {
     Hint(&'static str),
     /// Nothing to do.
     None,
+}
+
+/// One step of the numbering in order: the tooth it is for and where it was
+/// clicked (`None`: skipped, the tooth gets no mark now).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SeqStep {
+    pub fdi: u8,
+    /// The click in case coordinates and in the world (to draw the marker).
+    pub at: Option<(DVec3, Vec3)>,
+}
+
+/// The numbering in order of `oa.place_seeds` of the plugin: the teeth are
+/// asked for one after the other, from the right distal to the left distal.
+/// The clicks are kept here and sent in one command when the user finishes,
+/// so the whole numbering is one step on the undo stack.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Sequence {
+    /// `upper` or `lower`: known at the start when the case has one arch, else
+    /// from the first click.
+    pub arch: Option<&'static str>,
+    pub third_molars: bool,
+    /// The teeth still to number at the start, in order.
+    order: Vec<u8>,
+    pub steps: Vec<SeqStep>,
+}
+
+/// What a key does in the numbering in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeqKey {
+    /// `S`: skip the tooth (no mark; it is not marked missing, as in the plugin).
+    Skip,
+    /// Backspace: take the last step back.
+    Undo,
+    /// Enter or Esc: done.
+    Finish,
+}
+
+fn arch_of_name(name: &str) -> Arch {
+    if name == "upper" {
+        Arch::Upper
+    } else {
+        Arch::Lower
+    }
+}
+
+impl Sequence {
+    /// A numbering that starts now on `state`.
+    pub(crate) fn start(state: &CaseState, third_molars: bool) -> Self {
+        let arches: Vec<&'static str> = state
+            .case
+            .scans
+            .iter()
+            .filter_map(|s| arch_name(s.role))
+            .collect();
+        let mut seq = Self {
+            third_molars,
+            ..Self::default()
+        };
+        if let [one] = arches.as_slice() {
+            seq.set_arch(state, one);
+        }
+        seq
+    }
+
+    /// Works on `arch`: the teeth to number are those the module will take
+    /// (`numbering_sequence`, without the teeth that have a mark or are missing).
+    fn set_arch(&mut self, state: &CaseState, arch: &'static str) {
+        let taken: Vec<Fdi> = overlay::aligners(state)
+            .map(|a| {
+                a.seeds
+                    .iter()
+                    .map(|s| s.fdi)
+                    .chain(a.missing.iter().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.arch = Some(arch);
+        self.order = numbering_sequence(arch_of_name(arch), self.third_molars, &taken)
+            .into_iter()
+            .map(Fdi::get)
+            .collect();
+    }
+
+    /// The tooth the next step is for (`None`: all done, or the arch is not
+    /// known yet).
+    pub(crate) fn next(&self) -> Option<u8> {
+        self.order.get(self.steps.len()).copied()
+    }
+
+    /// The parameters of the command for the steps so far.
+    fn params(&self) -> Value {
+        let steps: Vec<Value> = self
+            .steps
+            .iter()
+            .map(|s| match s.at {
+                Some((p, _)) => json!({ "kind": "point", "position": vec3(p), "fdi": s.fdi }),
+                None => json!({ "kind": "skip", "fdi": s.fdi }),
+            })
+            .collect();
+        json!({
+            "arch": self.arch,
+            "third_molars": self.third_molars,
+            "steps": steps,
+        })
+    }
+}
+
+/// The user is done (Enter or Esc, as in the plugin: the marks given are
+/// kept): the command with all the steps, or nothing when no tooth was
+/// clicked (skips alone change nothing).
+fn sequence_finish(m: &mut Manual) -> Action {
+    match m.sequence.take() {
+        Some(seq) if seq.steps.iter().any(|s| s.at.is_some()) => {
+            Action::Run(SEQUENCE, seq.params())
+        }
+        _ => Action::None,
+    }
+}
+
+/// A click on a scan in the numbering in order: the next tooth gets that point.
+pub(crate) fn sequence_click(m: &mut Manual, state: &CaseState, pick: &Pick, eye: Vec3) -> Action {
+    let Some(seq) = m.sequence.as_mut() else {
+        return Action::None;
+    };
+    let Some(target) = target_of(state, pick, eye) else {
+        return Action::None;
+    };
+    let Some(arch) = arch_name(target.role) else {
+        return Action::Hint("ws-manual-no-arch");
+    };
+    match seq.arch {
+        None => seq.set_arch(state, arch),
+        Some(a) if a != arch => return Action::Hint("ws-manual-seq-other-arch"),
+        Some(_) => {}
+    }
+    let Some(fdi) = seq.next() else {
+        return sequence_finish(m);
+    };
+    seq.steps.push(SeqStep {
+        fdi,
+        at: Some((target.point, pick.point)),
+    });
+    // the last tooth of the arch ends the numbering, as in the plugin
+    if seq.next().is_none() {
+        return sequence_finish(m);
+    }
+    Action::None
+}
+
+/// A key in the numbering in order.
+pub(crate) fn sequence_key(m: &mut Manual, key: SeqKey) -> Action {
+    let Some(seq) = m.sequence.as_mut() else {
+        return Action::None;
+    };
+    match key {
+        SeqKey::Skip => {
+            let Some(fdi) = seq.next() else {
+                return if seq.arch.is_none() {
+                    Action::Hint("ws-manual-seq-first")
+                } else {
+                    sequence_finish(m)
+                };
+            };
+            seq.steps.push(SeqStep { fdi, at: None });
+            if seq.next().is_none() {
+                return sequence_finish(m);
+            }
+            Action::None
+        }
+        SeqKey::Undo => {
+            seq.steps.pop();
+            Action::None
+        }
+        SeqKey::Finish => sequence_finish(m),
+    }
 }
 
 /// A pick, as the scan sees it.
@@ -526,6 +717,22 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
             Toast::new(ToastLevel::Success, "ws-manual-rebuilt")
                 .with_detail(out["message"].as_str().unwrap_or_default()),
         ),
+        SEQUENCE => {
+            let marks = list("assigned", &|a| (a["kind"] == "point").then(String::new)).len();
+            let mut detail = dc_i18n::tr_args(
+                "ws-manual-seq-numbered-detail",
+                &[("n", &marks.to_string())],
+            );
+            if let Some(next) = out["next_fdi"].as_u64() {
+                detail.push(' ');
+                detail.push_str(&dc_i18n::tr_args(
+                    "ws-manual-seq-numbered-next",
+                    &[("fdi", &next.to_string())],
+                ));
+            }
+            Some(Toast::new(ToastLevel::Success, "ws-manual-seq-numbered").with_detail(detail))
+        }
+        CLEAR_SEEDS => Some(Toast::new(ToastLevel::Info, "ws-manual-cleared")),
         RENUMBER => Some(
             Toast::new(ToastLevel::Info, "ws-manual-renumbered")
                 .with_detail(format!("{} / {}", out["src"], out["dst"])),
@@ -540,6 +747,89 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
         )),
         _ => None,
     }
+}
+
+/// The ids of `out[key]`, an array of `CLEARED_IDS`.
+fn ids_of<'a>(out: &'a Value, key: &str) -> impl Iterator<Item = &'a str> {
+    out[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+}
+
+/// The notices for what a change of the tooth marks did to the results:
+/// those it dropped (`dropped`: the automatic numbering, per arch in
+/// `arches`) and those it left out of date (`invalidated`: the marks edited
+/// by hand, kept as the plugin keeps them), in the `aligners-cleared-*` words
+/// of the scan import; and the arches the automatic numbering could not
+/// number (`failed`). `out` is the report of the place-seeds, sequence,
+/// clear-seeds or numbering command, or of Find the teeth (its `steps`).
+pub(crate) fn marks_toasts(out: &Value) -> Vec<Toast> {
+    crate::loader();
+    let mut reports = vec![out];
+    reports.extend(
+        out["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| &s["output"]),
+    );
+    let mut dropped = Vec::new();
+    let mut invalidated = Vec::new();
+    let mut failed = Vec::new();
+    for r in reports {
+        dropped.extend(ids_of(r, "dropped"));
+        for a in r["arches"].as_array().into_iter().flatten() {
+            dropped.extend(ids_of(a, "dropped"));
+        }
+        invalidated.extend(ids_of(r, "invalidated"));
+        for f in r["failed"].as_array().into_iter().flatten() {
+            if let Some(e) = f["error"].as_str() {
+                failed.push(e.to_owned());
+            }
+        }
+    }
+    // one id each, in the order the module lists them
+    let ordered = |ids: &[&str]| -> Vec<&'static str> {
+        dca_model::CLEARED_IDS
+            .into_iter()
+            .filter(|id| ids.contains(id))
+            .collect()
+    };
+    let mut toasts = Vec::new();
+    for (ids, level, title, detail) in [
+        (
+            ordered(&dropped),
+            ToastLevel::Warning,
+            "ws-toast-marks-dropped",
+            "ws-marks-dropped-detail",
+        ),
+        (
+            ordered(&invalidated),
+            ToastLevel::Info,
+            "ws-toast-marks-outdated",
+            "ws-marks-outdated-detail",
+        ),
+    ] {
+        if !ids.is_empty() {
+            let list = crate::import::cleared_list(dca_model::MODULE_ID, &ids);
+            toasts.push(
+                Toast::new(level, title).with_detail(dc_i18n::tr_args(detail, &[("list", &list)])),
+            );
+        }
+    }
+    if !failed.is_empty() {
+        toasts.push(
+            Toast::new(ToastLevel::Warning, "ws-toast-find-arch-failed").with_detail(
+                dc_i18n::tr_args(
+                    "ws-find-arch-failed-detail",
+                    &[("reasons", &failed.join("; "))],
+                ),
+            ),
+        );
+    }
+    toasts
 }
 
 /// A command of the module bound to its parameters whose report is kept for
@@ -602,6 +892,23 @@ pub(crate) fn collect(m: &mut Manual, ui: &Ui, vp: &Viewport, vr: &ViewportRespo
         };
         painter.circle_stroke(at, radius, Stroke::new(1.5, tint));
     }
+    // the marks of the numbering in order, not sent yet
+    if let Some(seq) = &m.sequence {
+        for step in &seq.steps {
+            let (color, at) = match step.at {
+                Some((_, world)) => (tint, vp.screen_pos(rect, world)),
+                None => continue,
+            };
+            painter.circle_filled(at, 5.0, color);
+            painter.text(
+                at + egui::vec2(7.0, -7.0),
+                egui::Align2::LEFT_BOTTOM,
+                step.fdi.to_string(),
+                egui::FontId::proportional(13.0),
+                c.text_primary,
+            );
+        }
+    }
     let mut out = Vec::new();
     if tool == Tool::Brush {
         if vr.response.dragged_by(PointerButton::Primary) {
@@ -657,6 +964,28 @@ impl Workspace {
     /// Opens a manual tool (a menu entry of the tool was activated).
     pub(crate) fn open_manual_tool(&mut self, tool: Tool) {
         self.manual.tool = Some(tool);
+        self.manual.sequence = None;
+        self.manual.seq_base = None;
+        // the numbering in order searches the third molars as Find the teeth does
+        if tool == Tool::Seeds {
+            self.manual.third_molars = overlay::aligners(self.undo.current())
+                .is_some_and(|a| a.settings.find_teeth.third_molars);
+        }
+    }
+
+    /// Stops the numbering in order when the case is no longer the one it
+    /// started on (undo, redo, another command): the teeth it asks for may
+    /// have changed.
+    pub(crate) fn sequence_follow_undo(&mut self) {
+        let moved = match (&self.manual.sequence, &self.manual.seq_base) {
+            (Some(_), Some(base)) => !Arc::ptr_eq(base, self.undo.current()),
+            _ => false,
+        };
+        if moved {
+            self.manual.sequence = None;
+            self.manual.seq_base = None;
+            self.toast(Toast::new(ToastLevel::Info, "ws-manual-seq-stopped"));
+        }
     }
 
     /// Turns the events of the pointer into commands and runs them.
@@ -668,10 +997,41 @@ impl Workspace {
             .map_or(Vec3::ZERO, |vp| vp.camera().eye());
         for ev in events {
             let state = Arc::clone(self.undo.current());
-            match handle(&mut self.manual, &state, &ev, eye) {
-                Action::Run(id, params) => self.run_manual(id, params),
-                Action::Hint(key) => self.toast(Toast::new(ToastLevel::Info, key)),
-                Action::Chose(_) | Action::None => {}
+            let action = match (&ev, self.manual.sequence.is_some()) {
+                (Event::Click(pick, _), true) => {
+                    sequence_click(&mut self.manual, &state, pick, eye)
+                }
+                (_, true) => Action::None,
+                (_, false) => handle(&mut self.manual, &state, &ev, eye),
+            };
+            self.manual_action(action);
+        }
+    }
+
+    fn manual_action(&mut self, action: Action) {
+        match action {
+            Action::Run(id, params) => self.run_manual(id, params),
+            Action::Hint(key) => self.toast(Toast::new(ToastLevel::Info, key)),
+            Action::Chose(_) | Action::None => {}
+        }
+    }
+
+    /// The keys of the numbering in order: `S` (skip the tooth), Backspace (back),
+    /// Enter and Esc (done). Read before the other shortcuts, which would
+    /// take Esc; they are left alone while a text field has the keyboard.
+    pub(crate) fn sequence_keys(&mut self, ui: &Ui) {
+        if self.manual.sequence.is_none() || ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        for (key, what) in [
+            (egui::Key::S, SeqKey::Skip),
+            (egui::Key::Backspace, SeqKey::Undo),
+            (egui::Key::Enter, SeqKey::Finish),
+            (egui::Key::Escape, SeqKey::Finish),
+        ] {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                let action = sequence_key(&mut self.manual, what);
+                self.manual_action(action);
             }
         }
     }
@@ -702,7 +1062,13 @@ impl Workspace {
             if let Some(toast) = feedback_toast(&id, &out) {
                 self.toast(toast);
             }
+            if matches!(id.as_str(), SEEDS | SEQUENCE | CLEAR_SEEDS) {
+                for toast in marks_toasts(&out) {
+                    self.toast(toast);
+                }
+            }
         }
+        self.sequence_follow_undo();
     }
 
     /// The panel of the open tool, at the top left of the viewport.
@@ -714,6 +1080,10 @@ impl Workspace {
         let has_stages = self.timeline.current > 0;
         let mut apply = false;
         let mut close = false;
+        let mut seq_key = None;
+        let mut seq_cancel = false;
+        let mut seq_start = false;
+        let mut clear = false;
         let c = *colors(ui);
         egui::Frame::new()
             .fill(c.bg_raised)
@@ -731,11 +1101,12 @@ impl Workspace {
                         }
                     });
                 });
-                ui.label(
-                    egui::RichText::new(t(tool.hint_key()))
-                        .color(c.text_secondary)
-                        .small(),
-                );
+                let hint = if m.sequence.is_some() {
+                    "ws-manual-hint-seq"
+                } else {
+                    tool.hint_key()
+                };
+                ui.label(egui::RichText::new(t(hint)).color(c.text_secondary).small());
                 number(ui, t("ws-manual-tooth"), &mut m.tooth, 0..=48, 1.0, "");
                 match tool {
                     Tool::Brush => {
@@ -749,7 +1120,55 @@ impl Workspace {
                         );
                     }
                     Tool::Clean => number(ui, t("ws-manual-rings"), &mut m.rings, 0..=3, 1.0, ""),
-                    Tool::Seeds => {}
+                    Tool::Seeds => {
+                        if let Some(seq) = &m.sequence {
+                            let line = match (seq.next(), seq.arch) {
+                                (Some(f), _) => dc_i18n::tr_args(
+                                    "ws-manual-seq-next",
+                                    &[("fdi", &f.to_string())],
+                                ),
+                                (None, None) => t("ws-manual-seq-first"),
+                                (None, Some(_)) => t("ws-manual-seq-done"),
+                            };
+                            ui.label(egui::RichText::new(line).strong());
+                            ui.horizontal_wrapped(|ui| {
+                                if Button::secondary(t("ws-manual-seq-skip"))
+                                    .show(ui)
+                                    .clicked()
+                                {
+                                    seq_key = Some(SeqKey::Skip);
+                                }
+                                if Button::secondary(t("ws-manual-seq-back"))
+                                    .show(ui)
+                                    .clicked()
+                                {
+                                    seq_key = Some(SeqKey::Undo);
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                if Button::primary(t("ws-manual-seq-finish"))
+                                    .show(ui)
+                                    .clicked()
+                                {
+                                    seq_key = Some(SeqKey::Finish);
+                                }
+                                if Button::ghost(t("ws-manual-seq-cancel")).show(ui).clicked() {
+                                    seq_cancel = true;
+                                }
+                            });
+                        } else {
+                            ui.checkbox(&mut m.third_molars, t("ws-manual-seq-third"));
+                            if Button::secondary(t("ws-manual-seq-start"))
+                                .show(ui)
+                                .clicked()
+                            {
+                                seq_start = true;
+                            }
+                            if Button::ghost(t("ws-manual-clear")).show(ui).clicked() {
+                                clear = true;
+                            }
+                        }
+                    }
                     Tool::Renumber => number(ui, t("ws-manual-dst"), &mut m.dst, 0..=48, 1.0, ""),
                     Tool::Missing => {
                         ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));
@@ -787,6 +1206,22 @@ impl Workspace {
             });
         if close {
             self.manual.tool = None;
+        }
+        if close || seq_cancel {
+            self.manual.sequence = None;
+            self.manual.seq_base = None;
+        }
+        if seq_start {
+            let state = Arc::clone(self.undo.current());
+            self.manual.sequence = Some(Sequence::start(&state, self.manual.third_molars));
+            self.manual.seq_base = Some(state);
+        }
+        if let Some(key) = seq_key {
+            let action = sequence_key(&mut self.manual, key);
+            self.manual_action(action);
+        }
+        if clear {
+            self.run_manual(CLEAR_SEEDS, json!({}));
         }
         if apply {
             match params_for(&self.manual, tool, stage) {
@@ -1037,6 +1472,9 @@ mod tests {
         );
         let added = exec(id, &state, p);
         assert!(data(&added).seeds.iter().any(|s| s.fdi.get() == 36));
+        // a change of the marks keeps the colours of the arch (out of date), so
+        // the clicks below still read the tooth under the pointer
+        assert_eq!(data(&added).labels, data(&state).labels);
         // clicking again moves it; tooth 0 takes the number of the tooth under the click
         let mut m = manual(Tool::Seeds, 0);
         let Action::Run(_, p) = handle(&mut m, &added, &Event::Click(pick, Mods::default()), eye)
@@ -1335,5 +1773,181 @@ mod tests {
             assert!(dca_module::commands::is_registered(tool.command_id()));
         }
         assert_eq!(Tool::from_command("aligners.demo"), None);
+    }
+
+    // ---- numbering in order -------------------------------------------------------------------
+
+    fn cleared_demo() -> CaseState {
+        exec(CLEAR_SEEDS, &lower_demo(), json!({}))
+    }
+
+    fn click_vertex(m: &mut Manual, state: &CaseState, v: usize) -> Action {
+        sequence_click(m, state, &pick_vertex(state, v), eye_above(state, v))
+    }
+
+    #[test]
+    fn the_numbering_in_order_asks_for_the_teeth_from_the_right_distal() {
+        let state = cleared_demo();
+        let v = vertex_of(&lower_demo(), 36);
+        let w = vertex_of(&lower_demo(), 35);
+        let mut m = manual(Tool::Seeds, 0);
+        m.sequence = Some(Sequence::start(&state, false));
+        // one arch in the case: it is known from the start; no third molar
+        let seq = m.sequence.as_ref().unwrap();
+        assert_eq!(seq.arch, Some("lower"));
+        assert_eq!(seq.next(), Some(47));
+        // a click puts the next tooth, S skips the next one (it is not marked missing)
+        assert_eq!(click_vertex(&mut m, &state, v), Action::None);
+        assert_eq!(sequence_key(&mut m, SeqKey::Skip), Action::None);
+        assert_eq!(click_vertex(&mut m, &state, w), Action::None);
+        let seq = m.sequence.as_ref().unwrap();
+        assert_eq!(
+            seq.steps.iter().map(|s| s.fdi).collect::<Vec<_>>(),
+            [47, 46, 45]
+        );
+        assert_eq!(seq.next(), Some(44));
+        // Backspace takes the last step back, and the tooth is asked for again
+        assert_eq!(sequence_key(&mut m, SeqKey::Undo), Action::None);
+        assert_eq!(m.sequence.as_ref().unwrap().next(), Some(45));
+        // nothing has changed in the case until it is finished
+        assert!(data(&state).seeds.is_empty());
+        // Enter: one command with the steps, and the numbering is over
+        let Action::Run(id, params) = sequence_key(&mut m, SeqKey::Finish) else {
+            panic!("a command");
+        };
+        assert_eq!(id, SEQUENCE);
+        assert!(m.sequence.is_none());
+        assert_eq!(params["arch"], "lower");
+        assert_eq!(params["steps"][0]["kind"], "point");
+        // each step names the tooth it was for: the module refuses a mismatch
+        assert_eq!(params["steps"][0]["fdi"], 47);
+        assert_eq!(params["steps"][1], json!({ "kind": "skip", "fdi": 46 }));
+        assert_eq!(params["steps"].as_array().unwrap().len(), 2);
+        // the command takes exactly these parameters
+        let after = exec(id, &state, params);
+        let nums: Vec<u8> = data(&after).seeds.iter().map(|s| s.fdi.get()).collect();
+        assert_eq!(nums, [47]);
+        assert!(data(&after).missing.is_empty(), "S skips the tooth only");
+        // finishing without a step sends nothing
+        m.sequence = Some(Sequence::start(&state, false));
+        assert_eq!(sequence_key(&mut m, SeqKey::Finish), Action::None);
+        assert!(m.sequence.is_none());
+    }
+
+    #[test]
+    fn the_numbering_in_order_skips_the_teeth_that_are_taken_and_ends_with_the_arch() {
+        // the demo has all its marks: nothing is left to number, a click or S ends it
+        let state = lower_demo();
+        let v = vertex_of(&state, 36);
+        let mut m = manual(Tool::Seeds, 0);
+        m.sequence = Some(Sequence::start(&state, false));
+        assert_eq!(m.sequence.as_ref().unwrap().next(), None);
+        assert_eq!(sequence_key(&mut m, SeqKey::Skip), Action::None);
+        assert!(m.sequence.is_none());
+        // the last tooth of the order finishes by itself
+        let state = cleared_demo();
+        m.sequence = Some(Sequence::start(&state, true));
+        m.sequence.as_mut().unwrap().order = vec![48];
+        let Action::Run(id, params) = click_vertex(&mut m, &state, v) else {
+            panic!("the last click finishes");
+        };
+        assert_eq!(id, SEQUENCE);
+        assert_eq!(params["third_molars"], true);
+        assert!(m.sequence.is_none());
+        // no numbering open: clicks and keys do nothing
+        assert_eq!(click_vertex(&mut m, &state, v), Action::None);
+        assert_eq!(sequence_key(&mut m, SeqKey::Skip), Action::None);
+    }
+
+    #[test]
+    fn the_numbering_in_order_with_two_arches_waits_for_the_first_click() {
+        let state = exec(
+            "aligners.demo",
+            &lower_demo(),
+            json!({ "arch": "upper", "severity": "mild" }),
+        );
+        let state = exec(CLEAR_SEEDS, &state, json!({}));
+        let mut m = manual(Tool::Seeds, 0);
+        m.sequence = Some(Sequence::start(&state, false));
+        let seq = m.sequence.as_ref().unwrap();
+        assert_eq!((seq.arch, seq.next()), (None, None));
+        // S before the arch is known asks for a click
+        assert_eq!(
+            sequence_key(&mut m, SeqKey::Skip),
+            Action::Hint("ws-manual-seq-first")
+        );
+        // the first click on the lower scan chooses the arch
+        let lower = state.case.scan(ScanRole::Lower).unwrap();
+        let v = state.mesh(&lower.mesh).unwrap().tris[0][0] as usize;
+        assert_eq!(click_vertex(&mut m, &state, v), Action::None);
+        let seq = m.sequence.as_ref().unwrap();
+        assert_eq!((seq.arch, seq.next()), (Some("lower"), Some(46)));
+    }
+
+    #[test]
+    fn the_steps_sent_are_refused_when_the_marks_changed_meanwhile() {
+        let state = cleared_demo();
+        let v = vertex_of(&lower_demo(), 36);
+        let mut m = manual(Tool::Seeds, 0);
+        m.sequence = Some(Sequence::start(&state, false));
+        assert_eq!(click_vertex(&mut m, &state, v), Action::None);
+        let Action::Run(id, params) = sequence_key(&mut m, SeqKey::Finish) else {
+            panic!("a command");
+        };
+        // the same steps on the case they were made on: fine
+        assert!(data(&exec(id, &state, params.clone())).seeds.len() == 1);
+        // after 47 got a mark some other way, the step for 47 is for 46 now
+        let other = exec(id, &state, params.clone());
+        let spec = dca_module::commands::find(id).unwrap();
+        let err = spec
+            .execute(&other, &params, &JobCtx::detached())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("47") && err.contains("46"), "{err}");
+    }
+
+    #[test]
+    fn the_notices_of_the_marks_name_what_was_dropped_or_left_out_of_date() {
+        dca_module::loader();
+        // marks edited by hand: kept, out of date, in the words of the import
+        let out = json!({ "invalidated": ["labels", "tooth_frames"] });
+        let t = marks_toasts(&out);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].message_key, "ws-toast-marks-outdated");
+        let detail = t[0].detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("teeth and gum") && detail.contains("tooth axes"),
+            "{detail}"
+        );
+        // Find the teeth: what the numbering dropped (per arch, once each) and
+        // the arch that failed
+        let out = json!({ "steps": [
+            { "id": "aligners.preparation.numbering.automatic", "output": {
+                "arches": [
+                    { "arch": "lower", "dropped": ["labels", "setup"] },
+                    { "arch": "upper", "dropped": ["labels"] },
+                ],
+                "failed": [{ "arch": "upper", "error": "no dental arch found in the upper scan" }],
+            } },
+            { "id": "aligners.preparation.orientation.automatic", "output": {} },
+        ] });
+        let t = marks_toasts(&out);
+        let keys: Vec<&str> = t.iter().map(|t| t.message_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["ws-toast-marks-dropped", "ws-toast-find-arch-failed"]
+        );
+        let detail = t[0].detail.clone().unwrap_or_default();
+        assert_eq!(detail.matches("teeth and gum").count(), 1, "{detail}");
+        assert!(detail.contains("setup"), "{detail}");
+        assert!(
+            t[1].detail
+                .clone()
+                .unwrap_or_default()
+                .contains("upper scan")
+        );
+        // nothing changed: no notice
+        assert!(marks_toasts(&json!({ "invalidated": [], "dropped": [] })).is_empty());
+        assert!(marks_toasts(&json!({ "arches": [{ "dropped": [] }], "failed": [] })).is_empty());
     }
 }

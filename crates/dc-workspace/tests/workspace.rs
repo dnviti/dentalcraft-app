@@ -1297,3 +1297,127 @@ fn the_shortcut_list_names_the_leaves_in_key_order() {
     }
     assert!(h.query_by_label("Keyboard shortcuts").is_some());
 }
+
+// ---- the numbering in order (seed tool) ---------------------------------------------------
+
+#[test]
+fn the_numbering_in_order_is_driven_from_the_panel_and_the_keys() {
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.run();
+    h.state_mut()
+        .ws
+        .activate("aligners.preparation.numbering.place-seeds");
+    h.run();
+    assert!(h.query_by_label("Number the teeth in order").is_some());
+    let marks = aligners(&h.state().ws).seeds.len();
+    assert!(marks > 0);
+
+    // clear all the tooth marks from the panel: one undoable command
+    let colours = aligners(&h.state().ws).labels;
+    h.get_by_label("Clear all the tooth marks").click();
+    settle(&mut h);
+    assert!(aligners(&h.state().ws).seeds.is_empty());
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .iter()
+            .any(|k| k == "ws-manual-cleared")
+    );
+    // the colours of the teeth stay (as in the plugin), and the notice says
+    // they are out of date
+    assert_eq!(aligners(&h.state().ws).labels, colours);
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .iter()
+            .any(|k| k == "ws-toast-marks-outdated")
+    );
+
+    // the numbering asks for the right distal tooth of the lower arch first
+    h.get_by_label("Number the teeth in order").click();
+    h.run();
+    assert!(h.query_by_label("Click tooth 47").is_some());
+    // S skips the tooth: the next one is 46
+    h.key_press(Key::S);
+    h.run();
+    assert!(h.query_by_label("Click tooth 46").is_some());
+    h.key_press(Key::S);
+    h.run();
+    assert!(h.query_by_label("Click tooth 45").is_some());
+    // Backspace takes the last one back
+    h.key_press(Key::Backspace);
+    h.run();
+    assert!(h.query_by_label("Click tooth 46").is_some());
+    // nothing was sent yet
+    assert!(aligners(&h.state().ws).missing.is_empty());
+    // Enter: done. Skips alone change nothing (no tooth was clicked), and S
+    // never marks a tooth as missing
+    h.key_press(Key::Enter);
+    settle(&mut h);
+    assert!(h.query_by_label("Click tooth 46").is_none());
+    assert!(aligners(&h.state().ws).missing.is_empty());
+    assert!(aligners(&h.state().ws).seeds.is_empty());
+    assert!(
+        !h.state()
+            .ws
+            .toast_keys()
+            .iter()
+            .any(|k| k == "ws-manual-seq-numbered")
+    );
+
+    // the clearing is the only step on the undo stack
+    h.state_mut().ws.undo();
+    settle(&mut h);
+    assert_eq!(aligners(&h.state().ws).seeds.len(), marks);
+
+    // Esc is done too
+    h.get_by_label("Number the teeth in order").click();
+    h.run();
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.query_by_label("Click tooth 47").is_none());
+    assert!(h.query_by_label("Number the teeth in order").is_some());
+}
+
+#[test]
+fn the_numbering_in_order_stops_when_the_case_changes_and_follows_the_third_molars_setting() {
+    // the case searches the third molars (setting of Find the teeth)
+    let mut project = demo_project(&["lower"]);
+    let mut data = aligners_of(&project.case_state);
+    data.settings.find_teeth.third_molars = true;
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(data));
+    let ws = Workspace::new_headless(module(), Some(project), None);
+    let mut h = harness(ws);
+    h.run();
+    h.state_mut()
+        .ws
+        .activate("aligners.preparation.numbering.place-seeds");
+    h.run();
+    h.get_by_label("Clear all the tooth marks").click();
+    settle(&mut h);
+    // the box of the panel starts from the setting: the numbering starts at 48
+    h.get_by_label("Number the teeth in order").click();
+    h.run();
+    assert!(h.query_by_label("Click tooth 48").is_some());
+    h.key_press(Key::S);
+    h.run();
+    assert!(h.query_by_label("Click tooth 47").is_some());
+    // undo changes the case under the numbering: it stops
+    assert!(h.state_mut().ws.undo());
+    settle(&mut h);
+    h.run();
+    assert!(h.query_by_label("Click tooth 47").is_none());
+    assert!(h.query_by_label("Number the teeth in order").is_some());
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .iter()
+            .any(|k| k == "ws-manual-seq-stopped")
+    );
+}

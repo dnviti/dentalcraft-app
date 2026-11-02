@@ -29,6 +29,22 @@ pub(crate) const CASE_ANALYSIS: &str = "aligners.diagnosis.space-analysis";
 pub(crate) const EXPORT_ALL: &str = "aligners.output.export-all";
 /// "Control visit".
 pub(crate) const VISITS: &str = "aligners.followup.visits";
+/// "Find the teeth".
+pub(crate) const FIND_TEETH: &str = "aligners.teeth.find";
+
+/// The parameters leaf `id` runs with when it is clicked: none for most
+/// leaves; "Find the teeth" takes the third-molars box and the missing teeth
+/// of its inspector, which are settings of the case.
+pub(crate) fn run_params(id: &str, state: &CaseState) -> Value {
+    match id {
+        FIND_TEETH => state
+            .module_data::<AlignersState>(MODULE_ID)
+            .map(|d| d.settings.find_teeth.clone())
+            .unwrap_or_default()
+            .leaf_params(),
+        _ => Value::Null,
+    }
+}
 
 /// i18n key of the name of the job that runs leaf `id`, shown in the status
 /// bar.

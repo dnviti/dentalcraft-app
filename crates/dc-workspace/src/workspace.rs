@@ -547,7 +547,10 @@ impl Workspace {
                 .map(|s| (id, s))
         });
         match spec {
-            Some((id, spec)) => self.run_leaf(id, spec, Value::Null),
+            Some((id, spec)) => {
+                let params = leaf::run_params(id, &state);
+                self.run_leaf(id, spec, params);
+            }
             None => {
                 for cmd in cmds {
                     self.run_command(cmd);
@@ -1076,6 +1079,12 @@ impl Workspace {
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        // new tooth marks: what they dropped, and the arches not numbered
+        if id == leaf::FIND_TEETH {
+            for toast in crate::manual::marks_toasts(out) {
+                self.toast(toast);
+            }
+        }
         if id == leaf::AUTO {
             self.show_auto_report(out);
         } else if let Some(r) = leaf::report(id, out) {

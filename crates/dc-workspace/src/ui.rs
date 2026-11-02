@@ -101,6 +101,7 @@ impl Workspace {
     }
 
     fn keyboard(&mut self, ui: &Ui) {
+        self.sequence_keys(ui);
         let consume = |mods: Modifiers, key: Key| {
             ui.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(mods, key)))
         };
