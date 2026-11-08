@@ -148,6 +148,16 @@ fn bridge_runs_commands_through_the_workspace() {
             (img["width"].as_u64(), img["height"].as_u64()),
             (Some(64), Some(48))
         );
+        // the render takes the model and the stage; a bad one is refused
+        let img = c
+            .call(
+                "render",
+                json!({"width": 16, "height": 12, "model": "scan", "stage": 2}),
+            )
+            .unwrap();
+        assert_eq!(img["width"].as_u64(), Some(16));
+        let bad = c.call("render", json!({"model": "gums"})).unwrap_err();
+        assert!(bad["message"].as_str().unwrap().contains("model"), "{bad}");
         let shot = c.call("screenshot", json!({"size": "32x24"})).unwrap();
         assert!(shot["png"].as_str().unwrap().len() > 20);
 

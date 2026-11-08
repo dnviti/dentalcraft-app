@@ -16,11 +16,14 @@ use dca_model::{AlignersState, MODULE_ID};
 use serde_json::{Value, json};
 
 /// The pipeline steps `aligners.auto` runs on a case with both arches and
-/// their seeds, with the full export.
+/// their seeds, with the full export (the check of the segmentation runs
+/// once per arch).
 const STEPS: &[&str] = &[
     "aligners.case.detect-arch",
     "aligners.preparation.orientation.automatic",
     "aligners.preparation.segmentation.automatic",
+    "aligners.preparation.segmentation.check",
+    "aligners.preparation.segmentation.check",
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.gingiva",
     "aligners.diagnosis.space-analysis",
@@ -72,11 +75,12 @@ fn run_and_check(s: &mut Session, dir: &Path, numbering: usize) -> Value {
             st["seconds"].as_f64().unwrap()
         );
     }
-    // the steps, in pipeline order, the numbering of the arches without seeds after the orientation
+    // the steps, in pipeline order, the numbering of the arches without seeds
+    // before the orientation, which takes the frame from the new seeds
     let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
     let mut expected = STEPS.to_vec();
     for _ in 0..numbering {
-        expected.insert(2, "aligners.preparation.numbering.automatic");
+        expected.insert(1, "aligners.preparation.numbering.automatic");
     }
     assert_eq!(ids, expected);
     let by_id = |id: &str| -> &Value { &steps.iter().find(|s| s["id"] == id).unwrap()["output"] };

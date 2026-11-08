@@ -1,5 +1,5 @@
-//! Stage timeline under the viewport: transport, stage readout, jaw
-//! toggles and the row of stage cells with event markers.
+//! Stage timeline under the viewport: transport, stage readout, the overlay
+//! toggle and the row of stage cells with event markers.
 
 use dc_case::CaseState;
 use dc_ui::fonts;
@@ -82,8 +82,6 @@ pub(crate) struct TimelineState {
     pub current: u32,
     pub playing: bool,
     last_step: f64,
-    pub upper: bool,
-    pub lower: bool,
     pub overlay0: bool,
 }
 
@@ -93,8 +91,6 @@ impl Default for TimelineState {
             current: 0,
             playing: false,
             last_step: 0.0,
-            upper: true,
-            lower: true,
             overlay0: false,
         }
     }
@@ -186,15 +182,12 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     }
     let has = !model.is_empty();
 
-    // The jaw toggles keep their own room at the right (the widest labels
-    // are the Italian ones); the transport and the readout or hint share what
-    // is left, and the hint is cut with an ellipsis rather than run under them.
+    // The overlay toggle keeps its own room at the right (the widest label
+    // is the Italian one); the transport and the readout or hint share what
+    // is left, and the hint is cut with an ellipsis rather than run under it.
+    // (The arch toggles live in the viewport toolbar.)
     let toggle_gap = 16.0;
-    let toggles_w = [t("ws-tl-upper"), t("ws-tl-lower"), t("ws-tl-overlay0")]
-        .iter()
-        .map(|l| widgets::toggle_width(ui, l))
-        .sum::<f32>()
-        + 2.0 * toggle_gap;
+    let toggles_w = widgets::toggle_width(ui, &t("ws-tl-overlay0"));
     let row_h = 36.0;
     let mut hint_below = false;
     ui.horizontal(|ui| {
@@ -213,8 +206,6 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = toggle_gap;
             widgets::toggle(ui, &mut st.overlay0, t("ws-tl-overlay0"));
-            widgets::toggle(ui, &mut st.lower, t("ws-tl-lower"));
-            widgets::toggle(ui, &mut st.upper, t("ws-tl-upper"));
         });
     });
     ui.add_space(6.0);

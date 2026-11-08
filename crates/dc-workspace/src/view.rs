@@ -2,10 +2,11 @@
 //! and its overlays (caption chip, view cube, legend, scale bar, toasts).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dc_case::{CaseState, ScanRole};
 use dc_module_api::{Module, NOT_AVAILABLE_KEY, Toast, ToastLevel};
-use dc_scene::{Color, MeshColoring};
+use dc_scene::{Color, MeshColoring, SceneEntry, SceneItem};
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
@@ -17,6 +18,8 @@ use egui::{
 };
 use glam::{Quat, Vec3};
 
+use crate::labels::{self, Anchor, Drawn, Gem, Hit};
+use crate::manual::{self, Action};
 use crate::overlay::{self, ContactColors, Layers};
 use crate::t;
 use crate::timeline::TimelineModel;
@@ -86,6 +89,16 @@ impl ViewChoice {
     }
 }
 
+/// What the viewport shows of an arch whose teeth were built: the case scan
+/// or the closed teeth and the gingiva (the module's scene entries that
+/// replace the scan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Model {
+    Scan,
+    #[default]
+    Teeth,
+}
+
 /// What the meshes were last built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneKey {
@@ -96,11 +109,15 @@ struct SceneKey {
     stage: u32,
     overlay0: bool,
     layers: Layers,
-    occlusal: bool,
+    teeth: bool,
 }
 
 /// Contact map computed for one case state (by pointer).
 type ContactCache = Option<(usize, Result<Arc<ContactColors>, String>)>;
+
+/// Anchors of the tooth numbers computed for one case state (by pointer)
+/// and for the 3D teeth or the scan.
+type AnchorCache = Option<(usize, bool, Arc<Vec<Anchor>>)>;
 
 /// Viewport and view options.
 #[derive(Default)]
@@ -109,6 +126,8 @@ pub(crate) struct ViewState {
     synced: Option<SceneKey>,
     pub display: Display,
     pub view: ViewChoice,
+    /// Arches shown, whatever the view (a view preset only moves the camera).
+    pub arches: Arches,
     /// Camera orientation shown by the view cube when there is no viewport.
     pub headless_view: Option<StdView>,
     /// Frame the meshes at the next frame.
@@ -117,12 +136,56 @@ pub(crate) struct ViewState {
     pub mesh_count: usize,
     /// Layers over the scans (labels, seeds, contact map).
     pub layers: Layers,
+    /// Scan or 3D teeth, as the user chose (see [`Workspace::teeth_shown`]).
+    pub model: Model,
     /// Contact map of the last state it was asked for.
     contacts: ContactCache,
+    /// Anchors of the tooth numbers for the case state (by pointer).
+    anchors: AnchorCache,
     /// Scans of the last scene (a new set is framed).
     scan_ids: Vec<uuid::Uuid>,
     /// The meshes of the last scene (also without a viewport).
     pub meshes: Vec<ViewMesh>,
+}
+
+/// Which arches are shown. Kept for the workspace session, apart from the
+/// camera: choosing a view never changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Arches {
+    pub upper: bool,
+    pub lower: bool,
+}
+
+impl Default for Arches {
+    fn default() -> Self {
+        Self {
+            upper: true,
+            lower: true,
+        }
+    }
+}
+
+impl Arches {
+    /// Whether the arch is shown.
+    pub fn shown(self, upper: bool) -> bool {
+        if upper { self.upper } else { self.lower }
+    }
+
+    /// The arches after a click on one of them. The last arch that can be
+    /// seen stays on: `other_available` says whether the other one can be
+    /// (it has a scan, or the case has none yet). Returns `false` when the
+    /// click was refused.
+    pub fn toggle(&mut self, upper: bool, other_available: bool) -> bool {
+        if self.shown(upper) && !(self.shown(!upper) && other_available) {
+            return false;
+        }
+        if upper {
+            self.upper = !self.upper;
+        } else {
+            self.lower = !self.lower;
+        }
+        true
+    }
 }
 
 impl ViewState {
@@ -165,9 +228,14 @@ pub(crate) struct SceneInput<'a> {
     pub layers: Layers,
     /// Contact map colours (drawn instead of the labels when given).
     pub contacts: Option<&'a ContactColors>,
-    /// Occlusal view: only the arch looked at is shown (the other one would
-    /// cover its occlusal surface).
-    pub occlusal: bool,
+    /// Draw the module's entries that replace the scan of their arch (the
+    /// built teeth and gingiva) instead of it; `false`: the scan, and none of
+    /// the entries of its arch.
+    pub teeth: bool,
+    /// Wait for the slow part of the module entries (the deformed gingiva at
+    /// a stage); `false` (the UI thread): draw them at rest meanwhile and
+    /// report the scene incomplete.
+    pub wait: bool,
 }
 
 /// Most notifications the stack draws, those that stay until closed (failed
@@ -176,33 +244,193 @@ const MAX_TOASTS_ON_SCREEN: usize = 4;
 
 /// Seed marker size (mm).
 const SEED_RADIUS: f32 = 0.8;
+/// Delay before the scene is asked again while the module computes.
+const SCENE_RETRY: Duration = Duration::from_millis(60);
 /// Opacity of the stage 0 ghost.
 const GHOST_OPACITY: f32 = 0.25;
+
+/// What the tooth numbers and the Alt+click need of the workspace.
+struct TeethOnScreen<'a> {
+    state: &'a CaseState,
+    anchors: &'a [Anchor],
+    /// Stage shown, when it moves the teeth (`None` = initial position).
+    stage: Option<&'a dca_model::Stage>,
+    layers: Layers,
+    meshes: &'a [ViewMesh],
+    /// The tooth the brush works on, while the brush is open.
+    brush: Option<u8>,
+}
+
+/// The scan of the arch, or one of its built teeth, is among the meshes
+/// shown. The numbers, the seed gems and the Alt+click of a hidden arch are
+/// left out with it.
+fn arch_mesh_shown(state: &CaseState, meshes: &[ViewMesh], upper: bool) -> bool {
+    let role = if upper {
+        ScanRole::Upper
+    } else {
+        ScanRole::Lower
+    };
+    let scan = state.case.scan(role).map(manual::scan_mesh_id);
+    meshes.iter().filter(|m| m.visible).any(|m| {
+        Some(m.id) == scan
+            || manual::tooth_of_mesh(m.id).is_some_and(|f| labels::upper_tooth(f) == upper)
+    })
+}
+
+/// Draws the number chips over the viewport and returns what an Alt+click
+/// did (choosing the brush tooth), or [`Action::None`].
+///
+/// Occlusion: a number (or a gem) is hidden when a ray from the camera to
+/// its anchor meets the scan more than [`labels::OCCLUSION_TOLERANCE_MM`]
+/// before it (`Viewport::pick_at` on the BVH of the scans, one ray per
+/// tooth).
+fn tooth_labels(
+    ui: &Ui,
+    vp: &Viewport,
+    vr: &dc_viewport::ViewportResponse,
+    s: &TeethOnScreen<'_>,
+) -> Action {
+    let rect = vr.response.rect;
+    let c = *colors(ui);
+    let cam = vp.camera();
+    let eye = cam.eye();
+    let fwd = (cam.target - eye).normalize_or_zero();
+    let arch_shown = |upper: bool| arch_mesh_shown(s.state, s.meshes, upper);
+    // in front of the camera, and not behind the scan
+    let visible = |p: Vec3, tol: f32| -> bool {
+        if fwd.dot(p - eye) <= 0.0 {
+            return false;
+        }
+        let hit = vp.pick_at(rect, vp.screen_pos(rect, p)).map(|h| h.point);
+        !labels::covers(fwd, hit, p, tol)
+    };
+    let mut drawn = Drawn::default();
+    if s.layers.numbers {
+        let mut spots: Vec<(f32, u8, Pos2)> = Vec::new();
+        for a in s.anchors.iter().filter(|a| arch_shown(a.upper)) {
+            let p = match s.stage {
+                Some(st) => labels::posed_point(s.state, st, a.fdi, a.world),
+                None => a.world,
+            };
+            if visible(p, labels::OCCLUSION_TOLERANCE_MM) {
+                spots.push((fwd.dot(p - eye), a.fdi, vp.screen_pos(rect, p)));
+            }
+        }
+        // the nearest keep their place when two numbers meet
+        spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let spots: Vec<(u8, Pos2)> = spots.into_iter().map(|(_, f, p)| (f, p)).collect();
+        drawn.chips = labels::place_chips(&spots, labels::CHIP_SIZE, labels::LIFT, rect);
+    }
+    if s.layers.seeds
+        && let Some(al) = overlay::aligners(s.state)
+    {
+        let world = s.state.case.world_frame.from_case;
+        for sd in al
+            .seeds
+            .iter()
+            .filter(|sd| arch_shown(labels::upper_tooth(sd.fdi.get())))
+        {
+            let p = world.apply_point(sd.position).as_vec3();
+            if visible(p, 2.0 * SEED_RADIUS) {
+                drawn.gems.push(Gem {
+                    fdi: sd.fdi.get(),
+                    center: vp.screen_pos(rect, p),
+                    radius: vp.screen_length(rect, p, SEED_RADIUS),
+                });
+            }
+        }
+    }
+    let alt = ui.input(|i| i.modifiers.alt);
+    let hot =
+        alt.then(|| vr.response.hover_pos())
+            .flatten()
+            .and_then(
+                |pos| match labels::hit_test(pos, &drawn.chips, &drawn.gems, None) {
+                    Hit::Label(f) | Hit::Gem(f) => Some(f),
+                    _ => None,
+                },
+            );
+    labels::paint(
+        ui,
+        rect,
+        &drawn.chips,
+        c.border_strong,
+        c.select_blue,
+        s.brush,
+        hot,
+    );
+    if alt
+        && vr.response.clicked_by(egui::PointerButton::Primary)
+        && let Some(pos) = vr.response.interact_pointer_pos()
+    {
+        // the scan under the pointer, or a built tooth
+        let surface = vr.pick.and_then(|p| {
+            manual::target_of(s.state, &p, eye)
+                .map(|t| t.label)
+                .or_else(|| manual::tooth_of_mesh(p.mesh_id).map(u16::from))
+        });
+        return labels::alt_click_action(labels::hit_test(pos, &drawn.chips, &drawn.gems, surface));
+    }
+    Action::None
+}
 
 /// Meshes to show: the scans in the world frame (upper and lower arch per
 /// the toggles, the bite scan with both), coloured by tooth label or by the
 /// contact map and posed at the stage shown, the seed markers and the
-/// module's scene meshes.
-pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> Vec<ViewMesh> {
+/// module's scene entries at that stage (`Module::scene_at`).
+///
+/// - An entry of a hidden arch is not drawn nor pickable.
+/// - With [`SceneInput::teeth`], a scan is left out while an entry that
+///   replaces it (`hides_scan`) is shown for its arch; without it, the
+///   entries of such an arch are left out and the scan is drawn.
+/// - A tooth entry gets the id [`manual::tooth_mesh_id`] of its FDI number,
+///   so a pick on it names the tooth; with the labels layer off it takes the
+///   enamel colour. Over a later stage with the stage 0 ghost, the teeth are
+///   ghosted at the initial position too.
+/// - The module's entries at a later stage are only asked for when something
+///   of them is drawn: with the scans shown, the entries of an arch they
+///   replace are left out, so the stage (and the deformation it costs) is
+///   skipped when no other entry exists. `hides_scan` and `arch` of an entry
+///   do not depend on the stage.
+///
+/// The flag is `false` while the module still works on an entry (see
+/// [`SceneInput::wait`]).
+pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     let state = input.state;
     let world = state.case.world_frame.from_case.to_mat4().as_mat4();
     let al = overlay::aligners(state);
     let palette = overlay::palette();
-    // in the occlusal view the antagonist hides the arch looked at
-    let looks_at_upper = input.upper && state.case.scan(ScanRole::Upper).is_some();
-    let (upper, lower) = if input.occlusal && looks_at_upper {
-        (true, false)
-    } else {
-        (input.upper, input.lower)
-    };
+    // the arches shown are the user's choice: no view changes them
+    let (upper, lower) = (input.upper, input.lower);
     let shown = |role: ScanRole| match role {
         ScanRole::Upper => upper,
         ScanRole::Lower => lower,
         ScanRole::Bite => upper && lower,
     };
     let posed_stage = al.and_then(|a| overlay::stage(a, input.stage).map(|s| (a, s)));
+    let rest = input.module.scene_at(state, None);
+    let replacing: Vec<ScanRole> = rest
+        .iter()
+        .filter(|e| e.hides_scan)
+        .filter_map(|e| e.arch)
+        .collect();
+    let of_replaced = |e: &SceneEntry| e.arch.is_some_and(|a| replacing.contains(&a));
+    let keep = |e: &SceneEntry| input.teeth || !of_replaced(e);
+    let mut complete = true;
+    let entries = if input.stage == 0 || (!input.teeth && !rest.iter().any(keep)) {
+        rest.clone()
+    } else if input.wait {
+        input.module.scene_at(state, Some(input.stage))
+    } else {
+        let (entries, done) = input.module.scene_at_nowait(state, Some(input.stage));
+        complete = done;
+        entries
+    };
     let mut out = Vec::new();
     for scan in &state.case.scans {
+        if input.teeth && replacing.contains(&scan.role) && shown(scan.role) {
+            continue;
+        }
         let Some(mesh) = state.mesh(&scan.mesh) else {
             continue;
         };
@@ -256,12 +484,47 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> Vec<ViewMesh> {
             out.push(vm);
         }
     }
-    for (i, item) in input.module.scene(state).iter().enumerate() {
-        if let Some(vm) = ViewMesh::from_scene_item((1 << 63) | i as u64, item, &state.blobs) {
-            out.push(vm.with_opacity(input.opacity));
+    let entry_mesh = |i: usize, e: &SceneEntry| -> Option<ViewMesh> {
+        let SceneItem::Mesh {
+            coloring,
+            xform,
+            pickable,
+            ..
+        } = &e.item
+        else {
+            return None;
+        };
+        let mesh = e.resolve_mesh(|b| state.blobs.get(b))?;
+        let id = e.tooth.map_or((1 << 63) | i as u64, manual::tooth_mesh_id);
+        let coloring = match e.tooth {
+            Some(_) if !input.layers.labels => MeshColoring::Uniform(input.enamel),
+            _ => coloring.clone(),
+        };
+        let mut vm = ViewMesh::new(id, Arc::clone(mesh))
+            .with_xform(world * xform.to_mat4().as_mat4())
+            .with_coloring(coloring)
+            .with_opacity(input.opacity);
+        vm.visible = e.arch.is_none_or(shown);
+        vm.pickable = *pickable && vm.visible;
+        Some(vm)
+    };
+    if input.teeth && input.overlay0 && input.stage > 0 {
+        for (i, e) in rest.iter().enumerate().filter(|(_, e)| e.tooth.is_some()) {
+            if let Some(mut ghost) = entry_mesh(i, e) {
+                ghost.id |= 1 << 62;
+                ghost.coloring = MeshColoring::Uniform(input.enamel);
+                ghost.opacity = GHOST_OPACITY.min(input.opacity);
+                ghost.pickable = false;
+                out.push(ghost);
+            }
         }
     }
-    out
+    for (i, e) in entries.iter().enumerate().filter(|(_, e)| keep(e)) {
+        if let Some(vm) = entry_mesh(i, e) {
+            out.push(vm);
+        }
+    }
+    (out, complete)
 }
 
 impl Workspace {
@@ -302,48 +565,62 @@ impl Workspace {
         }
     }
 
+    /// [`Workspace::sync_scene_with`] for the UI thread: the module's slow
+    /// entries (the gingiva at a stage) are computed in the background and
+    /// drawn at rest until then; the scene is rebuilt as they come in.
     pub(crate) fn sync_scene(&mut self, ui: &Ui) {
         let enamel = scene_color(colors(ui).model_enamel);
-        self.sync_scene_with(enamel);
+        if !self.sync_scene_mode(enamel, false) {
+            ui.ctx().request_repaint_after(SCENE_RETRY);
+        }
     }
 
     /// Rebuilds the meshes when the state, the stage, the toggles or the
-    /// view changed.
+    /// view changed, waiting for the module's slow entries.
+    #[cfg(test)]
     pub(crate) fn sync_scene_with(&mut self, enamel: Color) {
+        self.sync_scene_mode(enamel, true);
+    }
+
+    /// Rebuilds the meshes when needed; `false` when the module still works
+    /// on an entry (only without `wait`) and the scene is to be rebuilt.
+    fn sync_scene_mode(&mut self, enamel: Color, wait: bool) -> bool {
         let contacts = self.contact_map();
         let key = SceneKey {
             state: Arc::as_ptr(self.undo.current()) as usize,
-            upper: self.timeline.upper,
-            lower: self.timeline.lower,
+            upper: self.view.arches.upper,
+            lower: self.view.arches.lower,
             display: self.view.display,
             stage: self.timeline.current,
             overlay0: self.timeline.overlay0,
             layers: self.view.layers,
-            occlusal: self.view.view == ViewChoice::Occlusal,
+            teeth: self.teeth_shown(),
         };
         if self.view.synced == Some(key) {
-            return;
+            return true;
         }
-        self.view.synced = Some(key);
         let opacity = if self.view.display == Display::Transparent {
             0.5
         } else {
             1.0
         };
         let state = Arc::clone(self.undo.current());
-        let meshes = scene_meshes(&SceneInput {
+        let (meshes, complete) = scene_meshes(&SceneInput {
             state: &state,
             module: self.module.as_ref(),
-            upper: self.timeline.upper,
-            lower: self.timeline.lower,
+            upper: self.view.arches.upper,
+            lower: self.view.arches.lower,
             opacity,
             enamel,
             stage: self.timeline.current,
             overlay0: self.timeline.overlay0,
             layers: self.view.layers,
             contacts: contacts.as_deref(),
-            occlusal: key.occlusal,
+            teeth: key.teeth,
+            wait,
         });
+        // an incomplete scene is built again at the next frame
+        self.view.synced = complete.then_some(key);
         self.view.mesh_count = meshes.iter().filter(|m| m.visible).count();
         // a new set of scans (import, demo, a command through the bridge) is framed
         let ids: Vec<uuid::Uuid> = state.case.scans.iter().map(|s| s.id).collect();
@@ -357,14 +634,84 @@ impl Workspace {
                 vp.fit();
             }
         }
+        complete
+    }
+
+    /// Stage shown on the timeline (`0` = initial position).
+    pub fn stage_shown(&self) -> u32 {
+        self.timeline.current
+    }
+
+    /// The viewport draws the built teeth and gingiva instead of the scans
+    /// they replace: the user chose [`Model::Teeth`], no tool that works on
+    /// the scan is open (the brush, the clean-up and the seeds paint and
+    /// read the scan labels) and the contact map (of the scans) is off.
+    pub fn teeth_shown(&self) -> bool {
+        let on_scan = matches!(
+            self.manual.tool,
+            Some(manual::Tool::Brush | manual::Tool::Clean | manual::Tool::Seeds)
+        );
+        self.view.model == Model::Teeth && !on_scan && !self.view.layers.contacts
+    }
+
+    /// Anchors of the tooth numbers of the current state (computed once per
+    /// state: the crown tops read every label of the scans), on the 3D teeth
+    /// or on the scan, whichever is drawn.
+    fn tooth_anchors(&mut self) -> Arc<Vec<Anchor>> {
+        let built = self.teeth_shown();
+        let state = self.undo.current();
+        let ptr = Arc::as_ptr(state) as usize;
+        match &self.view.anchors {
+            Some((p, b, a)) if *p == ptr && *b == built => Arc::clone(a),
+            _ => {
+                let a = Arc::new(labels::anchors_of(state, built));
+                self.view.anchors = Some((ptr, built, Arc::clone(&a)));
+                a
+            }
+        }
     }
 
     /// The occlusal view looks at the upper arch: it is shown and exists
     /// (or the case has no lower arch either).
     fn upper_looked_at(&self) -> bool {
         let case = &self.undo.current().case;
-        self.timeline.upper
+        self.view.arches.upper
             && (case.scan(ScanRole::Upper).is_some() || case.scan(ScanRole::Lower).is_none())
+    }
+
+    /// The arch can be seen: it has a scan (or the case has none yet).
+    fn arch_has_scan(&self, upper: bool) -> bool {
+        let case = &self.undo.current().case;
+        let role = if upper {
+            ScanRole::Upper
+        } else {
+            ScanRole::Lower
+        };
+        case.scan(role).is_some() || case.scans.is_empty()
+    }
+
+    /// The arch can be hidden: the other one is shown and can be seen.
+    fn can_hide_arch(&self, upper: bool) -> bool {
+        self.view.arches.shown(!upper) && self.arch_has_scan(!upper)
+    }
+
+    /// Shows or hides an arch. The last arch that can be seen stays on. The
+    /// occlusal camera follows the arch it looks at (from below at the upper
+    /// one, from above at the lower one); every other view stays as it is.
+    /// Returns whether the arch changed.
+    pub(crate) fn toggle_arch(&mut self, upper: bool) -> bool {
+        let changed = self.view.arches.toggle(upper, self.arch_has_scan(!upper));
+        if changed {
+            let rot = self.camera_rotation();
+            let occlusal = [StdView::OcclusalUpper, StdView::OcclusalLower];
+            if occlusal.iter().any(|v| v.rotation() == rot) {
+                let sv = ViewChoice::Occlusal.std_view(self.upper_looked_at());
+                if sv.rotation() != rot {
+                    self.apply_std_view(sv);
+                }
+            }
+        }
+        changed
     }
 
     fn set_view(&mut self, choice: ViewChoice) {
@@ -408,6 +755,8 @@ impl Workspace {
         let toolbar_rows = toolbar_rows(ui, toolbar_max_width(inner.width()));
         let mut px_per_mm = None;
         let mut manual_events = Vec::new();
+        let mut alt_action = Action::None;
+        let anchors = self.tooth_anchors();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
@@ -418,6 +767,23 @@ impl Workspace {
                 }
                 // the clicks and strokes go to the manual tool that is open
                 let vr = vp.ui(ui);
+                // the tooth numbers, and the Alt+click that chooses the brush tooth
+                alt_action = tooth_labels(
+                    ui,
+                    vp,
+                    &vr,
+                    &TeethOnScreen {
+                        state: self.undo.current(),
+                        anchors: &anchors,
+                        stage: overlay::aligners(self.undo.current())
+                            .and_then(|a| overlay::stage(a, self.timeline.current))
+                            .filter(|_| self.timeline.current > 0),
+                        layers: self.view.layers,
+                        meshes: &self.view.meshes,
+                        brush: (self.manual.tool == Some(manual::Tool::Brush))
+                            .then_some(self.manual.tooth),
+                    },
+                );
                 manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr);
                 let half = vp.camera().half_height();
                 if half > 0.0 {
@@ -431,6 +797,7 @@ impl Workspace {
             }
         }
 
+        self.manual_action(alt_action);
         self.manual_events(manual_events);
         self.manual_feedback();
 
@@ -505,7 +872,14 @@ impl Workspace {
                         }
                         match item {
                             ToolbarItem::View(v) => {
-                                if text_segment(ui, &t(v.key()), self.view.view == *v).clicked() {
+                                if text_segment(
+                                    ui,
+                                    &t(v.key()),
+                                    Role::RadioButton,
+                                    self.view.view == *v,
+                                )
+                                .clicked()
+                                {
                                     self.set_view(*v);
                                 }
                             }
@@ -519,6 +893,50 @@ impl Workspace {
 
     fn toolbar_group(&mut self, ui: &mut Ui, group: ToolbarGroup) {
         match group {
+            ToolbarGroup::Arch => {
+                for upper in [true, false] {
+                    let (label, tip) = if upper {
+                        ("ws-arch-upper", "ws-arch-upper-tip")
+                    } else {
+                        ("ws-arch-lower", "ws-arch-lower-tip")
+                    };
+                    let on = self.view.arches.shown(upper);
+                    let locked = on && !self.can_hide_arch(upper);
+                    let mut tooltip = t(tip);
+                    if locked {
+                        tooltip = format!("{tooltip}. {}", t("ws-arch-keep"));
+                    }
+                    if text_segment(ui, &t(label), Role::CheckBox, on)
+                        .on_hover_text(tooltip)
+                        .clicked()
+                    {
+                        self.toggle_arch(upper);
+                    }
+                }
+            }
+            ToolbarGroup::Model => {
+                let shown = if self.teeth_shown() {
+                    Model::Teeth
+                } else {
+                    Model::Scan
+                };
+                let forced = self.view.model == Model::Teeth && shown == Model::Scan;
+                for (m, label, tip) in [
+                    (Model::Scan, "ws-model-scan", "ws-model-scan-tip"),
+                    (Model::Teeth, "ws-model-teeth", "ws-model-teeth-tip"),
+                ] {
+                    let mut tooltip = t(tip);
+                    if forced {
+                        tooltip = format!("{tooltip}. {}", t("ws-model-forced"));
+                    }
+                    if text_segment(ui, &t(label), Role::RadioButton, shown == m)
+                        .on_hover_text(tooltip)
+                        .clicked()
+                    {
+                        self.view.model = m;
+                    }
+                }
+            }
             ToolbarGroup::Display => {
                 for (d, icon, key) in [
                     (Display::Solid, ic::CUBE, "ws-display-solid"),
@@ -550,6 +968,7 @@ impl Workspace {
                 for (icon, key, on) in [
                     (ic::TOOTH, "ws-layer-labels", &mut layers.labels),
                     (ic::MAP_PIN, "ws-layer-seeds", &mut layers.seeds),
+                    (ic::HASH, "ws-layer-numbers", &mut layers.numbers),
                     (ic::GRID_NINE, "ws-layer-contacts", &mut layers.contacts),
                 ] {
                     if icon_toggle(ui, icon, &t(key), *on).clicked() {
@@ -578,7 +997,7 @@ impl Workspace {
 
     /// Text of the viewport caption chip.
     pub(crate) fn caption_text(&self) -> String {
-        let jaw = match (self.timeline.upper, self.timeline.lower) {
+        let jaw = match (self.view.arches.upper, self.view.arches.lower) {
             (true, true) => t("ws-jaw-both"),
             (true, false) => t("ws-jaw-upper"),
             (false, true) => t("ws-jaw-lower"),
@@ -868,6 +1287,10 @@ const FIT_MARGIN: f32 = 16.0;
 /// A run of related toolbar widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolbarGroup {
+    /// Upper / Lower: which arches are shown (not a view).
+    Arch,
+    /// Scan / 3D teeth: what is drawn of a built arch.
+    Model,
     Display,
     Tools,
     Layers,
@@ -889,6 +1312,8 @@ impl ToolbarItem {
     fn all() -> Vec<ToolbarItem> {
         let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
         let groups = [
+            ToolbarGroup::Arch,
+            ToolbarGroup::Model,
             ToolbarGroup::Display,
             ToolbarGroup::Tools,
             ToolbarGroup::Layers,
@@ -907,7 +1332,18 @@ impl ToolbarItem {
             |n: usize| n as f32 * TOOLBAR_BUTTON + n.saturating_sub(1) as f32 * TOOLBAR_SPACING;
         match self {
             ToolbarItem::View(v) => text_segment_width(ui, &t(v.key())),
+            ToolbarItem::Group(ToolbarGroup::Arch) => {
+                text_segment_width(ui, &t("ws-arch-upper"))
+                    + text_segment_width(ui, &t("ws-arch-lower"))
+                    + TOOLBAR_SPACING
+            }
+            ToolbarItem::Group(ToolbarGroup::Model) => {
+                text_segment_width(ui, &t("ws-model-scan"))
+                    + text_segment_width(ui, &t("ws-model-teeth"))
+                    + TOOLBAR_SPACING
+            }
             ToolbarItem::Group(ToolbarGroup::Fit) => buttons(1),
+            ToolbarItem::Group(ToolbarGroup::Layers) => buttons(4),
             ToolbarItem::Group(_) => buttons(3),
         }
     }
@@ -999,7 +1435,7 @@ fn text_segment_width(ui: &Ui, label: &str) -> f32 {
     g.size().x + 20.0
 }
 
-fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+fn text_segment(ui: &mut Ui, label: &str, role: Role, selected: bool) -> egui::Response {
     let c = *colors(ui);
     let font = if selected {
         fonts::semibold(13.0)
@@ -1011,7 +1447,7 @@ fn text_segment(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0, TOOLBAR_BUTTON), Sense::click());
     let l = label.to_owned();
-    resp.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, &l));
+    resp.widget_info(|| WidgetInfo::selected(role, true, selected, &l));
     let p = ui.painter();
     if selected {
         p.rect_filled(r, CornerRadius::same(4), c.bg_hover);
@@ -1524,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn view_presets_follow_the_world_frame_and_the_occlusal_view_shows_one_arch() {
+    fn view_presets_follow_the_world_frame() {
         let mut ws = workspace(staged_case());
         for (choice, sv) in [
             (ViewChoice::Front, StdView::Front),
@@ -1541,23 +1977,119 @@ mod tests {
         let (dir, up) = StdView::Front.direction_and_up();
         assert_eq!(dir, -dc_case::WorldFrame::ANTERIOR.as_vec3());
         assert_eq!(up, -dc_case::WorldFrame::TOWARDS_LOWER.as_vec3());
-        // occlusal view of the upper arch: the lower arch would cover it
-        ws.set_view(ViewChoice::Occlusal);
+    }
+
+    fn shown(ws: &Workspace) -> (bool, bool) {
+        (
+            scan_mesh(ws, ScanRole::Upper).visible,
+            scan_mesh(ws, ScanRole::Lower).visible,
+        )
+    }
+
+    #[test]
+    fn the_arch_buttons_are_not_a_view_and_no_view_overrides_them() {
+        let mut ws = workspace(staged_case());
         ws.sync_scene_with(Color::TOOTH);
-        assert!(scan_mesh(&ws, ScanRole::Upper).visible);
-        assert!(!scan_mesh(&ws, ScanRole::Lower).visible);
+        assert_eq!(shown(&ws), (true, true));
+        // every preset keeps both arches, the occlusal one too
+        for choice in ViewChoice::ALL {
+            ws.set_view(choice);
+            ws.sync_scene_with(Color::TOOTH);
+            assert_eq!(shown(&ws), (true, true), "{choice:?}");
+        }
+        // hide the upper arch in the front view: the camera stays
+        ws.set_view(ViewChoice::Front);
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (false, true));
+        assert_eq!(ws.camera_rotation(), StdView::Front.rotation());
+        // the other presets leave the choice alone
+        for choice in ViewChoice::ALL {
+            ws.set_view(choice);
+            ws.sync_scene_with(Color::TOOTH);
+            assert_eq!(shown(&ws), (false, true), "{choice:?}");
+        }
         // only the lower arch shown: the occlusal view looks at it from above
-        ws.timeline.upper = false;
+        assert_eq!(ws.view.headless_view, Some(StdView::Back));
         ws.set_view(ViewChoice::Occlusal);
         assert_eq!(ws.view.headless_view, Some(StdView::OcclusalLower));
+        // the lower arch is the last one: it stays
+        assert!(!ws.toggle_arch(false));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (false, true));
+        // the upper arch back: the occlusal camera follows it
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (true, true));
+        assert_eq!(ws.view.headless_view, Some(StdView::OcclusalUpper));
+        // and the lower one hidden: still the upper arch from below
+        assert!(ws.toggle_arch(false));
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(shown(&ws), (true, false));
+        assert_eq!(ws.view.headless_view, Some(StdView::OcclusalUpper));
+    }
+
+    #[test]
+    fn the_last_arch_that_exists_cannot_be_hidden() {
+        let mut arches = Arches::default();
+        assert!(arches.toggle(true, true));
+        assert_eq!((arches.upper, arches.lower), (false, true));
+        // the lower one is the last shown
+        assert!(!arches.toggle(false, true));
+        assert!(arches.toggle(true, true));
+        // the other arch is on but has no scan: it cannot replace this one
+        assert!(!arches.toggle(true, false));
+        assert_eq!((arches.upper, arches.lower), (true, true));
+        // a case with the lower scan only: the lower arch stays
+        let mut ws = workspace(lower_demo());
+        assert!(!ws.toggle_arch(false));
         ws.sync_scene_with(Color::TOOTH);
         assert!(scan_mesh(&ws, ScanRole::Lower).visible);
-        assert!(!scan_mesh(&ws, ScanRole::Upper).visible);
-        // the front view shows both arches
-        ws.timeline.upper = true;
-        ws.set_view(ViewChoice::Front);
+    }
+
+    #[test]
+    fn a_hidden_arch_is_not_drawn_picked_numbered_or_seeded() {
+        let mut ws = workspace(staged_case());
         ws.sync_scene_with(Color::TOOTH);
-        assert!(scan_mesh(&ws, ScanRole::Lower).visible && scan_mesh(&ws, ScanRole::Upper).visible);
+        let state = Arc::clone(ws.undo.current());
+        let seed_vertices = |ws: &Workspace| {
+            ws.view
+                .meshes
+                .iter()
+                .find(|m| m.id == 1 << 61)
+                .map_or(0, |m| m.mesh.vertex_count())
+        };
+        let both = seed_vertices(&ws);
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, true));
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, false));
+        assert!(ws.toggle_arch(true));
+        ws.sync_scene_with(Color::TOOTH);
+        let upper = scan_mesh(&ws, ScanRole::Upper);
+        // the viewport draws and picks only the visible meshes
+        assert!(!upper.visible);
+        assert!(!arch_mesh_shown(&state, &ws.view.meshes, true));
+        assert!(arch_mesh_shown(&state, &ws.view.meshes, false));
+        // the seeds of the hidden arch go with it (the demo seeds one tooth)
+        assert!(both > 0 && seed_vertices(&ws) < both);
+        let pickable = |ws: &Workspace| {
+            ws.view
+                .meshes
+                .iter()
+                .filter(|m| m.visible && m.pickable)
+                .count()
+        };
+        assert_eq!(pickable(&ws), 1);
+        // the stage 0 ghost follows its arch
+        ws.timeline.overlay0 = true;
+        ws.timeline.current = 1;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(
+            ws.view
+                .meshes
+                .iter()
+                .filter(|m| m.id & (1 << 62) != 0)
+                .all(|m| m.visible == (m.id == (scan_mesh(&ws, ScanRole::Lower).id | (1 << 62))))
+        );
     }
 
     #[test]
@@ -1657,5 +2189,227 @@ mod tests {
         ];
         assert!(point_in_quad(pos2(5.0, 5.0), &q));
         assert!(!point_in_quad(pos2(15.0, 5.0), &q));
+    }
+}
+
+#[cfg(test)]
+mod built_teeth_tests {
+    use super::*;
+    use crate::overlay::tests::{exec, lower_demo};
+    use dc_case::{Fdi, ModuleState, Pose};
+    use dc_mesh::TriMesh;
+    use dc_project::{AppInfo, Project};
+    use dc_viewport::Pick;
+    use dca_model::{AlignersState, Stage};
+    use glam::DVec3;
+    use serde_json::{Value, json};
+
+    /// Two demo arches with tooth frames; tooth 31 is built (a closed mesh
+    /// standing in for it) and stage 2 moves it by 1 mm along X.
+    fn built_case() -> CaseState {
+        let s = exec(
+            "aligners.demo",
+            &lower_demo(),
+            json!({ "arch": "upper", "seed": 11 }),
+        );
+        let mut s = exec("aligners.teeth.frames", &s, Value::Null);
+        let mut al = s
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        let tooth = TriMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]);
+        let f31 = Fdi::new(31).unwrap();
+        al.crowns.insert(f31, s.blobs.insert(tooth));
+        al.stages = (0..3).map(Stage::new).collect();
+        al.stages[2]
+            .poses
+            .insert(f31, Pose::from_translation(DVec3::X));
+        s.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        s
+    }
+
+    fn workspace(state: CaseState) -> Workspace {
+        let project = Project::new(
+            AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            state,
+        );
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            None,
+        )
+    }
+
+    fn mesh(ws: &Workspace, id: u64) -> Option<&ViewMesh> {
+        ws.view.meshes.iter().find(|m| m.id == id)
+    }
+
+    fn scan_id(ws: &Workspace, role: ScanRole) -> u64 {
+        manual::scan_mesh_id(ws.undo.current().case.scan(role).unwrap())
+    }
+
+    #[test]
+    fn built_teeth_replace_the_scan_of_their_arch() {
+        let mut ws = workspace(built_case());
+        ws.sync_scene_with(Color::TOOTH);
+        let tooth = manual::tooth_mesh_id(31);
+        let t = mesh(&ws, tooth).expect("the tooth mesh");
+        assert!(t.visible && t.pickable);
+        // the lower scan is replaced, the upper (no built tooth) stays
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_none());
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Upper)).is_some());
+        assert!(arch_mesh_shown(ws.undo.current(), &ws.view.meshes, false));
+        // the toggle shows the scan instead, and none of the entries of its arch
+        ws.view.model = Model::Scan;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
+        assert!(mesh(&ws, tooth).is_none());
+    }
+
+    #[test]
+    fn the_numbers_anchor_on_the_scan_crown_while_the_scan_is_drawn() {
+        // no measured tips: the crown tops are the anchors
+        let mut state = built_case();
+        let mut al = state
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.tooth_geometry.clear();
+        state.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        let on = |built: bool| {
+            labels::anchors_of(&state, built)
+                .into_iter()
+                .find(|a| a.fdi == 31)
+                .unwrap()
+        };
+        let (teeth, scan) = (on(true), on(false));
+        assert_eq!(teeth.kind, labels::AnchorKind::Crown);
+        assert_eq!(scan.kind, labels::AnchorKind::Crown);
+        // the built tooth is a triangle at the origin of the case; the scan crown is elsewhere
+        assert!(
+            (teeth.world - scan.world).length() > 1.0,
+            "{teeth:?} {scan:?}"
+        );
+        // the workspace picks the set that is drawn
+        let mut ws = workspace(state);
+        let a = ws.tooth_anchors();
+        assert_eq!(a.iter().find(|a| a.fdi == 31), Some(&teeth));
+        ws.view.model = Model::Scan;
+        let a = ws.tooth_anchors();
+        assert_eq!(a.iter().find(|a| a.fdi == 31), Some(&scan));
+    }
+
+    #[test]
+    fn the_ui_sync_does_not_wait_and_a_scene_without_slow_entries_is_complete() {
+        let mut ws = workspace(built_case());
+        ws.view.layers.contacts = false;
+        assert!(ws.sync_scene_mode(Color::TOOTH, false));
+        assert_eq!(ws.view.synced.map(|k| k.stage), Some(0));
+        ws.timeline.current = 2;
+        assert!(ws.sync_scene_mode(Color::TOOTH, false));
+        assert_eq!(ws.view.synced.map(|k| k.stage), Some(2));
+        let t = mesh(&ws, manual::tooth_mesh_id(31)).unwrap();
+        assert!((t.xform.transform_point3(Vec3::ZERO)).length() > 0.5);
+    }
+
+    #[test]
+    fn a_hidden_arch_hides_its_teeth_and_they_are_not_pickable() {
+        let mut ws = workspace(built_case());
+        assert!(ws.toggle_arch(false));
+        ws.sync_scene_with(Color::TOOTH);
+        let t = mesh(&ws, manual::tooth_mesh_id(31)).unwrap();
+        assert!(!t.visible && !t.pickable);
+        assert!(!arch_mesh_shown(ws.undo.current(), &ws.view.meshes, false));
+        // the scan of the hidden arch is not drawn either
+        assert!(
+            mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_none_or(|m| !m.visible),
+            "lower scan shown"
+        );
+    }
+
+    #[test]
+    fn a_tool_on_the_scan_and_the_contact_map_show_the_scan() {
+        let mut ws = workspace(built_case());
+        assert!(ws.teeth_shown());
+        for tool in [
+            manual::Tool::Brush,
+            manual::Tool::Clean,
+            manual::Tool::Seeds,
+        ] {
+            ws.manual.tool = Some(tool);
+            assert!(!ws.teeth_shown(), "{tool:?}");
+            ws.sync_scene_with(Color::TOOTH);
+            assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
+            assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_none());
+        }
+        // a tool that picks a tooth works on the 3D teeth
+        ws.manual.tool = Some(manual::Tool::Missing);
+        assert!(ws.teeth_shown());
+        ws.manual.tool = None;
+        ws.view.layers.contacts = true;
+        assert!(!ws.teeth_shown());
+    }
+
+    #[test]
+    fn the_stage_shown_moves_the_built_tooth_and_ghosts_its_rest() {
+        let mut ws = workspace(built_case());
+        ws.timeline.current = 2;
+        ws.timeline.overlay0 = true;
+        ws.sync_scene_with(Color::TOOTH);
+        let state = Arc::clone(ws.undo.current());
+        let world = state.case.world_frame.from_case;
+        // the pose is relative to the rest frame of the tooth, as for the scan
+        let st = overlay::stage(overlay::aligners(&state).unwrap(), 2).unwrap();
+        let rest0 = world.apply_point(DVec3::ZERO).as_vec3();
+        let expect = labels::posed_point(&state, st, 31, rest0);
+        assert!((expect - rest0).length() > 0.5);
+        let t = mesh(&ws, manual::tooth_mesh_id(31)).unwrap();
+        let p = t.xform.transform_point3(Vec3::ZERO);
+        assert!((p - expect).length() < 1e-4, "{p:?} vs {expect:?}");
+        let ghost = mesh(&ws, manual::tooth_mesh_id(31) | (1 << 62)).unwrap();
+        assert!(!ghost.pickable && ghost.opacity <= GHOST_OPACITY);
+        let g = ghost.xform.transform_point3(Vec3::ZERO);
+        assert!((g - rest0).length() < 1e-4);
+    }
+
+    #[test]
+    fn a_click_on_a_built_tooth_names_it() {
+        assert_eq!(manual::tooth_of_mesh(manual::tooth_mesh_id(31)), Some(31));
+        assert_eq!(manual::tooth_of_mesh(manual::tooth_mesh_id(0)), None);
+        assert_eq!(manual::tooth_of_mesh(1 << 61), None);
+        let state = built_case();
+        let pick = Pick {
+            mesh_id: manual::tooth_mesh_id(31),
+            tri: 0,
+            point: Vec3::ZERO,
+            normal: Vec3::Z,
+            barycentric: Vec3::X,
+            distance: 1.0,
+        };
+        let mut m = manual::Manual::default();
+        m.tool = Some(manual::Tool::Renumber);
+        let ev = manual::Event::Click(pick, manual::Mods::default());
+        assert_eq!(
+            manual::handle(&mut m, &state, &ev, Vec3::Z * 100.0),
+            Action::Chose(31)
+        );
+        assert_eq!(m.tooth, 31);
+    }
+
+    #[test]
+    fn the_model_toggle_has_both_languages() {
+        for key in [
+            "ws-model-scan",
+            "ws-model-teeth",
+            "ws-model-scan-tip",
+            "ws-model-teeth-tip",
+            "ws-model-forced",
+        ] {
+            assert_ne!(t(key), key);
+        }
     }
 }

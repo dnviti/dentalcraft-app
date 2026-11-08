@@ -21,6 +21,7 @@ dc-i18n.workspace = true
 dc-mcp.workspace = true
 dc-module-api.workspace = true
 dc-raster.workspace = true
+dc-scene.workspace = true
 dc-session.workspace = true
 dca-model.workspace = true
 dca-module.workspace = true
@@ -31,6 +32,7 @@ serde_json.workspace = true
 dc-app = { path = "../dc-app" }
 # decodes the golden fixture scans of the end-to-end pipeline test
 dc-mesh.workspace = true
+glam.workspace = true
 egui.workspace = true
 egui_kittest.workspace = true
 tempfile.workspace = true

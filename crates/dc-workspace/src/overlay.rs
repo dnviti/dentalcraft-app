@@ -25,6 +25,8 @@ pub(crate) struct Layers {
     pub labels: bool,
     /// Seed markers.
     pub seeds: bool,
+    /// Tooth numbers (a chip per tooth).
+    pub numbers: bool,
     /// Occlusal contact map instead of the label colours.
     pub contacts: bool,
 }
@@ -34,6 +36,7 @@ impl Default for Layers {
         Self {
             labels: true,
             seeds: true,
+            numbers: true,
             contacts: false,
         }
     }

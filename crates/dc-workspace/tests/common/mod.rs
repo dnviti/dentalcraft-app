@@ -23,16 +23,19 @@ pub struct Labels {
     pub fit: &'static str,
     /// The start of the timeline hint of a case without stages.
     pub hint: &'static str,
-    /// The three jaw toggles of the timeline, left to right.
-    pub toggles: [&'static str; 3],
+    /// The arch buttons of the toolbar, Upper then Lower.
+    pub arches: [&'static str; 2],
+    /// The overlay toggle of the timeline (the one at the right).
+    pub overlay: &'static str,
 }
 
 fn rect_of(h: &Harness<'_, ()>, label: &str) -> Rect {
     h.get_by_label(label).rect()
 }
 
-/// The toolbar stays left of the view cube and the timeline hint stays left
-/// of the jaw toggles, which keep their own room, at every size.
+/// The toolbar (arch buttons included) stays left of the view cube and the
+/// timeline hint stays left of the overlay toggle, which keeps its own room,
+/// at every size.
 pub fn assert_layout(labels: &Labels) {
     for (w, hgt) in SIZES {
         let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
@@ -49,6 +52,16 @@ pub fn assert_layout(labels: &Labels) {
         let cube_left = centre_right - 16.0 - 100.0;
         let mut widgets: Vec<Rect> = labels.views.iter().map(|l| rect_of(&h, l)).collect();
         widgets.push(rect_of(&h, labels.fit));
+        // the inspector may use the same words: the toolbar ones are in the centre area
+        for l in labels.arches {
+            let r = h
+                .get_all_by_label(l)
+                .map(|n| n.rect())
+                .filter(|r| r.left() >= size.left_menu_width && r.right() <= centre_right)
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .unwrap_or_else(|| panic!("{w}x{hgt}: no {l} button in the toolbar"));
+            widgets.push(r);
+        }
         for r in &widgets {
             assert!(
                 r.right() <= cube_left,
@@ -59,38 +72,24 @@ pub fn assert_layout(labels: &Labels) {
                 "{w}x{hgt}: toolbar widget left of the centre area: {r:?}"
             );
         }
-        // the toggles keep their room, left to right, without touching
-        let toggles: Vec<Rect> = labels
-            .toggles
-            .iter()
-            .map(|l| {
-                // the timeline one is the lowest (the inspector may use the same word)
-                h.get_all_by_label(l)
-                    .map(|n| n.rect())
-                    .max_by(|a, b| a.top().total_cmp(&b.top()))
-                    .unwrap()
-            })
-            .collect();
-        for pair in toggles.windows(2) {
-            assert!(
-                pair[0].right() <= pair[1].left(),
-                "{w}x{hgt}: jaw toggles overlap: {pair:?}"
-            );
-        }
+        // the overlay toggle keeps its room (the timeline one is the lowest)
+        let toggle = h
+            .get_all_by_label(labels.overlay)
+            .map(|n| n.rect())
+            .max_by(|a, b| a.top().total_cmp(&b.top()))
+            .unwrap();
         assert!(
-            toggles[2].right() <= centre_right,
-            "{w}x{hgt}: the toggles leave the centre area"
+            toggle.right() <= centre_right,
+            "{w}x{hgt}: the overlay toggle leaves the centre area"
         );
         let hint = h.get_by_label_contains(labels.hint).rect();
         assert!(
             hint.right() <= centre_right,
             "{w}x{hgt}: the timeline hint leaves the centre area: {hint:?}"
         );
-        for t in &toggles {
-            assert!(
-                !hint.intersects(*t),
-                "{w}x{hgt}: the timeline hint ({hint:?}) runs into a toggle ({t:?})"
-            );
-        }
+        assert!(
+            !hint.intersects(toggle),
+            "{w}x{hgt}: the timeline hint ({hint:?}) runs into the overlay toggle ({toggle:?})"
+        );
     }
 }
