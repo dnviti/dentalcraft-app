@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.2](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.1...v0.2.0-alpha.2) (2026-11-08)
+
+
+### Features
+
+* **app:** find the teeth and 3D teeth in the viewport ([#11](https://github.com/dnviti-personal-org/dentalcraft-app/issues/11)) ([45e1f3f](https://github.com/dnviti-personal-org/dentalcraft-app/commit/45e1f3f746c08f2bc4020b1d9bc4691a555304e8))
+
 ## [0.2.0-alpha.1](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.1.1...v0.2.0-alpha.1) (2026-11-01)
 
 
