@@ -1021,7 +1021,11 @@ pub fn labeled_slider(
     p.text(
         vbox.right_center() - vec2(10.0, 0.0),
         Align2::RIGHT_CENTER,
-        format!("{:.*} {unit}", decimals, *value),
+        if unit.is_empty() {
+            format!("{:.*}", decimals, *value)
+        } else {
+            format!("{:.*} {unit}", decimals, *value)
+        },
         fonts::mono(12.0),
         c.text_primary,
     );

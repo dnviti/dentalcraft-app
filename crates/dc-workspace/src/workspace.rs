@@ -197,7 +197,7 @@ pub struct Workspace {
     pub(crate) menu: MenuTree,
     pub(crate) commands: Vec<CommandDesc>,
     /// The registered commands of the module, to run a leaf with its output.
-    specs: Vec<CommandSpec>,
+    pub(crate) specs: Vec<CommandSpec>,
     pub(crate) shortcuts: Vec<(&'static str, KeyboardShortcut)>,
     pub(crate) shortcut_text: HashMap<&'static str, String>,
     pub(crate) undo: UndoStack,
@@ -217,6 +217,8 @@ pub struct Workspace {
     pub(crate) egui_ctx: Option<egui::Context>,
     pub(crate) view: ViewState,
     pub(crate) manual: crate::manual::Manual,
+    /// The inspector of "Separate teeth and gum": its last run and slider.
+    pub(crate) segment: leaf::SegmentUi,
     pub(crate) menu_view: MenuView,
     pub(crate) selected: Option<&'static str>,
     /// Role the user chose for the next import (`None` = auto): it applies
@@ -320,6 +322,7 @@ impl Workspace {
             egui_ctx: None,
             view: ViewState::default(),
             manual: crate::manual::Manual::default(),
+            segment: leaf::SegmentUi::default(),
             selected: None,
             import_role: None,
             import_spec,
@@ -1092,6 +1095,22 @@ impl Workspace {
                 self.toast_sticky(r.toast);
             } else {
                 self.toast(r.toast);
+            }
+        }
+        // new tooth colours: what they left to redo, and the scan shows them
+        if (id == leaf::SEGMENT || id == leaf::SEGMENT_CHECK)
+            && let Some(toast) = leaf::outdated_toast(out)
+        {
+            self.toast(toast);
+        }
+        if id == leaf::SEGMENT {
+            self.segment.runs = leaf::seg_runs(out);
+            self.view.model = crate::view::Model::Scan;
+        }
+        // what to check before delivery (the doubts the separation left)
+        if id == leaf::AUTO || id == leaf::EXPORT_ALL {
+            for toast in leaf::warning_toasts(out) {
+                self.toast_sticky(toast);
             }
         }
     }
