@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.3](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.2...v0.2.0-alpha.3) (2026-11-12)
+
+
+### Features
+
+* **app:** separate teeth and gum, licence and notices ([#13](https://github.com/dnviti-personal-org/dentalcraft-app/issues/13)) ([1a9e813](https://github.com/dnviti-personal-org/dentalcraft-app/commit/1a9e8132b9c6a04d8cbf675358d2b4807c19de1c))
+
 ## [0.2.0-alpha.2](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.1...v0.2.0-alpha.2) (2026-11-08)
 
 
