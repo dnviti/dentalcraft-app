@@ -4,7 +4,7 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use dc_app::{AppDeps, DentalCraftApp, Screen};
+use dc_app::{AboutView, AppDeps, DentalCraftApp, Screen};
 use dc_i18n::Lang;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -152,4 +152,65 @@ fn sign_in_error_names_the_issuer() {
         h.query_by_label("Sign-in server: http://127.0.0.1:9")
             .is_some()
     );
+}
+
+#[test]
+fn terms_of_use_opens_the_licence_and_notices() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path(), Lang::En);
+    h.state_mut().go(Screen::SignIn);
+    h.run_steps(3);
+    assert_eq!(h.state().about(), None);
+    h.get_by_label("Terms of use").click();
+    h.run_steps(3);
+    assert_eq!(h.state().about(), Some(AboutView::Summary));
+    assert!(
+        h.query_by_label("Copyright (c) 2026 Daniele Viti. All rights reserved.")
+            .is_some()
+    );
+    // the licence, English first
+    h.get_by_label("Licence").click();
+    h.run_steps(3);
+    assert_eq!(h.state().about(), Some(AboutView::Licence));
+    assert!(
+        h.query_by_label("End-User Licence Agreement (English)")
+            .is_some()
+    );
+    // the third-party notices
+    h.get_by_label("Third-party licences").click();
+    h.run_steps(3);
+    assert_eq!(h.state().about(), Some(AboutView::ThirdParty));
+    assert!(h.query_by_label("# Third-party notices").is_some());
+    h.get_by_label("Close").click();
+    h.run_steps(3);
+    assert_eq!(h.state().about(), None);
+    // Esc closes the dialog and stays on the sign-in screen
+    h.get_by_label("Terms of use").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(h.state().about(), None);
+    assert_eq!(h.state().screen(), Screen::SignIn);
+}
+
+#[test]
+fn account_menu_opens_the_licence_and_notices() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path(), Lang::It);
+    h.run_steps(3);
+    h.get_by_label("Account e impostazioni").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Licenza e avvisi").click();
+    h.run_steps(3);
+    assert_eq!(h.state().about(), Some(AboutView::Summary));
+    // the licence, Italian first
+    h.get_by_label("Licenza").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Contratto di licenza d'uso (italiano)")
+            .is_some()
+    );
+    dc_i18n::set_language(Lang::En).unwrap();
 }

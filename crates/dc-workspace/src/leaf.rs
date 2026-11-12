@@ -12,7 +12,7 @@ use dc_ui::fonts;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dca_algo::diagnosis::{Level, LittleCategory};
-use dca_model::{AlignersState, ArchSpace, MODULE_ID};
+use dca_model::{AlignersState, ArchSpace, MODULE_ID, SegmentationSettings};
 use egui::{RichText, Ui};
 use serde_json::Value;
 
@@ -33,6 +33,13 @@ pub(crate) const VISITS: &str = "aligners.followup.visits";
 pub(crate) const BUILD_TEETH: &str = "aligners.teeth.build";
 /// "Find the teeth".
 pub(crate) const FIND_TEETH: &str = "aligners.teeth.find";
+/// "Separate teeth and gum".
+pub(crate) const SEGMENT: &str = "aligners.preparation.segmentation.automatic";
+/// The check of the separated teeth (run by the pipeline after the
+/// separation): its output lists what it left out of date too.
+pub(crate) const SEGMENT_CHECK: &str = "aligners.preparation.segmentation.check";
+/// The separation parameters stored in the case.
+const SEGMENT_SETTINGS: &str = "aligners.settings.segmentation";
 
 /// The parameters leaf `id` runs with when it is clicked: none for most
 /// leaves; "Find the teeth" takes the third-molars box and the missing teeth
@@ -54,6 +61,7 @@ pub(crate) fn job_name_key(id: &str) -> &'static str {
     match id {
         EXPORT_ALL => "ws-job-export",
         AUTO => "ws-job-auto",
+        SEGMENT => "ws-job-segment",
         BUILD_TEETH => "ws-job-teeth",
         _ => "ws-job-command",
     }
@@ -145,6 +153,11 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
             })
         }
         BUILD_TEETH => Some(teeth_report(out)),
+        SEGMENT => Some(Reported {
+            toast: Toast::new(ToastLevel::Success, "ws-toast-seg-done")
+                .with_detail(segment_lines(out).join("\n")),
+            sticky: false,
+        }),
         _ => None,
     }
 }
@@ -156,6 +169,128 @@ fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
         .iter()
         .find(|s| s["id"] == id)
         .map(|s| &s["output"])
+}
+
+/// What one arch of a run of "Separate teeth and gum" gave: its teeth and
+/// how long it took.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SegRun {
+    pub role: ScanRole,
+    pub teeth: u64,
+    pub seconds: f64,
+}
+
+/// The arches of the output `out` of "Separate teeth and gum", upper first.
+pub(crate) fn seg_runs(out: &Value) -> Vec<SegRun> {
+    [("upper", ScanRole::Upper), ("lower", ScanRole::Lower)]
+        .into_iter()
+        .filter_map(|(name, role)| {
+            let a = out.get(name)?;
+            Some(SegRun {
+                role,
+                teeth: a["teeth"].as_u64()?,
+                seconds: a["seconds"].as_f64().unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
+/// The arches of the last runs the case holds, upper first.
+pub(crate) fn case_seg_runs(data: Option<&AlignersState>) -> Vec<SegRun> {
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    [ScanRole::Upper, ScanRole::Lower]
+        .into_iter()
+        .filter_map(|role| {
+            let r = data.segmentation_runs.get(&role)?;
+            Some(SegRun {
+                role,
+                teeth: u64::from(r.teeth),
+                seconds: r.seconds,
+            })
+        })
+        .collect()
+}
+
+/// The result lines of `runs`: "<n> teeth separated in <s> s", with the
+/// name of the arch in front when more than one arch ran.
+pub(crate) fn seg_lines(runs: &[SegRun]) -> Vec<String> {
+    let both = runs.len() > 1;
+    runs.iter()
+        .map(|r| {
+            let count = r.teeth.to_string();
+            let time = duration_text(r.seconds);
+            if both {
+                let arch = t(match r.role {
+                    ScanRole::Upper => "ws-arch-upper",
+                    _ => "ws-arch-lower",
+                });
+                tr_args(
+                    "ws-seg-result-arch",
+                    &[("arch", &arch), ("count", &count), ("time", &time)],
+                )
+            } else {
+                tr_args("ws-seg-result", &[("count", &count), ("time", &time)])
+            }
+        })
+        .collect()
+}
+
+/// The lines of the success toast of "Separate teeth and gum": one per
+/// arch, or the totals when the output has no arch.
+fn segment_lines(out: &Value) -> Vec<String> {
+    let runs = seg_runs(out);
+    if !runs.is_empty() {
+        return seg_lines(&runs);
+    }
+    vec![tr_args(
+        "ws-seg-result",
+        &[
+            ("count", &out["teeth"].as_u64().unwrap_or(0).to_string()),
+            (
+                "time",
+                &duration_text(out["seconds"].as_f64().unwrap_or(0.0)),
+            ),
+        ],
+    )]
+}
+
+/// The notice "Results out of date" for the results a new separation of the
+/// teeth left to redo (`invalidated` of the separation and of its check),
+/// listed in the words of the scan import. `None` when nothing is listed.
+pub(crate) fn outdated_toast(out: &Value) -> Option<Toast> {
+    let ids: Vec<&str> = out["invalidated"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let ordered: Vec<&str> = dca_model::CLEARED_IDS
+        .into_iter()
+        .filter(|id| ids.contains(id))
+        .collect();
+    if ordered.is_empty() {
+        return None;
+    }
+    let list = import::cleared_list(MODULE_ID, &ordered);
+    Some(
+        Toast::new(ToastLevel::Info, "ws-toast-marks-outdated")
+            .with_detail(tr_args("ws-seg-outdated-detail", &[("list", &list)])),
+    )
+}
+
+/// One notice per entry of `warnings` (sentences in the language of the
+/// app) of the whole pipeline or of the export: what to check before the
+/// aligners are delivered.
+pub(crate) fn warning_toasts(out: &Value) -> Vec<Toast> {
+    out["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|w| !w.is_empty())
+        .map(|w| Toast::new(ToastLevel::Warning, "ws-toast-to-check").with_detail(w))
+        .collect()
 }
 
 /// What "3D teeth" built: the teeth built per arch and the gingivas. Read
@@ -269,10 +404,83 @@ fn button_key(id: &str, input: Option<LeafInput>, done: bool) -> &'static str {
     }
 }
 
+/// A separation parameter of the inspector: its label, its range, the step
+/// of the slider, the decimals shown and its default (the plugin's).
+struct SegParam {
+    key: &'static str,
+    lo: f32,
+    hi: f32,
+    step: f32,
+    decimals: usize,
+    default: f32,
+}
+
+/// The three separation parameters, in the order of the inspector and of
+/// [`seg_value`].
+const SEG_PARAMS: [SegParam; 3] = [
+    SegParam {
+        key: "ws-seg-target-faces",
+        lo: 5000.0,
+        hi: 200_000.0,
+        step: 1000.0,
+        decimals: 0,
+        default: 30_000.0,
+    },
+    SegParam {
+        key: "ws-seg-eta-convex",
+        lo: 0.01,
+        hi: 1.0,
+        step: 0.01,
+        decimals: 2,
+        default: 0.2,
+    },
+    SegParam {
+        key: "ws-seg-sigma",
+        lo: 0.1,
+        hi: 10.0,
+        step: 0.1,
+        decimals: 1,
+        default: 1.0,
+    },
+];
+
+/// Parameter `i` of [`SEG_PARAMS`] in `s`.
+fn seg_value(s: &SegmentationSettings, i: usize) -> f64 {
+    match i {
+        0 => s.target_faces as f64,
+        1 => s.eta_convex,
+        _ => s.sigma,
+    }
+}
+
+/// The parameters of `aligners.settings.segmentation` that set parameter
+/// `i` to `v`, rounded to the decimals the slider shows; `None` when that is
+/// the value of `s` already.
+fn seg_patch(s: &SegmentationSettings, i: usize, v: f32) -> Option<Value> {
+    let p = &SEG_PARAMS[i];
+    let scale = 10f64.powi(p.decimals as i32);
+    let v = (f64::from(v) * scale).round() / scale;
+    if (v - seg_value(s, i)).abs() < 0.5 / scale {
+        return None;
+    }
+    Some(match i {
+        0 => serde_json::json!({ "target_faces": v as u64 }),
+        1 => serde_json::json!({ "eta_convex": v }),
+        _ => serde_json::json!({ "sigma": v }),
+    })
+}
+
+/// What the inspector of "Separate teeth and gum" keeps between frames.
+#[derive(Debug, Default)]
+pub(crate) struct SegmentUi {
+    /// The slider being dragged and its value, sent when it is let go.
+    drag: Option<(usize, f32)>,
+}
+
 impl Workspace {
     /// What the inspector adds under the module's text for the selected menu
     /// entry: the action button of a leaf and, for the case analysis, its
-    /// results.
+    /// results; for "Separate teeth and gum" its parameters and its result.
     pub(crate) fn leaf_inspector(&mut self, ui: &mut Ui, item: Option<&MenuItem>) {
         let Some(item) = item else { return };
         let Some(id) = item.command_id() else { return };
@@ -286,6 +494,9 @@ impl Workspace {
         }
         let c = *colors(ui);
         ui.add_space(12.0);
+        if id == SEGMENT {
+            self.segment_inspector(ui);
+        }
         let done = self.is_done(id);
         let label = t(button_key(id, item.input, done));
         let enabled = !self.is_busy();
@@ -311,6 +522,79 @@ impl Workspace {
             ui.add_space(16.0);
             case_analysis(ui, &state);
         }
+    }
+
+    /// The info line, the folded separation parameters (one undo step each,
+    /// read from the case settings) and the result of the last run of each
+    /// arch, read from the case (it goes with the colours it describes).
+    fn segment_inspector(&mut self, ui: &mut Ui) {
+        let c = *colors(ui);
+        let state = self.undo.current().clone();
+        let data = crate::overlay::aligners(&state);
+        let settings = data.map(|d| d.settings.segmentation).unwrap_or_default();
+        ui.label(
+            RichText::new(t("ws-seg-info"))
+                .font(fonts::ui(12.0))
+                .color(c.text_secondary),
+        );
+        ui.add_space(8.0);
+        let busy = self.is_busy();
+        let mut commit = None;
+        let drag = &mut self.segment.drag;
+        egui::CollapsingHeader::new(
+            RichText::new(t("ws-seg-params"))
+                .font(fonts::semibold(13.0))
+                .color(c.text_primary),
+        )
+        .id_salt("ws-seg-params")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_enabled_ui(!busy, |ui| {
+                for (i, p) in SEG_PARAMS.iter().enumerate() {
+                    let mut v = match *drag {
+                        Some((d, v)) if d == i => v,
+                        _ => seg_value(&settings, i) as f32,
+                    };
+                    let r = widgets::labeled_slider(
+                        ui,
+                        &t(p.key),
+                        &mut v,
+                        p.lo..=p.hi,
+                        p.step,
+                        p.decimals,
+                        "",
+                        p.default,
+                    );
+                    if r.dragged() {
+                        *drag = Some((i, v));
+                    } else if r.drag_stopped() || r.changed() {
+                        *drag = None;
+                        commit = Some((i, v));
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+        });
+        if let Some((i, v)) = commit
+            && let Some(params) = seg_patch(&settings, i, v)
+            && let Some(spec) = self.specs.iter().find(|s| s.id == SEGMENT_SETTINGS)
+        {
+            let cmd = spec.command(params);
+            self.run_command(Box::new(cmd));
+        }
+        // the last run of each arch, kept in the case with its colours
+        let shown = case_seg_runs(data);
+        if !shown.is_empty() {
+            ui.add_space(8.0);
+            for line in seg_lines(&shown) {
+                ui.label(
+                    RichText::new(line)
+                        .font(fonts::ui(13.0))
+                        .color(c.text_primary),
+                );
+            }
+        }
+        ui.add_space(12.0);
     }
 }
 
@@ -563,5 +847,115 @@ mod tests {
             &[("count", "13"), ("upper", "0"), ("lower", "13")],
         );
         assert_eq!(r.toast.detail.unwrap(), none);
+    }
+
+    #[test]
+    fn the_separation_says_its_teeth_and_time_per_arch() {
+        crate::loader();
+        let out = json!({
+            "lower": { "teeth": 14, "seconds": 9.6, "labels_blob": "ab" },
+            "teeth": 14, "seconds": 10.0, "invalidated": [],
+        });
+        let r = report(SEGMENT, &out).unwrap();
+        assert_eq!(r.toast.message_key, "ws-toast-seg-done");
+        assert_eq!(r.toast.level, ToastLevel::Success);
+        assert_eq!(
+            r.toast.detail.as_deref(),
+            Some("14 teeth separated in 10 s")
+        );
+        assert!(!r.sticky);
+        // nothing went out of date: no notice
+        assert!(outdated_toast(&out).is_none());
+        // two arches: one line each, named
+        let out = json!({
+            "upper": { "teeth": 13, "seconds": 4.0, "labels_blob": "cd" },
+            "lower": { "teeth": 14, "seconds": 5.0, "labels_blob": "ab" },
+        });
+        let runs = seg_runs(&out);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].role, ScanRole::Upper);
+        assert_eq!(runs[1].teeth, 14);
+        assert_eq!(
+            seg_lines(&runs),
+            [
+                "Upper: 13 teeth separated in 4 s",
+                "Lower: 14 teeth separated in 5 s"
+            ]
+        );
+        // an output without arches falls back to the totals
+        let r = report(SEGMENT, &json!({ "teeth": 3, "seconds": 2.0 })).unwrap();
+        assert_eq!(r.toast.detail.as_deref(), Some("3 teeth separated in 2 s"));
+    }
+
+    #[test]
+    fn the_inspector_line_is_read_from_the_case_upper_arch_first() {
+        crate::loader();
+        let mut data = AlignersState::default();
+        assert!(case_seg_runs(Some(&data)).is_empty() && case_seg_runs(None).is_empty());
+        let run = |teeth, seconds| dca_model::SegmentationRun { teeth, seconds };
+        data.segmentation_runs.insert(ScanRole::Lower, run(14, 5.0));
+        let runs = case_seg_runs(Some(&data));
+        assert_eq!(seg_lines(&runs), ["14 teeth separated in 5 s"]);
+        data.segmentation_runs.insert(ScanRole::Upper, run(13, 4.0));
+        assert_eq!(
+            seg_lines(&case_seg_runs(Some(&data))),
+            [
+                "Upper: 13 teeth separated in 4 s",
+                "Lower: 14 teeth separated in 5 s"
+            ]
+        );
+    }
+
+    #[test]
+    fn what_a_separation_left_to_redo_is_listed_in_the_order_of_the_module() {
+        crate::loader();
+        dca_module::loader();
+        let toast = outdated_toast(&json!({ "invalidated": ["gingiva", "crowns"] })).unwrap();
+        assert_eq!(toast.message_key, "ws-toast-marks-outdated");
+        assert_eq!(toast.level, ToastLevel::Info);
+        let detail = toast.detail.unwrap();
+        assert!(
+            detail.starts_with("Out of date because the teeth were separated again"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("aligners-") && !detail.contains("crowns"),
+            "{detail}"
+        );
+        assert!(outdated_toast(&json!({})).is_none());
+    }
+
+    #[test]
+    fn every_warning_of_the_pipeline_or_the_export_is_a_notice() {
+        let out = json!({ "warnings": ["Check the teeth of the lower arch", ""] });
+        let toasts = warning_toasts(&out);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].message_key, "ws-toast-to-check");
+        assert_eq!(toasts[0].level, ToastLevel::Warning);
+        assert_eq!(
+            toasts[0].detail.as_deref(),
+            Some("Check the teeth of the lower arch")
+        );
+        assert!(warning_toasts(&json!({ "warnings": [] })).is_empty());
+        assert!(warning_toasts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_slider_value_is_sent_rounded_and_only_when_it_changes() {
+        let s = SegmentationSettings::default();
+        assert_eq!(
+            seg_patch(&s, 0, 52_000.4),
+            Some(json!({ "target_faces": 52000 }))
+        );
+        assert_eq!(seg_patch(&s, 1, 0.35), Some(json!({ "eta_convex": 0.35 })));
+        assert_eq!(seg_patch(&s, 2, 2.5), Some(json!({ "sigma": 2.5 })));
+        assert_eq!(seg_patch(&s, 0, 30_000.0), None);
+        assert_eq!(seg_patch(&s, 1, 0.2), None);
+        assert_eq!(seg_patch(&s, 2, 1.0), None);
+        // the defaults of the sliders are the ones of the case settings
+        for (i, p) in SEG_PARAMS.iter().enumerate() {
+            assert!((f64::from(p.default) - seg_value(&s, i)).abs() < 1e-6);
+            assert!(p.lo <= p.default && p.default <= p.hi);
+        }
     }
 }

@@ -150,6 +150,14 @@ footer-privacy = Informativa privacy
 footer-terms = Condizioni d'uso
 footer-gdpr = I dati restano su questa postazione (GDPR art. 9)
 
+## Licenza e avvisi
+about-licence-title = Licenza e avvisi
+about-licence-summary = Gratuita con la licenza DentalCraft, così com'è e senza garanzia. Non è un dispositivo medico: non per uso clinico.
+about-copyright = Copyright (c) 2026 Daniele Viti. Tutti i diritti riservati.
+about-button-licence = Licenza
+about-button-third-party = Licenze di terze parti
+about-button-close = Chiudi
+
 ## Errori di accesso (codici di dc-auth-client)
 auth-error-invalid-issuer = L'indirizzo del server di accesso non è valido. Controlla l'impostazione DC_AUTH_ISSUER.
 auth-error-network = Il servizio di accesso non è raggiungibile. Controlla la connessione a internet e riprova.

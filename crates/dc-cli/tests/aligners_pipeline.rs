@@ -365,6 +365,43 @@ fn the_pipeline_runs_on_the_demo_arches() {
     round_trip(&mut s, tmp.path());
 }
 
+/// The separation parameters of the case (`aligners.settings.segmentation`)
+/// and the separation that takes them: out-of-range values are refused and
+/// change nothing, the output carries the teeth, the time and what the new
+/// labels left out of date.
+#[test]
+fn the_segmentation_settings_and_run_work_on_the_demo_case() {
+    let mut s = session();
+    s.execute("aligners.demo", json!({ "arch": "lower" }))
+        .unwrap();
+    let out = s
+        .execute(
+            "aligners.settings.segmentation",
+            json!({ "target_faces": 5000 }),
+        )
+        .unwrap();
+    assert_eq!(out["target_faces"], 5000);
+    assert_eq!(aligners(s.state()).settings.segmentation.target_faces, 5000);
+    for bad in [
+        json!({ "target_faces": 4999 }),
+        json!({ "target_faces": 200_001 }),
+        json!({ "eta_convex": 2.0 }),
+    ] {
+        assert!(
+            s.execute("aligners.settings.segmentation", bad).is_err(),
+            "an out-of-range value was accepted"
+        );
+    }
+    assert_eq!(aligners(s.state()).settings.segmentation.target_faces, 5000);
+    let out = s
+        .execute("aligners.preparation.segmentation.automatic", Value::Null)
+        .unwrap();
+    assert!(out["teeth"].as_u64().unwrap() > 0, "{out}");
+    assert!(out["seconds"].as_f64().unwrap() >= 0.0, "{out}");
+    assert!(out["invalidated"].is_array(), "{out}");
+    assert!(aligners(s.state()).labels.contains_key(&ScanRole::Lower));
+}
+
 /// MCP and the CLI prefer the module's command over `case.import`: everything
 /// a client reads from `case.import` must be there, with the same value where
 /// the case does not make it differ.

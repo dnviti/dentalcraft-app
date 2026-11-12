@@ -905,6 +905,27 @@ fn labeled_field(
 
 // ---------------------------------------------------------------- sliders, progress
 
+/// Paints a monospaced readout right-aligned at `right_center`. B612 Mono
+/// gives "." a full character cell, which reads as "0. 20"; the decimal
+/// point is therefore laid out in a slot half a cell wide (its ink sits at
+/// the left of the glyph cell).
+fn paint_mono_value(p: &egui::Painter, right_center: Pos2, text: &str, color: Color32) {
+    let font = fonts::mono(12.0);
+    let Some((int, frac)) = text.split_once('.') else {
+        p.text(right_center, Align2::RIGHT_CENTER, text, font, color);
+        return;
+    };
+    let lay = |s: &str| p.layout_no_wrap(s.to_owned(), font.clone(), color);
+    let (int, dot, frac) = (lay(int), lay("."), lay(frac));
+    let dot_w = dot.size().x / 2.0;
+    let mut x = right_center.x - (int.size().x + dot_w + frac.size().x);
+    for (g, w) in [(&int, int.size().x), (&dot, dot_w), (&frac, frac.size().x)] {
+        let pos = pos2(x, right_center.y - g.size().y / 2.0);
+        p.galley(pos, g.clone(), color);
+        x += w;
+    }
+}
+
 /// Labelled slider for a length in millimetres (step 0.01 mm, Shift x10,
 /// double-click resets to `default`).
 pub fn labeled_slider_mm(
@@ -1018,11 +1039,15 @@ pub fn labeled_slider(
         ),
         StrokeKind::Inside,
     );
-    p.text(
+    let shown = if unit.is_empty() {
+        format!("{:.*}", decimals, *value)
+    } else {
+        format!("{:.*} {unit}", decimals, *value)
+    };
+    paint_mono_value(
+        p,
         vbox.right_center() - vec2(10.0, 0.0),
-        Align2::RIGHT_CENTER,
-        format!("{:.*} {unit}", decimals, *value),
-        fonts::mono(12.0),
+        &shown,
         c.text_primary,
     );
     let cy = track_rect.center().y;
@@ -1157,5 +1182,34 @@ mod tests {
         assert!(on);
         assert_eq!(tab, 2);
         assert_eq!(seg, 1);
+    }
+
+    /// B612 Mono gives "." a full cell, which showed as "0. 20".
+    #[test]
+    fn value_readout_decimal_point_is_tight() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, crate::theme::Mode::Dark);
+        let mut cell = 0.0;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            cell = ui
+                .painter()
+                .layout_no_wrap("0".into(), fonts::mono(12.0), Color32::WHITE)
+                .size()
+                .x;
+            paint_mono_value(ui.painter(), pos2(100.0, 20.0), "0.20", Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        let width = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
+            .fold(egui::Rect::NOTHING, |r, s| {
+                r.union(s.shape.visual_bounding_rect())
+            })
+            .width();
+        assert!(
+            width < 3.7 * cell,
+            "readout {width} px is not tight ({cell} px cell)"
+        );
     }
 }

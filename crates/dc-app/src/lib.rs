@@ -15,6 +15,7 @@ macro_rules! t {
     };
 }
 
+pub mod about;
 mod app;
 pub mod config;
 pub mod control;
@@ -27,6 +28,7 @@ mod paint;
 mod screens;
 pub mod support_client;
 
+pub use about::AboutView;
 pub use app::{AppDeps, DentalCraftApp, Screen};
 
 dc_i18n::bundle!(pub fn loader);

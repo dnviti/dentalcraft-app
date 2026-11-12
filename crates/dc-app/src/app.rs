@@ -19,6 +19,7 @@ use egui::{
     TextureHandle, Ui, vec2,
 };
 
+use crate::about::AboutView;
 use crate::config::{RecentList, Settings, Store, ThemePref};
 use crate::create_job::{
     CreateError, CreateJob, Created, NewProjectRequest, Stage, base_state_report,
@@ -126,6 +127,8 @@ pub struct DentalCraftApp {
     pub(crate) new_project: NewProjectState,
     pub(crate) show_all_recent: bool,
     pub(crate) show_shortcuts: bool,
+    /// The "Licence and notices" dialog, when open.
+    pub(crate) about: Option<AboutView>,
     pub(crate) toasts: Vec<Toast>,
     pub(crate) dialog: Option<PendingDialog>,
     pub(crate) create_job: Option<CreateJob>,
@@ -175,6 +178,7 @@ impl DentalCraftApp {
             new_project,
             show_all_recent: false,
             show_shortcuts: false,
+            about: None,
             toasts: Vec::new(),
             dialog: None,
             create_job: None,
@@ -272,6 +276,7 @@ impl DentalCraftApp {
                     _ => self.home_ui(ui),
                 });
         }
+        self.about_dialog(&ctx);
         self.overlays(&ctx);
     }
 
@@ -580,7 +585,9 @@ impl DentalCraftApp {
             self.show_shortcuts = !self.show_shortcuts;
         }
         if esc {
-            if self.show_shortcuts {
+            if self.about.is_some() {
+                self.about = None;
+            } else if self.show_shortcuts {
                 self.show_shortcuts = false;
             } else if self.screen == Screen::SignIn {
                 self.sign_in_escape();
@@ -688,6 +695,14 @@ impl DentalCraftApp {
             {
                 self.set_theme(&ctx, pref);
             }
+        }
+        ui.separator();
+        if ui
+            .button(format!("{}  {}", icons::SEAL, t!("about-licence-title")))
+            .clicked()
+        {
+            self.open_about();
+            ui.close();
         }
         ui.separator();
         if signed_in {
