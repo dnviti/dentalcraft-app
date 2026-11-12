@@ -469,12 +469,15 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     if input.layers.seeds
         && let Some(a) = al
     {
+        // The plugin hides the seeds once the teeth are built: no marker on
+        // an arch whose scan the 3D teeth replace.
         let seeds = a.seeds.iter().filter(|s| {
-            shown(if s.fdi.is_upper() {
+            let role = if s.fdi.is_upper() {
                 ScanRole::Upper
             } else {
                 ScanRole::Lower
-            })
+            };
+            shown(role) && !(input.teeth && replacing.contains(&role))
         });
         if let Some(m) = overlay::seed_markers(seeds, SEED_RADIUS) {
             let mut vm = ViewMesh::new(1 << 61, Arc::new(m))
@@ -2262,12 +2265,32 @@ mod built_teeth_tests {
         // the lower scan is replaced, the upper (no built tooth) stays
         assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_none());
         assert!(mesh(&ws, scan_id(&ws, ScanRole::Upper)).is_some());
+        // the seed markers are hidden over the 3D teeth (as in the plugin)...
+        let markers = |ws: &Workspace, upper: bool| {
+            let n = overlay::aligners(ws.undo.current())
+                .unwrap()
+                .seeds
+                .iter()
+                .filter(|s| s.fdi.is_upper() == upper)
+                .count();
+            (
+                n,
+                mesh(ws, 1 << 61).map_or(0, |m| m.mesh.vertex_count() / 6),
+            )
+        };
+        // only the upper arch (scan drawn) keeps its markers
+        let (up, drawn) = markers(&ws, true);
+        let all = overlay::aligners(ws.undo.current()).unwrap().seeds.len();
+        assert!(up > 0 && up < all);
+        assert_eq!(drawn, up, "lower seeds hidden over built teeth");
         assert!(arch_mesh_shown(ws.undo.current(), &ws.view.meshes, false));
         // the toggle shows the scan instead, and none of the entries of its arch
         ws.view.model = Model::Scan;
         ws.sync_scene_with(Color::TOOTH);
         assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
         assert!(mesh(&ws, tooth).is_none());
+        // ...and drawn again in the Scan view
+        assert_eq!(markers(&ws, true).1, all, "seeds in the scan view");
     }
 
     #[test]
