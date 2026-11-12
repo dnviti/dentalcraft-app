@@ -150,6 +150,14 @@ footer-privacy = Privacy notice
 footer-terms = Terms of use
 footer-gdpr = Data stays on this workstation (GDPR art. 9)
 
+## Licence and notices
+about-licence-title = Licence and notices
+about-licence-summary = Free of charge under the DentalCraft licence, as is and without warranty. Not a medical device: not for clinical use.
+about-copyright = Copyright (c) 2026 Daniele Viti. All rights reserved.
+about-button-licence = Licence
+about-button-third-party = Third-party licences
+about-button-close = Close
+
 ## Sign-in errors (dc-auth-client codes)
 auth-error-invalid-issuer = The sign-in server address is not valid. Check the DC_AUTH_ISSUER setting.
 auth-error-network = The sign-in service cannot be reached. Check the internet connection and try again.

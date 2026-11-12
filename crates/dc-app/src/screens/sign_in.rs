@@ -116,14 +116,20 @@ impl DentalCraftApp {
                 );
                 fui.horizontal(|ui| {
                     ui.add_space(((footer.width() - 400.0) / 2.0).max(0.0));
-                    for k in [t!("footer-privacy"), t!("footer-terms"), t!("footer-gdpr")] {
+                    let note = |ui: &mut Ui, k: String| {
                         ui.label(
                             RichText::new(k)
                                 .font(fonts::ui(11.0))
                                 .color(c.text_secondary),
                         );
                         ui.add_space(8.0);
+                    };
+                    note(ui, t!("footer-privacy"));
+                    if widgets::link(ui, t!("footer-terms")).clicked() {
+                        self.open_about();
                     }
+                    ui.add_space(8.0);
+                    note(ui, t!("footer-gdpr"));
                 });
             });
     }

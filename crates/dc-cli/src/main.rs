@@ -1,8 +1,8 @@
 //! `dentalcraft-cli`: drives DentalCraft from the command line and serves
 //! MCP for AI agents (port plan B2.1).
 //!
-//! Subcommands: `info`, `commands`, `describe`, `run`, `render`, `mcp`
-//! and `app`. Everything runs on a headless engine session (`dc-session`
+//! Subcommands: `info`, `commands`, `describe`, `run`, `render`, `mcp`,
+//! `app` and `licence`. Everything runs on a headless engine session (`dc-session`
 //! with the Aligners module) except `mcp --connect PORT`, which talks to a
 //! running app started with `dentalcraft --control PORT` (protocol in
 //! [`remote`]).
@@ -24,6 +24,26 @@ use remote::RemoteHost;
 use script::Step;
 
 const ABOUT: &str = "dentalcraft-cli works on DentalCraft projects (.dcprj) and scans (STL, OBJ, PLY) without a window.";
+
+/// Copyright line of `--version` and `licence`.
+macro_rules! copyright {
+    () => {
+        "Copyright (c) 2026 Daniele Viti. All rights reserved."
+    };
+}
+
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    copyright!(),
+    "\nFree of charge under the DentalCraft licence, as is and without warranty. Not a medical device: not for clinical use.\n`dentalcraft-cli licence` prints the licence, `dentalcraft-cli licence --third-party` the third-party notices."
+);
+
+/// The DentalCraft licence (EULA), embedded from the repository root.
+const LICENCE: &str = include_str!("../../../LICENSE.md");
+
+/// Notices of the bundled open source components.
+const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD-PARTY-NOTICES.md");
 
 const AFTER_HELP: &str = "\
 A case is changed by running commands on it:
@@ -126,6 +146,7 @@ Prints the process id and the path as JSON and returns at once.";
 #[command(
     name = "dentalcraft-cli",
     version,
+    long_version = LONG_VERSION,
     about = ABOUT,
     after_help = AFTER_HELP
 )]
@@ -182,6 +203,12 @@ enum Cmd {
             value_name = "ARGS"
         )]
         args: Vec<String>,
+    },
+    /// Print the DentalCraft licence, or the third-party notices.
+    Licence {
+        /// Print the copyright and licence notices of the bundled open source components.
+        #[arg(long)]
+        third_party: bool,
     },
 }
 
@@ -283,6 +310,10 @@ fn main() -> ExitCode {
         Some(Cmd::Render(args)) => sub.ok_or_else(String::new).and_then(|m| render(&args, m)),
         Some(Cmd::Mcp { connect }) => mcp(connect.as_deref()),
         Some(Cmd::App { print_path, args }) => app(print_path, &args),
+        Some(Cmd::Licence { third_party }) => {
+            licence(third_party);
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -299,6 +330,17 @@ fn print_json(v: &Value) -> Result<()> {
     // a closed reader (`| head`) does not turn the work into a failure
     let _ = writeln!(out, "{text}");
     Ok(())
+}
+
+/// `licence`: the copyright line and the licence, or the third-party notices.
+fn licence(third_party: bool) {
+    let mut out = std::io::stdout().lock();
+    // a closed reader (`| head`) is not an error
+    let _ = if third_party {
+        out.write_all(THIRD_PARTY_NOTICES.as_bytes())
+    } else {
+        writeln!(out, "{}\n\n{LICENCE}", copyright!())
+    };
 }
 
 fn new_host() -> Result<CliHost> {

@@ -538,3 +538,23 @@ fn help_explains_in_role_and_the_import_output() {
         }
     }
 }
+
+#[test]
+fn licence_and_third_party_notices() {
+    let out = cli(&["licence"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.starts_with("Copyright (c) 2026 Daniele Viti. All rights reserved."),
+        "{text}"
+    );
+    assert!(text.contains("End-User Licence Agreement"));
+    let out = cli(&["licence", "--third-party"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("| egui |")));
+    let out = cli(&["--version"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Copyright (c) 2026 Daniele Viti."), "{text}");
+}
