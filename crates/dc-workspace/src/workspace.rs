@@ -1104,7 +1104,6 @@ impl Workspace {
             self.toast(toast);
         }
         if id == leaf::SEGMENT {
-            self.segment.runs = leaf::seg_runs(out);
             self.view.model = crate::view::Model::Scan;
         }
         // what to check before delivery (the doubts the separation left)

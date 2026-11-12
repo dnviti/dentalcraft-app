@@ -96,7 +96,8 @@ fn detail_of(h: &Harness<'static, Workspace>, key: &str) -> Option<String> {
 
 #[test]
 fn a_run_on_the_demo_shows_its_result_line_and_toast_and_the_scan() {
-    // a case opened with its colours: no line, the case does not keep the time
+    // a case opened with its colours but without a stored run (a project saved
+    // before the case kept it): no line
     let h = harness(project(demo_state(&["lower"])));
     assert!(h.query_by_label("Run again").is_some());
     assert!(h.query_by_label_contains("teeth separated in").is_none());
@@ -145,6 +146,41 @@ fn a_run_on_the_demo_shows_its_result_line_and_toast_and_the_scan() {
     assert!(h.state_mut().redo());
     settle(&mut h);
     assert!(h.query_by_label(&detail).is_some());
+}
+
+#[test]
+fn the_result_line_is_kept_in_the_project_and_goes_with_the_colours_on_undo() {
+    let mut state = demo_state(&["lower"]);
+    let mut al = state
+        .module_data::<AlignersState>(MODULE_ID)
+        .unwrap()
+        .clone();
+    al.labels.clear();
+    state.set_module(MODULE_ID, ModuleState::new(al));
+    let mut h = harness(project(state));
+    h.state_mut().activate(SEGMENT);
+    settle(&mut h);
+    let detail = detail_of(&h, "ws-toast-seg-done").expect("the success toast");
+    assert!(h.query_by_label(&detail).is_some(), "{detail}");
+    let kept = data(&h).segmentation_runs[&ScanRole::Lower];
+    assert!(kept.teeth >= 12, "{kept:?}");
+
+    // saved and opened again, in a new session: the line is still there
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.dcprj");
+    h.state_mut().save_to(path.clone());
+    assert!(h.state_mut().wait_for_jobs(WAIT));
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(&path, &codecs).unwrap();
+    let reopened = harness(loaded.project);
+    assert_eq!(data(&reopened).segmentation_runs[&ScanRole::Lower], kept);
+    assert!(reopened.query_by_label(&detail).is_some(), "{detail}");
+
+    // undo takes the colours and the line away
+    assert!(h.state_mut().undo());
+    settle(&mut h);
+    assert!(data(&h).segmentation_runs.is_empty());
+    assert!(h.query_by_label(&detail).is_none());
 }
 
 #[test]

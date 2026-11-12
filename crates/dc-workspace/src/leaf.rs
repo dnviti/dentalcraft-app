@@ -171,16 +171,13 @@ fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
         .map(|s| &s["output"])
 }
 
-/// What one arch of a run of "Separate teeth and gum" gave: its teeth, how
-/// long it took and the colours it left on the scan (the hex of the labels
-/// blob), so the inspector shows the line only while the case still holds
-/// those colours.
+/// What one arch of a run of "Separate teeth and gum" gave: its teeth and
+/// how long it took.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SegRun {
     pub role: ScanRole,
     pub teeth: u64,
     pub seconds: f64,
-    pub labels: String,
 }
 
 /// The arches of the output `out` of "Separate teeth and gum", upper first.
@@ -193,7 +190,24 @@ pub(crate) fn seg_runs(out: &Value) -> Vec<SegRun> {
                 role,
                 teeth: a["teeth"].as_u64()?,
                 seconds: a["seconds"].as_f64().unwrap_or(0.0),
-                labels: a["labels_blob"].as_str().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The arches of the last runs the case holds, upper first.
+pub(crate) fn case_seg_runs(data: Option<&AlignersState>) -> Vec<SegRun> {
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    [ScanRole::Upper, ScanRole::Lower]
+        .into_iter()
+        .filter_map(|role| {
+            let r = data.segmentation_runs.get(&role)?;
+            Some(SegRun {
+                role,
+                teeth: u64::from(r.teeth),
+                seconds: r.seconds,
             })
         })
         .collect()
@@ -459,9 +473,6 @@ fn seg_patch(s: &SegmentationSettings, i: usize, v: f32) -> Option<Value> {
 /// What the inspector of "Separate teeth and gum" keeps between frames.
 #[derive(Debug, Default)]
 pub(crate) struct SegmentUi {
-    /// The arches of the last run of this session (a reopened case has none:
-    /// the case does not keep how long a run took).
-    pub runs: Vec<SegRun>,
     /// The slider being dragged and its value, sent when it is let go.
     drag: Option<(usize, f32)>,
 }
@@ -514,8 +525,8 @@ impl Workspace {
     }
 
     /// The info line, the folded separation parameters (one undo step each,
-    /// read from the case settings) and the result of the last run while the
-    /// case still holds its colours.
+    /// read from the case settings) and the result of the last run of each
+    /// arch, read from the case (it goes with the colours it describes).
     fn segment_inspector(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
         let state = self.undo.current().clone();
@@ -571,17 +582,8 @@ impl Workspace {
             let cmd = spec.command(params);
             self.run_command(Box::new(cmd));
         }
-        // the last run, while its colours are the ones of the case
-        let shown: Vec<SegRun> = self
-            .segment
-            .runs
-            .iter()
-            .filter(|r| {
-                data.and_then(|d| d.labels.get(&r.role))
-                    .is_some_and(|b| b.to_hex() == r.labels)
-            })
-            .cloned()
-            .collect();
+        // the last run of each arch, kept in the case with its colours
+        let shown = case_seg_runs(data);
         if !shown.is_empty() {
             ui.add_space(8.0);
             for line in seg_lines(&shown) {
@@ -872,7 +874,7 @@ mod tests {
         let runs = seg_runs(&out);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].role, ScanRole::Upper);
-        assert_eq!(runs[1].labels, "ab");
+        assert_eq!(runs[1].teeth, 14);
         assert_eq!(
             seg_lines(&runs),
             [
@@ -883,6 +885,25 @@ mod tests {
         // an output without arches falls back to the totals
         let r = report(SEGMENT, &json!({ "teeth": 3, "seconds": 2.0 })).unwrap();
         assert_eq!(r.toast.detail.as_deref(), Some("3 teeth separated in 2 s"));
+    }
+
+    #[test]
+    fn the_inspector_line_is_read_from_the_case_upper_arch_first() {
+        crate::loader();
+        let mut data = AlignersState::default();
+        assert!(case_seg_runs(Some(&data)).is_empty() && case_seg_runs(None).is_empty());
+        let run = |teeth, seconds| dca_model::SegmentationRun { teeth, seconds };
+        data.segmentation_runs.insert(ScanRole::Lower, run(14, 5.0));
+        let runs = case_seg_runs(Some(&data));
+        assert_eq!(seg_lines(&runs), ["14 teeth separated in 5 s"]);
+        data.segmentation_runs.insert(ScanRole::Upper, run(13, 4.0));
+        assert_eq!(
+            seg_lines(&case_seg_runs(Some(&data))),
+            [
+                "Upper: 13 teeth separated in 4 s",
+                "Lower: 14 teeth separated in 5 s"
+            ]
+        );
     }
 
     #[test]
