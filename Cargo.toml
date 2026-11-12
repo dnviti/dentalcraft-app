@@ -60,9 +60,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.2" }
-dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.2" }
-dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.2" }
+dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.3" }
+dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.3" }
+dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.3" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"

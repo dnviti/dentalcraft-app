@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "dc-app"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "base64",
  "chrono",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "dc-auth-client"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "dc-cli"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "base64",
  "clap",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "dc-ui"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "dc-i18n",
  "egui",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "dc-viewport"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "bytemuck",
  "dc-case",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "dc-workspace"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 dependencies = [
  "dc-case",
  "dc-command",
@@ -1343,8 +1343,8 @@ dependencies = [
 
 [[package]]
 name = "dca-algo"
-version = "0.2.0-alpha.2"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.2#d3ec76cecc50306af71ad93d096157054295ce7b"
+version = "0.2.0-alpha.3"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.3#68bb16bdd9318f13366d977287bae8b373544e4f"
 dependencies = [
  "dc-case",
  "dc-geom",
@@ -1363,8 +1363,8 @@ dependencies = [
 
 [[package]]
 name = "dca-model"
-version = "0.2.0-alpha.2"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.2#d3ec76cecc50306af71ad93d096157054295ce7b"
+version = "0.2.0-alpha.3"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.3#68bb16bdd9318f13366d977287bae8b373544e4f"
 dependencies = [
  "dc-case",
  "glam 0.34.1",
@@ -1375,8 +1375,8 @@ dependencies = [
 
 [[package]]
 name = "dca-module"
-version = "0.2.0-alpha.2"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.2#d3ec76cecc50306af71ad93d096157054295ce7b"
+version = "0.2.0-alpha.3"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.3#68bb16bdd9318f13366d977287bae8b373544e4f"
 dependencies = [
  "dc-case",
  "dc-command",
