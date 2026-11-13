@@ -278,7 +278,8 @@ fn arch_mesh_shown(state: &CaseState, meshes: &[ViewMesh], upper: bool) -> bool 
 }
 
 /// Draws the number chips over the viewport and returns what an Alt+click
-/// did (choosing the brush tooth), or [`Action::None`].
+/// did (choosing the brush tooth), or [`Action::None`], and the tooth whose
+/// chip or mark a plain click landed on (for "Delete a tooth").
 ///
 /// Occlusion: a number (or a gem) is hidden when a ray from the camera to
 /// its anchor meets the scan more than [`labels::OCCLUSION_TOLERANCE_MM`]
@@ -289,7 +290,7 @@ fn tooth_labels(
     vp: &Viewport,
     vr: &dc_viewport::ViewportResponse,
     s: &TeethOnScreen<'_>,
-) -> Action {
+) -> (Action, Option<u8>) {
     let rect = vr.response.rect;
     let c = *colors(ui);
     let cam = vp.camera();
@@ -359,19 +360,28 @@ fn tooth_labels(
         s.brush,
         hot,
     );
-    if alt
-        && vr.response.clicked_by(egui::PointerButton::Primary)
-        && let Some(pos) = vr.response.interact_pointer_pos()
-    {
+    let click = vr
+        .response
+        .clicked_by(egui::PointerButton::Primary)
+        .then(|| vr.response.interact_pointer_pos())
+        .flatten();
+    let Some(pos) = click else {
+        return (Action::None, None);
+    };
+    if alt {
         // the scan under the pointer, or a built tooth
         let surface = vr.pick.and_then(|p| {
             manual::target_of(s.state, &p, eye)
                 .map(|t| t.label)
                 .or_else(|| manual::tooth_of_mesh(p.mesh_id).map(u16::from))
         });
-        return labels::alt_click_action(labels::hit_test(pos, &drawn.chips, &drawn.gems, surface));
+        let hit = labels::hit_test(pos, &drawn.chips, &drawn.gems, surface);
+        return (labels::alt_click_action(hit), None);
     }
-    Action::None
+    match labels::hit_test(pos, &drawn.chips, &drawn.gems, None) {
+        Hit::Label(f) | Hit::Gem(f) => (Action::None, Some(f)),
+        _ => (Action::None, None),
+    }
 }
 
 /// Meshes to show: the scans in the world frame (upper and lower arch per
@@ -382,7 +392,10 @@ fn tooth_labels(
 /// - An entry of a hidden arch is not drawn nor pickable.
 /// - With [`SceneInput::teeth`], a scan is left out while an entry that
 ///   replaces it (`hides_scan`) is shown for its arch; without it, the
-///   entries of such an arch are left out and the scan is drawn.
+///   entries of such an arch are left out and the scan is drawn. An arch
+///   whose built teeth are out of date (teeth corrected by hand since they
+///   were built, [`overlay::outdated_arches`]) is drawn as without it: its
+///   scan, colours and tooth marks show the corrections, not the old teeth.
 /// - A tooth entry gets the id [`manual::tooth_mesh_id`] of its FDI number,
 ///   so a pick on it names the tooth; with the labels layer off it takes the
 ///   enamel colour. Over a later stage with the stage 0 ghost, the teeth are
@@ -409,15 +422,24 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     };
     let posed_stage = al.and_then(|a| overlay::stage(a, input.stage).map(|s| (a, s)));
     let rest = input.module.scene_at(state, None);
-    let replacing: Vec<ScanRole> = rest
+    // the arches with built teeth, and those the built teeth replace now
+    let built: Vec<ScanRole> = rest
         .iter()
         .filter(|e| e.hides_scan)
         .filter_map(|e| e.arch)
         .collect();
-    let of_replaced = |e: &SceneEntry| e.arch.is_some_and(|a| replacing.contains(&a));
-    let keep = |e: &SceneEntry| input.teeth || !of_replaced(e);
+    let outdated = overlay::outdated_arches(state);
+    let replacing: Vec<ScanRole> = built
+        .iter()
+        .copied()
+        .filter(|a| input.teeth && !outdated.contains(a))
+        .collect();
+    let keep = |e: &SceneEntry| {
+        e.arch
+            .is_none_or(|a| !built.contains(&a) || replacing.contains(&a))
+    };
     let mut complete = true;
-    let entries = if input.stage == 0 || (!input.teeth && !rest.iter().any(keep)) {
+    let entries = if input.stage == 0 || !rest.iter().any(keep) {
         rest.clone()
     } else if input.wait {
         input.module.scene_at(state, Some(input.stage))
@@ -428,7 +450,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     };
     let mut out = Vec::new();
     for scan in &state.case.scans {
-        if input.teeth && replacing.contains(&scan.role) && shown(scan.role) {
+        if replacing.contains(&scan.role) && shown(scan.role) {
             continue;
         }
         let Some(mesh) = state.mesh(&scan.mesh) else {
@@ -477,7 +499,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             } else {
                 ScanRole::Lower
             };
-            shown(role) && !(input.teeth && replacing.contains(&role))
+            shown(role) && !replacing.contains(&role)
         });
         if let Some(m) = overlay::seed_markers(seeds, SEED_RADIUS) {
             let mut vm = ViewMesh::new(1 << 61, Arc::new(m))
@@ -512,7 +534,11 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
         Some(vm)
     };
     if input.teeth && input.overlay0 && input.stage > 0 {
-        for (i, e) in rest.iter().enumerate().filter(|(_, e)| e.tooth.is_some()) {
+        for (i, e) in rest
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.tooth.is_some() && keep(e))
+        {
             if let Some(mut ghost) = entry_mesh(i, e) {
                 ghost.id |= 1 << 62;
                 ghost.coloring = MeshColoring::Uniform(input.enamel);
@@ -770,8 +796,10 @@ impl Workspace {
                 }
                 // the clicks and strokes go to the manual tool that is open
                 let vr = vp.ui(ui);
-                // the tooth numbers, and the Alt+click that chooses the brush tooth
-                alt_action = tooth_labels(
+                // the tooth numbers, the Alt+click that chooses the brush tooth
+                // and the click on a number or a mark ("Delete a tooth")
+                let mark_click;
+                (alt_action, mark_click) = tooth_labels(
                     ui,
                     vp,
                     &vr,
@@ -787,7 +815,7 @@ impl Workspace {
                             .then_some(self.manual.tooth),
                     },
                 );
-                manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr);
+                manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr, mark_click);
                 let half = vp.camera().half_height();
                 if half > 0.0 {
                     px_per_mm = Some(rect.height() / (2.0 * half));
@@ -813,8 +841,6 @@ impl Workspace {
         self.toolbar(&mut top, &toolbar_rows);
         top.add_space(8.0);
         self.caption(&mut top);
-        top.add_space(8.0);
-        self.manual_panel(&mut top);
 
         // view cube (top right)
         let cube_rect = Rect::from_min_size(
@@ -924,6 +950,10 @@ impl Workspace {
                     Model::Scan
                 };
                 let forced = self.view.model == Model::Teeth && shown == Model::Scan;
+                // the arches whose built teeth are out of date show their scan
+                let outdated = overlay::outdated_arch_names(self.undo.current())
+                    .filter(|_| shown == Model::Teeth)
+                    .map(|arches| dc_i18n::tr_args("ws-model-outdated", &[("arches", &arches)]));
                 for (m, label, tip) in [
                     (Model::Scan, "ws-model-scan", "ws-model-scan-tip"),
                     (Model::Teeth, "ws-model-teeth", "ws-model-teeth-tip"),
@@ -931,6 +961,9 @@ impl Workspace {
                     let mut tooltip = t(tip);
                     if forced {
                         tooltip = format!("{tooltip}. {}", t("ws-model-forced"));
+                    }
+                    if let Some(note) = &outdated {
+                        tooltip = format!("{tooltip}. {note}");
                     }
                     if text_segment(ui, &t(label), Role::RadioButton, shown == m)
                         .on_hover_text(tooltip)
@@ -1094,10 +1127,15 @@ impl Workspace {
                 }
             });
         });
+        // the button of the empty state runs the import: the file dialog, with
+        // its inspector (the role of the next files) on the right
         if import {
             match self.import_command_id() {
-                Some(id) => self.activate(id),
-                None => self.activate(dc_module_api::IMPORT_SCANS_SUFFIX),
+                Some(id) => {
+                    self.select_command(id);
+                    self.run_leaf(id);
+                }
+                None => self.run_leaf(dc_module_api::IMPORT_SCANS_SUFFIX),
             }
         }
     }
@@ -2147,10 +2185,27 @@ mod tests {
         h.run();
         let model = TimelineModel::from_state(h.state().0.undo.current());
         assert_eq!(model.last(), 2);
-        // the slider is the row of stage cells; a click picks the stage under it
+        // a click at the middle of the track picks the middle stage
         h.get_by_role(Role::Slider).click();
         h.run();
         assert_eq!(h.state().0.timeline.current, 1);
+        // dragging scrubs: the ends of the track are the first and last stage
+        // and the scene follows
+        let track = h.get_by_role(Role::Slider).rect();
+        let end = egui::pos2(track.right() - 7.0, track.center().y);
+        let start = egui::pos2(track.left() + 7.0, track.center().y);
+        h.hover_at(end);
+        h.drag_at(end);
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 2);
+        assert_eq!(h.state().0.view.synced.map(|k| k.stage), Some(2));
+        h.hover_at(start);
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 0);
+        assert_eq!(h.state().0.view.synced.map(|k| k.stage), Some(0));
+        h.drop_at(start);
+        h.run();
+        assert_eq!(h.state().0.timeline.current, 0);
         h.get_by_label("Last stage").click();
         h.run();
         assert_eq!(h.state().0.timeline.current, 2);
@@ -2291,6 +2346,86 @@ mod built_teeth_tests {
         assert!(mesh(&ws, tooth).is_none());
         // ...and drawn again in the Scan view
         assert_eq!(markers(&ws, true).1, all, "seeds in the scan view");
+    }
+
+    #[test]
+    fn an_arch_corrected_by_hand_after_the_build_shows_its_scan_until_built_again() {
+        // tooth 31 was painted with the brush after it was built: its 3D tooth
+        // is out of date (no measured tips: the crown tops are the anchors)
+        let mut state = built_case();
+        let mut al = state
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.tooth_geometry.clear();
+        let up_to_date = {
+            let mut s = state.clone();
+            s.set_module(dca_model::MODULE_ID, ModuleState::new(al.clone()));
+            s
+        };
+        al.dirty.insert(Fdi::new(31).unwrap());
+        state.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        let mut ws = workspace(state);
+        assert!(ws.teeth_shown(), "the 3D teeth are the choice");
+        ws.sync_scene_with(Color::TOOTH);
+        // the lower arch shows its scan, its colours and every mark; its old
+        // 3D tooth is not drawn
+        let tooth = manual::tooth_mesh_id(31);
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
+        assert!(mesh(&ws, tooth).is_none());
+        let all = overlay::aligners(ws.undo.current()).unwrap().seeds.len();
+        let marks = mesh(&ws, 1 << 61).map_or(0, |m| m.mesh.vertex_count() / 6);
+        assert_eq!(marks, all, "every tooth mark drawn");
+        // the number of the tooth sits on its crown on the scan
+        let on_scan = labels::anchors_of(ws.undo.current(), false);
+        let a = ws.tooth_anchors();
+        assert_eq!(
+            a.iter().find(|a| a.fdi == 31),
+            on_scan.iter().find(|a| a.fdi == 31)
+        );
+        // built again (nothing out of date): the 3D tooth replaces the scan
+        ws.undo.push(Arc::new(up_to_date), "rebuilt");
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_none());
+        assert!(mesh(&ws, tooth).is_some());
+    }
+
+    #[test]
+    fn the_3d_teeth_inspector_says_they_are_out_of_date() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let mut state = built_case();
+        let mut al = state
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.dirty.insert(Fdi::new(31).unwrap());
+        state.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        let mut ws = workspace(state);
+        ws.select_item("aligners.teeth.build");
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui_state(
+                |ui, ws: &mut Workspace| {
+                    ws.show(ui);
+                },
+                ws,
+            );
+        h.run();
+        assert!(h.query_by_label("Out of date").is_some());
+        assert!(
+            h.query_by_label_contains("changed after the 3D teeth were built (Lower)")
+                .is_some()
+        );
+        // the toggle says why the lower arch shows its scan
+        let teeth = h.get_by_role_and_label(Role::RadioButton, "3D teeth");
+        teeth.hover();
+        h.run();
+        assert!(
+            h.query_by_label_contains("it shows the scan until you build the 3D teeth again")
+                .is_some()
+        );
     }
 
     #[test]

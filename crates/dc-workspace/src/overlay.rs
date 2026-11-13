@@ -52,6 +52,39 @@ pub(crate) fn aligners(state: &CaseState) -> Option<&AlignersState> {
     state.module_data::<AlignersState>(dca_model::MODULE_ID)
 }
 
+/// The arches whose built teeth are out of date: their tooth colours, tooth
+/// marks or missing teeth changed since the teeth were built, or a tooth
+/// corrected by hand waits to be rebuilt
+/// ([`AlignersState::teeth_out_of_date`]). The viewport draws their scan,
+/// with its colours and tooth marks, instead of the 3D teeth, so the
+/// corrections stay in sight until the teeth are built again.
+pub(crate) fn outdated_arches(state: &CaseState) -> Vec<ScanRole> {
+    let Some(a) = aligners(state) else {
+        return Vec::new();
+    };
+    [ScanRole::Upper, ScanRole::Lower]
+        .into_iter()
+        .filter(|role| a.teeth_out_of_date(*role))
+        .collect()
+}
+
+/// The names of the arches whose built teeth are out of date
+/// ([`outdated_arches`]), as the user reads them ("Upper, Lower"), or
+/// `None` when none is.
+pub(crate) fn outdated_arch_names(state: &CaseState) -> Option<String> {
+    let names: Vec<String> = outdated_arches(state)
+        .into_iter()
+        .map(|role| {
+            crate::t(if role == ScanRole::Upper {
+                "ws-role-upper"
+            } else {
+                "ws-role-lower"
+            })
+        })
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
 /// The labels mesh of the arch `role`, when it has one label per vertex of
 /// `scan`.
 pub(crate) fn scan_labels<'a>(
