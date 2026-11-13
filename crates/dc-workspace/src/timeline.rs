@@ -1,35 +1,20 @@
 //! Stage timeline under the viewport: transport, stage readout, the overlay
-//! toggle and the row of stage cells with event markers.
+//! toggle and the stage slider.
 
 use dc_case::CaseState;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
 use dc_ui::widgets;
-use egui::{
-    Align2, CornerRadius, Key, Rect, Role, Sense, Stroke, StrokeKind, Ui, WidgetInfo, pos2, vec2,
-};
+use egui::{Key, Rect, Ui, vec2};
 
 use crate::t;
-
-/// One stage cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StageCell {
-    /// Stage number (0 = initial position).
-    pub index: u32,
-    /// Interproximal reduction happens at this stage.
-    pub ipr: bool,
-    /// An attachment is placed or removed at this stage.
-    pub attachment: bool,
-    /// A movement exceeds the per-stage limits.
-    pub warning: bool,
-}
 
 /// Stages of the case, read from the Aligners module data.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimelineModel {
-    /// Cells 0..=last, in order.
-    pub cells: Vec<StageCell>,
+    /// Last stage number; `None` without stages.
+    last: Option<u32>,
     /// Days each aligner is worn.
     pub interval_days: u32,
 }
@@ -40,34 +25,20 @@ impl TimelineModel {
         let Some(al) = state.module_data::<dca_model::AlignersState>(dca_model::MODULE_ID) else {
             return Self::default();
         };
-        let Some(last) = al.stages.iter().map(|s| s.index).max() else {
-            return Self::default();
-        };
-        let cells = (0..=last)
-            .map(|i| {
-                let st = al.stages.iter().find(|s| s.index == i);
-                StageCell {
-                    index: i,
-                    ipr: st.is_some_and(|s| !s.ipr.is_empty()),
-                    attachment: false,
-                    warning: false,
-                }
-            })
-            .collect();
         Self {
-            cells,
+            last: al.stages.iter().map(|s| s.index).max(),
             interval_days: al.settings.interval_days,
         }
     }
 
     /// Last stage number (0 when empty).
     pub fn last(&self) -> u32 {
-        self.cells.last().map_or(0, |c| c.index)
+        self.last.unwrap_or(0)
     }
 
     /// `true` without stages.
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.last.is_none()
     }
 
     /// Week of treatment at which `stage` starts.
@@ -210,20 +181,19 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     });
     ui.add_space(6.0);
     if has {
-        cells(ui, model, st);
+        track(ui, model, st);
     } else {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-        ui.painter().rect(
-            rect,
-            CornerRadius::same(3),
-            c.bg_sunken,
-            Stroke::new(1.0, c.border_subtle),
-            StrokeKind::Inside,
-        );
+        // no stages: the slider is there but off, with the hint over its
+        // empty number row when the header had no room for it
+        let resp = widgets::stage_slider(ui, &mut 0, 0, &t("ws-tl-stage"));
         if hint_below {
             let hint = t("ws-tl-empty");
+            let row = Rect::from_min_size(
+                resp.rect.left_top() - vec2(0.0, widgets::STAGE_SLIDER_LABEL_ROW),
+                vec2(resp.rect.width(), widgets::STAGE_SLIDER_LABEL_ROW),
+            );
             ui.put(
-                rect.shrink2(vec2(8.0, 0.0)),
+                row,
                 egui::Label::new(
                     egui::RichText::new(hint.clone())
                         .font(fonts::ui(12.0))
@@ -305,89 +275,21 @@ fn transport_and_readout(
     }
 }
 
-fn cells(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
-    let c = *colors(ui);
-    let n = model.cells.len().max(1) as f32;
-    let gap = 4.0;
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 52.0), Sense::click_and_drag());
-    let cell_w = ((w - gap * (n - 1.0)) / n).max(2.0);
+/// The stage slider: a plain track over `0..=last`.
+fn track(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     let label = format!("{} {:02}", t("ws-tl-stage"), st.current);
-    resp.widget_info(|| WidgetInfo::labeled(Role::Slider, true, &label));
-    if let Some(pos) = resp.interact_pointer_pos()
-        && (resp.clicked() || resp.dragged())
-    {
-        let i = ((pos.x - rect.left()) / (cell_w + gap))
-            .floor()
-            .clamp(0.0, n - 1.0);
-        st.current = model.cells[i as usize].index;
+    let mut stage = st.current;
+    if widgets::stage_slider(ui, &mut stage, model.last(), &label).changed() {
+        st.current = stage;
         st.playing = false;
-    }
-    let p = ui.painter();
-    let bar_top = rect.top() + 16.0;
-    for (k, cell) in model.cells.iter().enumerate() {
-        let x = rect.left() + k as f32 * (cell_w + gap);
-        let r = Rect::from_min_size(pos2(x, bar_top), vec2(cell_w, 20.0));
-        let current = cell.index == st.current;
-        let (fill, stroke) = if current {
-            (c.select_blue, Stroke::NONE)
-        } else if cell.index < st.current {
-            (c.bg_hover, Stroke::new(1.0, c.border_strong))
-        } else {
-            (c.bg_sunken, Stroke::new(1.0, c.border_subtle))
-        };
-        let stroke = if cell.warning {
-            Stroke::new(2.0, c.status_warning)
-        } else {
-            stroke
-        };
-        p.rect(r, CornerRadius::same(3), fill, stroke, StrokeKind::Inside);
-        // markers above the cell
-        let my = rect.top() + 6.0;
-        let mut mx = r.center().x;
-        let markers = [
-            (cell.attachment, ic::SQUARE, c.model_attachment),
-            (cell.ipr, ic::DIAMOND, c.model_ipr),
-            (cell.warning, ic::WARNING, c.status_warning),
-        ];
-        let count = markers.iter().filter(|m| m.0).count() as f32;
-        mx -= (count - 1.0).max(0.0) * 6.0;
-        for (on, glyph, color) in markers {
-            if on {
-                p.text(
-                    pos2(mx, my),
-                    Align2::CENTER_CENTER,
-                    glyph,
-                    fonts::icon(11.0),
-                    color,
-                );
-                mx += 12.0;
-            }
-        }
-        let font = if current {
-            fonts::mono_bold(11.0)
-        } else {
-            fonts::mono(11.0)
-        };
-        p.text(
-            pos2(r.center().x, r.bottom() + 8.0),
-            Align2::CENTER_CENTER,
-            format!("{:02}", cell.index),
-            font,
-            if current {
-                c.text_primary
-            } else {
-                c.text_secondary
-            },
-        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dc_case::{CaseState, Fdi, ModuleState};
-    use dca_model::{AlignersState, IprStep, Stage};
+    use dc_case::{CaseState, ModuleState};
+    use dca_model::{AlignersState, Stage};
 
     #[test]
     fn model_from_aligners_stages() {
@@ -395,16 +297,11 @@ mod tests {
         let mut al = AlignersState::default();
         al.stages.push(Stage::new(0));
         al.stages.push(Stage::new(2));
-        al.stages[1].ipr.push(IprStep {
-            between: [Fdi::new(11).unwrap(), Fdi::new(21).unwrap()],
-            amount_mm: 0.2,
-        });
         let mut st = CaseState::default();
         st.set_module(dca_model::MODULE_ID, ModuleState::new(al));
         let m = TimelineModel::from_state(&st);
+        assert!(!m.is_empty());
         assert_eq!(m.last(), 2);
-        assert_eq!(m.cells.len(), 3);
-        assert!(m.cells[2].ipr && !m.cells[1].ipr);
         assert_eq!(m.week(2), 2 * m.interval_days / 7);
     }
 

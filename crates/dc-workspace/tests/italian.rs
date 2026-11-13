@@ -50,7 +50,7 @@ fn italian_import_report_and_scan_rows() {
     let path = dir.path().join("scansione.stl");
     dc_mesh::io::write(&path, &tetra(), MeshFormat::Stl).unwrap();
     let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
-    ws.activate("aligners.case.import-scans");
+    ws.select_item("aligners.case.import-scans");
     ws.import_files(vec![path]);
     assert!(ws.wait_for_jobs(std::time::Duration::from_secs(20)));
     // the sentences of the import and of the workspace are in Italian
@@ -165,7 +165,7 @@ fn no_key_of_the_workspace_is_shown_raw_in_italian() {
     let ids = dc_i18n::parity::ids(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert!(ids.len() > 150);
     let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
-    ws.activate("aligners.case.import-scans"); // loads the bundles
+    ws.select_item("aligners.case.import-scans"); // loads the bundles
     for id in &ids {
         let text = dc_i18n::tr(id);
         assert_ne!(&text, id, "{id} has no Italian text");
@@ -186,12 +186,27 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     h.state_mut()
         .select_item("aligners.diagnosis.space-analysis");
     h.run();
-    // not run yet on this case: the button and the line say so
+    // not run yet on this case: the status, the button and the line say so
+    assert!(h.query_by_label("Non ancora fatto").is_some());
+    assert!(h.query_by_label("Automatico").is_some());
     assert!(h.query_by_label("Esegui").is_some());
     assert!(
         h.query_by_label_contains("non è ancora stata eseguita")
             .is_some()
     );
+    // a function with tools: its parameters and its corrections, in Italian
+    h.state_mut()
+        .select_item("aligners.preparation.segmentation.automatic");
+    h.run();
+    for label in [
+        "Fatto",
+        "Parametri",
+        "Esegui di nuovo",
+        "Correzioni a mano",
+        "Pulisci i bordi",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
     // the keys of the tools, with the new labels
     h.get_by_label("Guida").click();
     h.run();
@@ -212,7 +227,7 @@ fn the_italian_bite_and_export_sentences_have_their_accents() {
         Some(demo_project(&["lower", "upper"])),
         None,
     );
-    ws.activate("aligners.occlusion.align");
+    ws.run_leaf("aligners.occlusion.align");
     assert!(ws.wait_for_jobs(WAIT));
     let details = ws.toast_details();
     let (key, text) = details.last().unwrap();

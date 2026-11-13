@@ -110,6 +110,21 @@ fn the_inspector_has_the_two_options_and_the_grid_of_the_arch() {
     );
     // the plugin's defaults
     assert_eq!(find_settings(&h), FindTeethSettings::default());
+    // the options are the parameters of the function; its tools are its
+    // manual corrections, in the same inspector
+    for label in [
+        "Done",
+        "Parameters",
+        "Automatic",
+        "Run again",
+        "Manual corrections",
+        "Mark a tooth",
+        "Delete a tooth",
+        "Change a tooth number",
+        "Missing tooth",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
 }
 
 #[test]
@@ -184,8 +199,13 @@ fn the_leaf_runs_with_the_options_and_leaves_the_missing_teeth_without_a_mark() 
             missing: vec![45]
         }
     );
-    // the click on the leaf: the numbering with the options, then the orientation
-    h.state_mut().activate(FIND);
+    // the selection ran nothing; the button of the inspector runs the
+    // numbering with the options, then the orientation (the demo has its
+    // marks: Run again)
+    assert!(!h.state().is_busy());
+    h.get_by_label("Run again").scroll_to_me();
+    h.run();
+    h.get_by_label("Run again").click();
     settle(&mut h);
     // the new marks dropped the colours computed from the old ones: a notice
     // in the words of the scan import says so

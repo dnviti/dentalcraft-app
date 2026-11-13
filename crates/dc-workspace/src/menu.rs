@@ -76,9 +76,8 @@ pub(crate) fn progress_of(item: &MenuItem, done: &dyn Fn(&str) -> bool) -> Optio
 /// What the user did in the menu this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MenuEvent {
-    /// A leaf was clicked: menu item id and command id.
-    Activate(&'static str, &'static str),
-    /// A group or sub-menu header was clicked (it also toggles).
+    /// A row was clicked: a group or sub-menu header (it also toggles) or a
+    /// function. A click only selects, it never runs anything.
     Select(&'static str),
 }
 
@@ -306,15 +305,10 @@ fn rows(
         },
     );
     if resp.clicked() {
-        match item.command_id() {
-            Some(cmd) => events.push(MenuEvent::Activate(item.id, cmd)),
-            None => {
-                if !view.expanded.remove(item.id) {
-                    view.expanded.insert(item.id);
-                }
-                events.push(MenuEvent::Select(item.id));
-            }
+        if has_children && !view.expanded.remove(item.id) {
+            view.expanded.insert(item.id);
         }
+        events.push(MenuEvent::Select(item.id));
     }
     if expanded {
         for child in item.children() {

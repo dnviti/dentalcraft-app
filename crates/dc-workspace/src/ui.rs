@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use dc_case::{RoleSource, ScanRole};
-use dc_module_api::{MenuItem, is_import_scans_command};
+use dc_module_api::MenuItem;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
@@ -15,10 +15,11 @@ use egui::{
     Modal, Modifiers, Panel, RichText, Role, Sense, Stroke, Ui, WidgetInfo, vec2,
 };
 
+use crate::function::caption;
 use crate::menu::{self, MenuCtx, MenuEvent};
 use crate::t;
 use crate::timeline::{self, TimelineModel};
-use crate::workspace::{Exit, Workspace, WorkspaceAction};
+use crate::workspace::{Exit, SaveStatus, Workspace, WorkspaceAction};
 
 impl Workspace {
     /// Draws the workspace for one frame in the root `Ui` of `ctx` and
@@ -32,6 +33,10 @@ impl Workspace {
     pub fn show(&mut self, ui: &mut Ui) -> WorkspaceAction {
         self.egui_ctx = Some(ui.ctx().clone());
         self.poll();
+        // the automatic save: a frame comes when it is due
+        if let Some(wait) = self.tick(ui.input(|i| i.time)) {
+            ui.ctx().request_repaint_after(wait);
+        }
         // files dropped on the window go to the import (not under a dialog)
         let dropped: Vec<PathBuf> = ui.input(|i| {
             i.raw
@@ -124,12 +129,14 @@ impl Workspace {
         if consume(Modifiers::NONE, Key::F1) {
             self.show_help = true;
         }
+        // a key of the module selects its function (and opens its tool): it
+        // never runs anything
         for (id, sc) in self.shortcuts.clone() {
             if crate::keys::is_plain(&sc) && ui.ctx().egui_wants_keyboard_input() {
                 continue;
             }
             if ui.input_mut(|i| i.consume_shortcut(&sc)) {
-                self.activate(id);
+                self.press_key(id);
             }
         }
         if ui.ctx().egui_wants_keyboard_input() {
@@ -140,7 +147,7 @@ impl Workspace {
                 // Escape in the filter field: clear it
                 self.menu_view.filter.clear();
             } else {
-                self.selected = None;
+                self.clear_selection();
             }
         }
         if consume(Modifiers::NONE, Key::Slash) {
@@ -218,17 +225,7 @@ impl Workspace {
                         .color(c.text_secondary),
                 );
             });
-            if self.is_dirty() {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    widgets::status_dot(ui, c.accent_amber);
-                    ui.label(
-                        RichText::new(t("ws-unsaved"))
-                            .font(fonts::ui(12.0))
-                            .color(c.text_secondary),
-                    );
-                });
-            }
+            self.save_status_ui(ui);
             if self.read_only {
                 widgets::badge(ui, widgets::BadgeKind::Warning, t("ws-read-only"));
             }
@@ -259,10 +256,9 @@ impl Workspace {
                     self.show_help = true;
                 }
                 widgets::divider_v(ui, 24.0);
-                let saving = self.running.iter().any(|r| r.name_key == "ws-job-save");
+                // always there: a save asked for while another runs follows it
                 if Button::primary(t("save"))
                     .icon(ic::FLOPPY_DISK)
-                    .enabled(!saving)
                     .show(ui)
                     .clicked()
                 {
@@ -290,6 +286,36 @@ impl Workspace {
         });
     }
 
+    /// The quiet line about saving, after the project name: saving, saved,
+    /// unsaved changes, or not saved (its error is on screen). Its tooltip
+    /// says whether the changes are saved by themselves.
+    fn save_status_ui(&self, ui: &mut Ui) {
+        let c = *colors(ui);
+        let (dot, key) = match self.save_status() {
+            SaveStatus::Quiet => return,
+            SaveStatus::Saving => (c.text_secondary, "ws-saving"),
+            SaveStatus::Unsaved => (c.accent_amber, "ws-unsaved"),
+            SaveStatus::Failed => (c.status_danger, "ws-not-saved"),
+            SaveStatus::Saved => (c.status_success, "ws-saved"),
+        };
+        let tip = if self.autosaves() {
+            "ws-autosave-on"
+        } else {
+            "ws-autosave-off"
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            widgets::status_dot(ui, dot);
+            ui.label(
+                RichText::new(t(key))
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+        })
+        .response
+        .on_hover_text(t(tip));
+    }
+
     // ------------------------------------------------------------ left menu
 
     fn left_panel(&mut self, ui: &mut Ui) {
@@ -309,11 +335,8 @@ impl Workspace {
         let mut view = std::mem::take(&mut self.menu_view);
         let events = menu::show(ui, &mut view, &mc);
         self.menu_view = view;
-        for e in events {
-            match e {
-                MenuEvent::Activate(_, cmd) => self.activate(cmd),
-                MenuEvent::Select(id) => self.select_item(id),
-            }
+        for MenuEvent::Select(id) in events {
+            self.select_item(id);
         }
     }
 
@@ -369,46 +392,22 @@ impl Workspace {
         egui::ScrollArea::vertical()
             .id_salt("dc-workspace-inspector-scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                self.module_ctx_run(|m, ctx| m.inspector(ui, ctx));
-                self.leaf_inspector(ui, item.as_ref());
-                if item
-                    .as_ref()
-                    .and_then(|it| it.command_id())
-                    .is_some_and(is_import_scans_command)
-                {
-                    self.import_inspector(ui);
+            .show(ui, |ui| match &item {
+                // a function: the workspace lays it out, by the menu law
+                Some(item) if item.command_id().is_some() => self.function_inspector(ui, item),
+                // a group: what the module says of it
+                Some(_) => self.module_ctx_run(|m, ctx| m.inspector(ui, ctx)),
+                None => {
+                    ui.heading(t(self.module.name_key()));
+                    ui.label(t("ws-inspector-select"));
                 }
             });
     }
 
-    /// The part of the inspector the workspace adds under the module's text
-    /// when "Import scans" is selected: the role of the next import and the
-    /// scans of the case, each with how its role was decided and a control
-    /// to change it.
-    fn import_inspector(&mut self, ui: &mut Ui) {
-        let c = *colors(ui);
-        ui.add_space(12.0);
-        widgets::hairline(ui);
-        ui.add_space(12.0);
-
-        let heading = |ui: &mut Ui, key: &str| {
-            ui.label(
-                RichText::new(t(key))
-                    .font(fonts::semibold(13.0))
-                    .color(c.text_primary),
-            );
-        };
-        let caption = |ui: &mut Ui, text: String| {
-            ui.label(
-                RichText::new(text)
-                    .font(fonts::ui(12.0))
-                    .color(c.text_secondary),
-            );
-        };
-
-        // role of the next import
-        heading(ui, "ws-import-role-title");
+    /// The parameters of "Import scans": the role of the next import (it
+    /// applies to the next file dialog or drop, then goes back to auto).
+    pub(crate) fn import_role_params(&mut self, ui: &mut Ui) {
+        sub_heading(ui, "ws-import-role-title");
         caption(ui, t("ws-import-role-hint"));
         ui.add_space(6.0);
         let choices = [
@@ -430,10 +429,13 @@ impl Workspace {
         if widgets::segmented_fill(ui, &mut idx, &labels, 32.0).changed() {
             self.import_role = choices[idx];
         }
-        ui.add_space(16.0);
+    }
 
-        // the scans of the case
-        heading(ui, "ws-import-scans-title");
+    /// The manual corrections of "Import scans": the scans of the case, each
+    /// with how its role was decided and a control to change it.
+    pub(crate) fn import_scan_list(&mut self, ui: &mut Ui) {
+        let c = *colors(ui);
+        sub_heading(ui, "ws-import-scans-title");
         ui.add_space(6.0);
         let scans: Vec<_> = self
             .undo
@@ -706,6 +708,16 @@ impl Workspace {
             }
         }
     }
+}
+
+/// A heading inside a section of the inspector.
+fn sub_heading(ui: &mut Ui, key: &str) {
+    let c = *colors(ui);
+    ui.label(
+        RichText::new(t(key))
+            .font(fonts::semibold(13.0))
+            .color(c.text_primary),
+    );
 }
 
 /// Translated name of a scan role.

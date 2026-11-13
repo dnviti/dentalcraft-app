@@ -1,7 +1,7 @@
 //! The leaf "Separate teeth and gum" in the workspace, driven the way a user
 //! does (egui_kittest, no GPU) on the demo arch: the result line and the
-//! toast of a run, what a new run leaves out of date, and the separation
-//! parameters of the inspector, settings of the case.
+//! toast of a run, what a new run leaves out of date, the separation
+//! parameters of the inspector, settings of the case, and its tools.
 
 use std::time::Duration;
 
@@ -115,13 +115,26 @@ fn a_run_on_the_demo_shows_its_result_line_and_toast_and_the_scan() {
         h.query_by_label_contains("It starts from the tooth marks")
             .is_some()
     );
-    // the parameters are folded
-    assert!(h.query_by_label("Separation parameters").is_some());
-    assert!(h.query_by_label("Scan detail (faces)").is_none());
+    // the parameters are in sight, then the run button and the tools
+    assert!(h.query_by_label("Parameters").is_some());
+    assert!(
+        h.query_by_role_and_label(Role::Slider, "Scan detail (faces)")
+            .is_some()
+    );
+    assert!(h.query_by_label("Not done yet").is_some());
     assert!(h.query_by_label("Run").is_some());
+    for label in ["Manual corrections", "Tooth brush", "Clean borders"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
     assert!(h.state().teeth_shown(), "3D teeth by default");
+    assert!(!h.state().is_busy(), "the selection runs nothing");
 
-    h.state_mut().activate(SEGMENT);
+    // the click starts the job; the next frame shows it in the status bar
+    h.get_by_label("Run").scroll_to_me();
+    h.run();
+    h.get_by_label("Run").click();
+    h.step();
+    assert!(h.state().is_busy());
     h.step();
     // the status bar names the job
     assert!(
@@ -158,7 +171,7 @@ fn the_result_line_is_kept_in_the_project_and_goes_with_the_colours_on_undo() {
     al.labels.clear();
     state.set_module(MODULE_ID, ModuleState::new(al));
     let mut h = harness(project(state));
-    h.state_mut().activate(SEGMENT);
+    h.state_mut().run_leaf(SEGMENT);
     settle(&mut h);
     let detail = detail_of(&h, "ws-toast-seg-done").expect("the success toast");
     assert!(h.query_by_label(&detail).is_some(), "{detail}");
@@ -208,7 +221,9 @@ fn a_new_run_after_the_3d_teeth_drops_their_tick_and_says_they_are_out_of_date()
         |h: &Harness<'static, Workspace>| h.state().module().leaf_done(h.state().state(), BUILD);
     assert!(done(&h));
 
-    h.state_mut().activate(SEGMENT);
+    h.get_by_label("Run again").scroll_to_me();
+    h.run();
+    h.get_by_label("Run again").click();
     settle(&mut h);
     assert!(!done(&h), "the tick of 3D teeth is removed");
     let detail = detail_of(&h, "ws-toast-marks-outdated").expect("the out of date notice");
@@ -229,8 +244,6 @@ fn a_new_run_after_the_3d_teeth_drops_their_tick_and_says_they_are_out_of_date()
 fn a_parameter_is_a_setting_of_the_case_one_undo_step_kept_in_the_project() {
     let mut h = harness(project(demo_state(&["lower"])));
     assert_eq!(seg_settings(&h), SegmentationSettings::default());
-    h.get_by_label("Separation parameters").click();
-    h.run();
     for label in [
         "Scan detail (faces)",
         "Tooth edge sensitivity",

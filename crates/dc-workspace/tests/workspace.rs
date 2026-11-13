@@ -52,6 +52,14 @@ fn settle(h: &mut Harness<'static, App>) {
     h.run();
 }
 
+/// Clicks the widget labelled `label`, scrolled into view first: the
+/// inspector of a function can be longer than the window.
+fn click_in_view(h: &mut Harness<'static, App>, label: &str) {
+    h.get_by_label(label).scroll_to_me();
+    h.run();
+    h.get_by_label(label).click();
+}
+
 fn module() -> Box<dyn Module> {
     Box::new(AlignersModule::new())
 }
@@ -258,17 +266,20 @@ fn menu_search_filters() {
     // `/` focuses the filter, typing filters the tree
     h.key_press(Key::Slash);
     h.run();
-    h.event(egui::Event::Text("brush".into()));
+    h.event(egui::Event::Text("gum".into()));
     h.run();
-    assert_eq!(h.state().ws.filter(), "brush");
+    assert_eq!(h.state().ws.filter(), "gum");
     assert!(h.query_by_label("Run everything automatically").is_none());
-    assert!(h.query_by_label("Tooth brush").is_some());
-    assert!(h.query_by_label("Manual corrections").is_some());
+    assert!(h.query_by_label("Separate teeth and gum").is_some());
     assert!(h.query_by_label("Teeth").is_some());
     // Escape clears the filter
     h.key_press(Key::Escape);
     h.run();
     assert_eq!(h.state().ws.filter(), "");
+    // the manual tools are not entries of the menu
+    h.state_mut().ws.set_filter("brush");
+    h.run();
+    assert!(h.query_by_label("No tool matches the search.").is_some());
     // nothing matches
     h.state_mut().ws.set_filter("zzz-nothing");
     h.run();
@@ -284,79 +295,179 @@ fn menu_search_filters() {
     );
 }
 
+/// A tool of a function: the label of its button, its command and the label
+/// of one of its controls.
+type ToolRow = (&'static str, &'static str, &'static str);
+
+/// The functions with manual corrections and their tools.
+const TOOLS: [(&str, &[ToolRow]); 4] = [
+    (
+        "aligners.teeth.find",
+        &[
+            (
+                "Mark a tooth",
+                "aligners.preparation.numbering.place-seeds",
+                "Number the teeth in order",
+            ),
+            (
+                "Delete a tooth",
+                "aligners.preparation.numbering.delete-seed",
+                "Click a tooth number, a tooth mark or the tooth on the scan to delete its mark. The tooth is not marked missing.",
+            ),
+            (
+                "Change a tooth number",
+                "aligners.preparation.numbering.renumber",
+                "New number",
+            ),
+            (
+                "Missing tooth",
+                "aligners.preparation.numbering.mark-missing",
+                "The tooth is missing",
+            ),
+        ],
+    ),
+    (
+        "aligners.preparation.segmentation.automatic",
+        &[
+            (
+                "Tooth brush",
+                "aligners.preparation.segmentation.manual-brush",
+                "Radius",
+            ),
+            (
+                "Clean borders",
+                "aligners.preparation.segmentation.clean-borders",
+                "Smoothing rings",
+            ),
+        ],
+    ),
+    (
+        "aligners.teeth.build",
+        &[(
+            "Rebuild a tooth",
+            "aligners.manual.rebuild-tooth",
+            "Find the region again from the tooth mark",
+        )],
+    ),
+    (
+        "aligners.planning.setup.automatic",
+        &[("Move a tooth", "aligners.planning.movements", "Mesial")],
+    ),
+];
+
 #[test]
-fn the_corrections_stay_closed_until_opened() {
-    let mut h = harness(Workspace::new_headless(module(), None, None));
+fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.run();
+    // the inspector is the panel on the right
+    let inspector = 1920.0 - 360.0;
+    for (function, tools) in TOOLS {
+        h.state_mut().ws.select_item(function);
+        h.run();
+        assert!(
+            h.query_by_label("Manual corrections").is_some(),
+            "{function}"
+        );
+        for (button, command, control) in tools {
+            assert!(h.query_by_label(control).is_none(), "{control} before");
+            let r = h.get_by_label(button).rect();
+            assert!(r.min.x >= inspector, "{button}: {r:?}");
+            click_in_view(&mut h, button);
+            h.run();
+            let ws = &h.state().ws;
+            assert_eq!(ws.active_tool(), Some(*command), "{button}");
+            assert_eq!(ws.selected(), Some(function), "{button}");
+            assert!(!ws.is_busy(), "opening {button} ran something");
+            // its controls are in the inspector, not over the viewport
+            let r = h.get_by_label(control).rect();
+            assert!(r.min.x >= inspector, "{control}: {r:?}");
+        }
+        // a second click on the open tool closes it
+        let (last, ..) = tools[tools.len() - 1];
+        click_in_view(&mut h, last);
+        h.run();
+        assert_eq!(h.state().ws.active_tool(), None, "{last}");
+    }
+    // a function without tools has no such section
+    h.state_mut().ws.select_item("aligners.occlusion.align");
     h.run();
     assert!(h.query_by_label("Manual corrections").is_none());
-    h.get_by_label("Teeth").click();
-    settle(&mut h);
-    assert!(h.query_by_label("Find the teeth").is_some());
-    assert!(h.query_by_label("Manual corrections").is_some());
-    assert!(h.query_by_label("Tooth brush").is_none());
-    h.get_by_label("Manual corrections").click();
-    settle(&mut h);
-    assert!(h.query_by_label("Tooth brush").is_some());
+    let ws = &h.state().ws;
+    assert_eq!(ws.dialog_requests(), 0);
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
 }
 
 #[test]
-fn a_leaf_that_needs_an_answer_asks_for_it_and_runs_nothing_before() {
-    // headless: the dialog is counted, not shown; the click selects the leaf
+fn a_leaf_that_needs_an_answer_asks_for_it_only_from_its_button() {
+    // headless: the dialog is counted, not shown
     let mut ws = Workspace::new_headless(module(), None, None);
     for (n, id) in ["aligners.output.export-all", "aligners.followup.visits"]
         .into_iter()
         .enumerate()
     {
-        ws.activate(id);
+        // the selection asks for nothing
+        ws.select_item(id);
         assert_eq!(ws.selected(), Some(id));
+        assert_eq!(ws.dialog_requests(), n, "{id}");
+        // the button of its inspector asks, and runs nothing before the answer
+        ws.run_leaf(id);
         assert!(!ws.is_busy(), "{id}");
         assert_eq!(ws.dialog_requests(), n + 1, "{id}");
     }
     assert!(ws.toast_keys().is_empty());
 }
 
+/// The menu law: selecting a function, done or not, only shows its
+/// inspector. No command, no dialog, no tool, no notice; the case is as it
+/// was.
 #[test]
-fn every_leaf_can_be_activated() {
-    let mut ws = Workspace::new_headless(module(), None, None);
-    let leaves = ws.module().menu().command_ids();
-    assert_eq!(leaves.len(), 19);
-    for id in &leaves {
-        assert!(dca_module::commands::is_registered(id), "{id}");
-        ws.activate(id);
-        assert_eq!(ws.selected(), Some(*id));
+fn selecting_any_function_runs_nothing_done_or_not() {
+    for (project, done_at_least) in [(None, 0), (Some(demo_project(&["lower", "upper"])), 3)] {
+        let mut ws = Workspace::new_headless(module(), project, None);
+        let before = Arc::clone(ws.state());
+        let leaves = ws.module().menu().command_ids();
+        assert_eq!(leaves.len(), 13);
+        let mut done = 0;
+        for id in leaves {
+            assert!(dca_module::commands::is_registered(id), "{id}");
+            done += usize::from(ws.module().leaf_done(ws.state(), id));
+            ws.select_item(id);
+            assert_eq!(ws.selected(), Some(id));
+            assert!(!ws.is_busy(), "{id} ran");
+            assert_eq!(ws.dialog_requests(), 0, "{id} asked for a file");
+            assert_eq!(ws.active_tool(), None, "{id} opened a tool");
+            assert!(ws.toast_keys().is_empty(), "{id}: {:?}", ws.toast_keys());
+        }
+        assert!(done >= done_at_least, "{done} done");
+        assert!(ws.wait_for_jobs(Duration::ZERO), "a job runs");
+        assert!(Arc::ptr_eq(ws.state(), &before), "the case changed");
     }
-    // nothing is a placeholder: a leaf runs its command as a job (the next
-    // ones find the workspace busy), a manual tool opens its panel and the
-    // import asks for its files
-    let keys = ws.toast_keys();
-    assert!(
-        keys.iter()
-            .all(|k| k == "ws-toast-busy" || k == "ws-toast-auto-long"),
-        "{keys:?}"
-    );
-    assert!(keys.iter().any(|k| k == "ws-toast-busy"), "{keys:?}");
-    // the import asks for its files; the pipeline then runs, and the leaves
-    // after it find the workspace busy before they ask for anything
-    assert_eq!(ws.dialog_requests(), 1);
-    assert!(ws.wait_for_jobs(WAIT));
 }
 
 #[test]
-fn clicking_every_row_does_not_panic() {
-    let mut ws = Workspace::new_headless(module(), None, None);
+fn a_click_on_any_row_only_selects_it() {
+    // the demo has steps done and steps to do
+    let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
     ws.expand_all();
+    let before = Arc::clone(ws.state());
     let mut h = harness(ws);
     h.run();
     let n = h.get_all_by_role(Role::TreeItem).count();
-    assert_eq!(n, 19 + 7, "the leaves, the groups and the corrections");
+    assert_eq!(n, 13 + 6, "the functions and their groups, nothing else");
     // bottom-up: collapsing a group only removes rows below it
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
         nodes[i].click();
-        settle(&mut h);
+        h.run();
+        let ws = &h.state().ws;
+        assert!(ws.selected().is_some());
+        assert!(!ws.is_busy(), "{:?} ran", ws.selected());
+        assert_eq!(ws.dialog_requests(), 0, "{:?}", ws.selected());
+        assert_eq!(ws.active_tool(), None, "{:?}", ws.selected());
+        assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
     }
-    assert!(h.state().ws.dialog_requests() >= 1);
-    assert!(!h.state().ws.toast_keys().is_empty());
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
     // view toolbar, timeline and inspector buttons
     for label in [
         "Front",
@@ -403,30 +514,45 @@ fn menu_clicks_select_in_the_module() {
 }
 
 #[test]
-fn module_shortcuts_run_their_command() {
+fn module_shortcuts_select_and_never_run() {
     let (m, log) = spy();
     let mut h = harness(Workspace::new_headless(m, None, None));
     h.run();
     h.key_press(Key::S);
-    settle(&mut h);
+    h.run();
     assert_eq!(h.state().ws.selected(), Some("aligners.planning.aligners"));
     assert_eq!(
         log.lock().unwrap().last().map(String::as_str),
         Some("aligners.planning.aligners")
     );
+    assert!(!h.state().ws.is_busy(), "S ran the aligners");
     h.key_press(Key::A);
-    settle(&mut h);
+    h.run();
     assert_eq!(
         h.state().ws.selected(),
         Some("aligners.preparation.segmentation.automatic")
     );
-    // a registered command runs and fails on the empty case
-    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
-    let keys = h.state().ws.toast_keys();
-    assert!(
-        keys.iter().any(|k| k == "ws-toast-command-failed"),
-        "{keys:?}"
+    assert!(!h.state().ws.is_busy(), "A ran the separation");
+    assert_eq!(h.state().ws.active_tool(), None);
+    // B: the same function, with its brush open
+    h.key_press(Key::S);
+    h.run();
+    h.key_press(Key::B);
+    h.run();
+    let ws = &h.state().ws;
+    assert_eq!(
+        ws.selected(),
+        Some("aligners.preparation.segmentation.automatic")
     );
+    assert_eq!(
+        ws.active_tool(),
+        Some("aligners.preparation.segmentation.manual-brush")
+    );
+    assert!(!ws.is_busy());
+    // nothing ran, nothing was asked
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert_eq!(ws.dialog_requests(), 0);
+    assert!(h.query_by_label("Radius").is_some(), "the brush controls");
 }
 
 #[test]
@@ -653,10 +779,12 @@ impl egui::DroppedFile for Dropped {
 }
 
 #[test]
-fn import_leaf_asks_for_files_and_queues_nothing() {
+fn import_leaf_asks_for_files_only_from_its_button_and_queues_nothing() {
     let mut ws = Workspace::new_headless(module(), None, None);
-    ws.activate(IMPORT_ID);
+    ws.select_item(IMPORT_ID);
     assert_eq!(ws.selected(), Some(IMPORT_ID));
+    assert_eq!(ws.dialog_requests(), 0, "the selection asks for nothing");
+    ws.run_leaf(IMPORT_ID);
     assert_eq!(ws.dialog_requests(), 1);
     assert!(!ws.is_busy(), "no command was queued");
     assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
@@ -857,7 +985,7 @@ fn the_role_choice_reaches_the_command_and_resets() {
     let a = write_stl(dir.path(), "scan1.stl", &scan_mesh(40.0));
     let b = write_stl(dir.path(), "scan2.stl", &scan_mesh(41.0));
     let mut h = harness(Workspace::new_headless(module(), None, None));
-    h.state_mut().ws.activate(IMPORT_ID);
+    h.state_mut().ws.select_item(IMPORT_ID);
     h.run();
     assert_eq!(h.state().ws.import_role(), None);
     // the control in the inspector
@@ -897,7 +1025,7 @@ fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
     let dir = tempfile::tempdir().unwrap();
     let a = write_stl(dir.path(), "scanA.stl", &scan_mesh(40.0));
     let mut h = harness(Workspace::new_headless(module(), None, None));
-    h.state_mut().ws.activate(IMPORT_ID);
+    h.state_mut().ws.select_item(IMPORT_ID);
     h.state_mut().ws.import_files(vec![a]);
     settle(&mut h);
     assert_eq!(h.state().ws.state().case.scans[0].role, ScanRole::Lower);
@@ -932,7 +1060,7 @@ fn changing_a_role_in_the_inspector_is_undoable() {
     let dir = tempfile::tempdir().unwrap();
     let a = write_stl(dir.path(), "scanA.stl", &scan_mesh(40.0));
     let mut h = harness(Workspace::new_headless(module(), None, None));
-    h.state_mut().ws.activate(IMPORT_ID);
+    h.state_mut().ws.select_item(IMPORT_ID);
     h.state_mut().ws.import_files(vec![a]);
     settle(&mut h);
     let id = h.state().ws.state().case.scans[0].id;
@@ -1201,7 +1329,7 @@ fn a_project_reopened_shows_the_ticks_of_what_it_holds() {
 fn run_everything_fills_the_steps_stops_on_a_guess_and_leads_to_the_analysis() {
     // both arches from the demo, then the whole pipeline from the menu
     let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower", "upper"])), None);
-    ws.activate("aligners.auto");
+    ws.run_leaf("aligners.auto");
     assert!(
         ws.toast_keys().contains(&"ws-toast-auto-long".to_owned()),
         "it says it takes a while"
@@ -1238,7 +1366,7 @@ fn run_everything_stops_with_a_clear_message_on_a_guessed_arch() {
     let blob = project.case_state.blobs.insert(tetra(40.0));
     project.case_state.case.scans[0].mesh = blob;
     let mut ws = Workspace::new_headless(module(), Some(project), None);
-    ws.activate("aligners.auto");
+    ws.run_leaf("aligners.auto");
     assert!(ws.wait_for_jobs(WAIT));
     assert!(!ws.toast_keys().contains(&"ws-toast-auto-done".to_owned()));
     let details = ws.toast_details();
@@ -1338,22 +1466,31 @@ fn the_shortcut_list_names_the_leaves_in_key_order() {
 
 // ---- the numbering in order (seed tool) ---------------------------------------------------
 
+/// Selects Find the teeth and opens its tool "Mark a tooth", as a user does.
+fn open_the_seed_tool(h: &mut Harness<'static, App>) {
+    h.state_mut().ws.select_item("aligners.teeth.find");
+    h.run();
+    click_in_view(h, "Mark a tooth");
+    h.run();
+    assert_eq!(
+        h.state().ws.active_tool(),
+        Some("aligners.preparation.numbering.place-seeds")
+    );
+}
+
 #[test]
 fn the_numbering_in_order_is_driven_from_the_panel_and_the_keys() {
     let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
     let mut h = harness(ws);
     h.run();
-    h.state_mut()
-        .ws
-        .activate("aligners.preparation.numbering.place-seeds");
-    h.run();
+    open_the_seed_tool(&mut h);
     assert!(h.query_by_label("Number the teeth in order").is_some());
     let marks = aligners(&h.state().ws).seeds.len();
     assert!(marks > 0);
 
     // clear all the tooth marks from the panel: one undoable command
     let colours = aligners(&h.state().ws).labels;
-    h.get_by_label("Clear all the tooth marks").click();
+    click_in_view(&mut h, "Clear all the tooth marks");
     settle(&mut h);
     assert!(aligners(&h.state().ws).seeds.is_empty());
     assert!(
@@ -1375,7 +1512,7 @@ fn the_numbering_in_order_is_driven_from_the_panel_and_the_keys() {
     );
 
     // the numbering asks for the right distal tooth of the lower arch first
-    h.get_by_label("Number the teeth in order").click();
+    click_in_view(&mut h, "Number the teeth in order");
     h.run();
     assert!(h.query_by_label("Click tooth 47").is_some());
     // S skips the tooth: the next one is 46
@@ -1412,7 +1549,7 @@ fn the_numbering_in_order_is_driven_from_the_panel_and_the_keys() {
     assert_eq!(aligners(&h.state().ws).seeds.len(), marks);
 
     // Esc is done too
-    h.get_by_label("Number the teeth in order").click();
+    click_in_view(&mut h, "Number the teeth in order");
     h.run();
     h.key_press(Key::Escape);
     h.run();
@@ -1432,14 +1569,11 @@ fn the_numbering_in_order_stops_when_the_case_changes_and_follows_the_third_mola
     let ws = Workspace::new_headless(module(), Some(project), None);
     let mut h = harness(ws);
     h.run();
-    h.state_mut()
-        .ws
-        .activate("aligners.preparation.numbering.place-seeds");
-    h.run();
-    h.get_by_label("Clear all the tooth marks").click();
+    open_the_seed_tool(&mut h);
+    click_in_view(&mut h, "Clear all the tooth marks");
     settle(&mut h);
     // the box of the panel starts from the setting: the numbering starts at 48
-    h.get_by_label("Number the teeth in order").click();
+    click_in_view(&mut h, "Number the teeth in order");
     h.run();
     assert!(h.query_by_label("Click tooth 48").is_some());
     h.key_press(Key::S);

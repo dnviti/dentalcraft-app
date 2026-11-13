@@ -18,6 +18,7 @@ use egui::KeyboardShortcut;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::autosave::{self, Autosave};
 use crate::menu::MenuView;
 use crate::timeline::TimelineState;
 use crate::view::ViewState;
@@ -31,10 +32,13 @@ pub enum WorkspaceAction {
     None,
     /// Go back to Home (the user confirmed or there was nothing to save).
     GoHome,
-    /// The project was saved to this path.
+    /// The project was saved to this path (by the user or by itself).
     Saved(PathBuf),
     /// The project was closed.
     Closed,
+    /// The window may close (after [`Workspace::request_quit`]): the case is
+    /// saved, or the user chose not to save it.
+    Quit,
 }
 
 /// Where the user wants to go once the unsaved changes are dealt with.
@@ -42,6 +46,7 @@ pub enum WorkspaceAction {
 pub(crate) enum Exit {
     Home,
     Close,
+    Quit,
 }
 
 impl Exit {
@@ -49,8 +54,25 @@ impl Exit {
         match self {
             Exit::Home => WorkspaceAction::GoHome,
             Exit::Close => WorkspaceAction::Closed,
+            Exit::Quit => WorkspaceAction::Quit,
         }
     }
+}
+
+/// What the top bar says about saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveStatus {
+    /// Nothing to say: a new case never saved and not changed, or a file
+    /// opened read-only (its badge says it).
+    Quiet,
+    /// A save runs.
+    Saving,
+    /// The case changed since it was last saved.
+    Unsaved,
+    /// The last save of the case as it is failed (the error was shown).
+    Failed,
+    /// The file holds the case as it is.
+    Saved,
 }
 
 /// A notification on screen.
@@ -132,7 +154,18 @@ pub(crate) struct SaveTask {
     state: Arc<CaseState>,
     manifest: Manifest,
     then: Option<Exit>,
+    /// Asked for by the user (Save, Save as, leaving); `false`: the
+    /// automatic save, which says nothing when it works.
+    explicit: bool,
     handle: JobHandle<Result<(), String>>,
+}
+
+/// A save asked for while another one runs: one save at a time, so it
+/// starts when that one ends.
+struct SaveRequest {
+    path: PathBuf,
+    then: Option<Exit>,
+    explicit: bool,
 }
 
 /// A background job shown in the status bar.
@@ -201,7 +234,14 @@ pub struct Workspace {
     pub(crate) shortcuts: Vec<(&'static str, KeyboardShortcut)>,
     pub(crate) shortcut_text: HashMap<&'static str, String>,
     pub(crate) undo: UndoStack,
+    /// The state the file holds (as saved or opened).
     saved: Arc<CaseState>,
+    /// The timer of the automatic save ([`Workspace::tick`]).
+    autosave: Autosave,
+    /// A save asked for while another one runs.
+    queued_save: Option<SaveRequest>,
+    /// Where to go once the save that runs ends (nothing else to save).
+    leave_after_save: Option<Exit>,
     pub(crate) history: StepHistory,
     history_json: Value,
     manifest: Option<Manifest>,
@@ -217,7 +257,7 @@ pub struct Workspace {
     pub(crate) egui_ctx: Option<egui::Context>,
     pub(crate) view: ViewState,
     pub(crate) manual: crate::manual::Manual,
-    /// The inspector of "Separate teeth and gum": its last run and slider.
+    /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
     pub(crate) menu_view: MenuView,
     pub(crate) selected: Option<&'static str>,
@@ -308,6 +348,9 @@ impl Workspace {
             shortcut_text,
             undo: UndoStack::new(state.clone(), UndoStack::DEFAULT_BUDGET),
             saved: state,
+            autosave: Autosave::default(),
+            queued_save: None,
+            leave_after_save: None,
             history,
             history_json,
             manifest,
@@ -355,6 +398,34 @@ impl Workspace {
     /// `true` when the case differs from the saved (or opened) version.
     pub fn is_dirty(&self) -> bool {
         !Arc::ptr_eq(self.undo.current(), &self.saved)
+    }
+
+    /// `true` when the changes are saved by themselves ([`Workspace::tick`]):
+    /// the project has a file and was not opened read-only.
+    pub fn autosaves(&self) -> bool {
+        self.path.is_some() && !self.read_only
+    }
+
+    /// `true` while a save runs (asked for, or the automatic one).
+    pub fn is_saving(&self) -> bool {
+        self.running.iter().any(|r| matches!(r.task, Task::Save(_)))
+    }
+
+    /// What the top bar says about saving.
+    pub(crate) fn save_status(&self) -> SaveStatus {
+        if self.is_saving() {
+            SaveStatus::Saving
+        } else if self.is_dirty() {
+            if self.autosave.failed_on(self.undo.current()) {
+                SaveStatus::Failed
+            } else {
+                SaveStatus::Unsaved
+            }
+        } else if self.autosaves() {
+            SaveStatus::Saved
+        } else {
+            SaveStatus::Quiet
+        }
     }
 
     /// Marks the project as read-only (opened from a damaged or newer
@@ -472,43 +543,75 @@ impl Workspace {
             .any(|r| !matches!(r.task, Task::Save(_)))
     }
 
-    /// Selects menu row `id` (a group, sub-menu or command) and tells the
-    /// module.
+    /// Selects menu row `id` (a group, sub-menu or function), shows it in the
+    /// menu and tells the module. It never runs anything (the menu law, see
+    /// `function`): the inspector of a function has the button that runs it.
+    /// The tool of another function closes.
     pub fn select_item(&mut self, id: &'static str) {
+        let command = self.menu.find(id).and_then(|i| i.command_id());
+        if let Some(tool) = self.manual.tool
+            && crate::function::owner(tool) != command
+        {
+            self.close_tool();
+        }
         self.selected = Some(id);
         self.module.select(id);
+        self.menu_view.reveal(&self.menu, id);
     }
 
-    /// Runs menu command `command_id`: "Import scans" entries open the file
-    /// dialog (handled by the workspace), and so do the leaves that need a
-    /// folder or a file ([`LeafInput`]); everything else goes to the module,
-    /// whose commands run in the background (the output of the ones that have
-    /// something to say is shown) and whose toasts are shown.
-    pub fn activate(&mut self, command_id: &str) {
-        let mut input = None;
-        let mut leaf_id = None;
-        if let Some((id, cmd, i)) = self
+    /// Selects the leaf of the menu that runs `command_id`; `false` when the
+    /// menu has none.
+    pub(crate) fn select_command(&mut self, command_id: &str) -> bool {
+        let id = self
             .menu
             .iter()
             .map(|(_, i)| i)
             .find(|i| i.command_id() == Some(command_id))
-            .and_then(|i| Some((i.id, i.command_id()?, i.input)))
-        {
-            self.select_item(id);
-            self.menu_view.reveal(&self.menu, id);
-            input = i;
-            leaf_id = Some(cmd);
+            .map(|i| i.id);
+        match id {
+            Some(id) => {
+                self.select_item(id);
+                true
+            }
+            None => false,
         }
-        // a manual tool opens its panel and works on the pointer; its command runs from there
-        if let Some(tool) = crate::manual::Tool::from_command(command_id)
-            && self
-                .commands
-                .iter()
-                .any(|c| c.id == command_id && c.status == MenuStatus::Ready)
-        {
-            self.open_manual_tool(tool);
-            return;
+    }
+
+    /// Nothing selected (Escape): the inspector shows the overview and the
+    /// open tool closes.
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected = None;
+        self.close_tool();
+    }
+
+    /// The key of a command of the module ([`CommandDesc::shortcut`]): it
+    /// selects its function, and the key of a tool also opens that tool in
+    /// it. It never runs anything.
+    pub(crate) fn press_key(&mut self, command_id: &'static str) {
+        match crate::manual::Tool::from_command(command_id) {
+            Some(tool) => {
+                self.open_tool(tool);
+            }
+            None => {
+                self.select_command(command_id);
+            }
         }
+    }
+
+    /// The command of the manual tool that is open, if any.
+    pub fn active_tool(&self) -> Option<&'static str> {
+        self.manual.tool.map(crate::manual::Tool::command_id)
+    }
+
+    /// Runs the function `command_id` of the menu, as the button of its
+    /// inspector does (a click on the menu only selects it): "Import scans"
+    /// opens the file dialog (handled by the workspace), and so do the leaves
+    /// that need a folder or a file ([`LeafInput`]), which run with the
+    /// answer; everything else goes to the module, whose commands run in the
+    /// background (the output of the ones that have something to say is
+    /// shown) and whose toasts are shown. While a command runs it only shows
+    /// the "busy" notice.
+    pub fn run_leaf(&mut self, command_id: &str) {
         // the import needs its files: the workspace asks for them and runs the
         // shared import command, so the module is not invoked
         if is_import_scans_command(command_id) {
@@ -519,9 +622,15 @@ impl Workspace {
             }
             return;
         }
+        let item = self
+            .menu
+            .iter()
+            .map(|(_, i)| i)
+            .find(|i| i.command_id() == Some(command_id))
+            .and_then(|i| Some((i.command_id()?, i.input)));
         // a leaf that needs a folder or a file: ask, then run the command with
         // the answer
-        if let (Some(input), Some(id)) = (input, leaf_id)
+        if let Some((id, Some(input))) = item
             && self
                 .commands
                 .iter()
@@ -542,7 +651,7 @@ impl Workspace {
             self.toast(toast);
         }
         // a leaf's one command runs as a spec, to read its output
-        let spec = leaf_id.filter(|_| cmds.len() == 1).and_then(|id| {
+        let spec = item.filter(|_| cmds.len() == 1).and_then(|(id, _)| {
             self.specs
                 .iter()
                 .copied()
@@ -552,7 +661,7 @@ impl Workspace {
         match spec {
             Some((id, spec)) => {
                 let params = leaf::run_params(id, &state);
-                self.run_leaf(id, spec, params);
+                self.spawn_leaf(id, spec, params);
             }
             None => {
                 for cmd in cmds {
@@ -601,13 +710,13 @@ impl Workspace {
         };
         let (LeafInput::Folder { param } | LeafInput::ScanFile { param }) = input;
         let params = json!({ param: path.to_string_lossy() });
-        self.run_leaf(id, spec, params);
+        self.spawn_leaf(id, spec, params);
     }
 
-    /// Runs the command of menu leaf `id` as a job and shows its output when
-    /// it ends ([`leaf::report`]). The caller has checked that it is idle
-    /// (here too: busy gets the notification).
-    fn run_leaf(&mut self, id: &'static str, spec: CommandSpec, params: Value) {
+    /// Starts the command of menu leaf `id` as a job and shows its output
+    /// when it ends ([`leaf::report`]). The caller has checked that it is
+    /// idle (here too: busy gets the notification).
+    fn spawn_leaf(&mut self, id: &'static str, spec: CommandSpec, params: Value) {
         if self.command_running() {
             self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
             return;
@@ -766,6 +875,7 @@ impl Workspace {
     }
 
     /// Saves to the current path, or asks for one (also when read-only).
+    /// While another save runs it starts when that one ends.
     pub fn save(&mut self) {
         self.save_then(None);
     }
@@ -777,26 +887,46 @@ impl Workspace {
 
     pub(crate) fn save_then(&mut self, then: Option<Exit>) {
         match self.path.clone() {
-            Some(p) if !self.read_only => self.save_to_then(p, then),
+            Some(p) if !self.read_only => self.save_to_then(p, then, true),
             _ => self.request_save_dialog(then),
         }
     }
 
     /// Saves to `path` in the background (`.dcprj` added when missing).
+    /// While another save runs it starts when that one ends.
     pub fn save_to(&mut self, path: PathBuf) {
-        self.save_to_then(path, None);
+        self.save_to_then(path, None, true);
     }
 
-    fn save_to_then(&mut self, path: PathBuf, then: Option<Exit>) {
-        if self.running.iter().any(|r| matches!(r.task, Task::Save(_))) {
-            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+    /// Saves the case as it is now to `path`, then goes to `then`. One save
+    /// runs at a time: a save asked for while another runs joins it when
+    /// that one writes this same case to the same file, else it starts when
+    /// that one ends (and saves the case as it is then).
+    fn save_to_then(&mut self, path: PathBuf, then: Option<Exit>, explicit: bool) {
+        let path = project::with_extension(path);
+        let current = Arc::clone(self.undo.current());
+        let queued = self.queued_save.is_some();
+        let running = self.running.iter_mut().find_map(|r| match &mut r.task {
+            Task::Save(s) => Some(s),
+            _ => None,
+        });
+        if let Some(task) = running {
+            if !queued && task.path == path && Arc::ptr_eq(&task.state, &current) {
+                task.then = task.then.or(then);
+                task.explicit |= explicit;
+            } else {
+                let q = self.queued_save.take();
+                self.queued_save = Some(SaveRequest {
+                    path,
+                    then: then.or(q.as_ref().and_then(|q| q.then)),
+                    explicit: explicit || q.is_some_and(|q| q.explicit),
+                });
+            }
             return;
         }
-        let path = project::with_extension(path);
-        let state = self.undo.current().clone();
         let proj = project::build(
             self.manifest.as_ref(),
-            &state,
+            &current,
             &self.history_json,
             self.thumbnail.as_ref(),
         );
@@ -810,26 +940,92 @@ impl Workspace {
             name_key: "ws-job-save",
             task: Task::Save(Box::new(SaveTask {
                 path,
-                state,
+                state: current,
                 manifest,
                 then,
+                explicit,
                 handle,
             })),
         });
     }
 
-    /// Leaves towards `exit`, asking first when there are unsaved changes.
+    /// The automatic save, called every frame ([`Workspace::show`] does)
+    /// with the time `now` in seconds, on any clock that only goes forward.
+    ///
+    /// A project that has a file and was not opened read-only is saved by
+    /// itself once the case has not changed for [`autosave::DELAY_S`]
+    /// seconds (each change starts the timer again). It waits while a job
+    /// that changes the case runs, while a save runs and while a dialog is
+    /// open, and saves as soon as they end. A save that failed is not tried
+    /// again by itself until the case changes (the error was shown). A
+    /// project never saved is not saved by itself and nothing asks for a
+    /// file: Save does.
+    ///
+    /// Returns how long to wait before a call can save (the shell asks for a
+    /// frame then); `None` when nothing waits for the time.
+    pub fn tick(&mut self, now: f64) -> Option<Duration> {
+        let current = Arc::clone(self.undo.current());
+        let idle = self.autosave.idle_for(&current, now);
+        if !self.autosaves() || !self.is_dirty() || self.autosave.failed_on(&current) {
+            return None;
+        }
+        if self.command_running() || self.is_saving() || self.modal_open() {
+            return None;
+        }
+        let left = autosave::DELAY_S - idle;
+        if left > 0.0 {
+            return Some(Duration::from_secs_f64(left));
+        }
+        if let Some(path) = self.path.clone() {
+            self.save_to_then(path, None, false);
+        }
+        None
+    }
+
+    /// `true` while a dialog waits for the user: leaving with unsaved
+    /// changes, the keyboard shortcuts, or a native file dialog.
+    fn modal_open(&self) -> bool {
+        self.confirm_exit.is_some() || self.show_help || self.dialog.is_some()
+    }
+
+    /// Leaves towards `exit` once nothing is left to save: a project that
+    /// has a file is saved first (as the automatic save would), one never
+    /// saved or opened read-only asks the user; a save that runs ends first.
     pub(crate) fn request_exit(&mut self, exit: Exit) {
         if self.is_dirty() {
-            self.confirm_exit = Some(exit);
+            if self.autosaves() {
+                self.save_then(Some(exit));
+            } else {
+                self.confirm_exit = Some(exit);
+            }
+        } else if self.is_saving() {
+            self.leave_after_save = Some(exit);
         } else {
             self.actions.push_back(exit.action());
         }
     }
 
+    /// The window is asked to close. `true`: nothing is left to save, it may
+    /// close now. `false`: keep it open; the case is saved first (a project
+    /// with a file) or the user is asked (a project never saved, or opened
+    /// read-only, or a save that failed), and [`WorkspaceAction::Quit`]
+    /// comes when it may close.
+    pub fn request_quit(&mut self) -> bool {
+        if !self.is_dirty() && !self.is_saving() {
+            return true;
+        }
+        match self.confirm_exit {
+            // the dialog already asks: leaving now closes the window
+            Some(_) => self.confirm_exit = Some(Exit::Quit),
+            None => self.request_exit(Exit::Quit),
+        }
+        false
+    }
+
     /// Leaves without saving.
     pub(crate) fn discard_and_exit(&mut self, exit: Exit) {
         self.confirm_exit = None;
+        self.leave_after_save = None;
         self.actions.push_back(exit.action());
     }
 
@@ -994,7 +1190,7 @@ impl Workspace {
                     self.dialog = None;
                     match answer {
                         DialogAnswer::Import(files) => self.import_files(files),
-                        DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then),
+                        DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then, true),
                         DialogAnswer::SaveAs(None, _) => {}
                         DialogAnswer::Leaf(id, path) => self.answer_leaf_input(id, path),
                     }
@@ -1053,29 +1249,65 @@ impl Workspace {
                 Some(Err(e)) => self.job_panic(&e),
                 None => {}
             },
-            Task::Save(save) => match save.handle.try_take() {
-                Some(Ok(Ok(()))) => {
-                    let SaveTask {
-                        path,
-                        state,
-                        manifest,
-                        then,
-                        ..
-                    } = *save;
-                    self.saved = state;
-                    self.manifest = Some(manifest);
-                    self.path = Some(path.clone());
-                    self.read_only = false;
+            Task::Save(save) => self.finish_save(*save),
+        }
+    }
+
+    /// A save ended. Saved: the file holds that state (what changed since
+    /// stays unsaved and is saved by itself later), the user's save says so,
+    /// and the exit waiting for it follows once nothing is left to save.
+    /// Failed: never silent, the error stays on screen; an exit waiting for
+    /// it asks the user (save again, or leave without saving). Then the save
+    /// asked for meanwhile starts.
+    fn finish_save(&mut self, save: SaveTask) {
+        let SaveTask {
+            path,
+            state,
+            manifest,
+            then,
+            explicit,
+            handle,
+        } = save;
+        let then = then.or(self.leave_after_save.take());
+        let failure = match handle.try_take() {
+            Some(Ok(Ok(()))) => None,
+            Some(Ok(Err(msg))) => Some(msg),
+            Some(Err(e)) => Some(e.to_string()),
+            None => Some(crate::t("ws-save-lost")),
+        };
+        match failure {
+            None => {
+                self.saved = state;
+                self.autosave.succeeded();
+                self.manifest = Some(manifest);
+                self.path = Some(path.clone());
+                self.read_only = false;
+                if explicit {
                     self.toast(Toast::new(ToastLevel::Success, "ws-toast-saved"));
-                    self.actions.push_back(WorkspaceAction::Saved(path));
-                    if let Some(exit) = then {
-                        self.actions.push_back(exit.action());
-                    }
                 }
-                Some(Ok(Err(msg))) => self.job_error("ws-toast-save-failed", msg),
-                Some(Err(e)) => self.job_panic(&e),
-                None => {}
-            },
+                self.actions.push_back(WorkspaceAction::Saved(path));
+                match then {
+                    // what changed while it saved goes in too, then it leaves
+                    Some(exit) if self.is_dirty() => self.save_then(Some(exit)),
+                    Some(exit) => self.actions.push_back(exit.action()),
+                    None => {}
+                }
+            }
+            Some(detail) => {
+                self.autosave.failed(&state);
+                let key = if explicit {
+                    "ws-toast-save-failed"
+                } else {
+                    "ws-toast-autosave-failed"
+                };
+                self.job_error(key, detail);
+                if let Some(exit) = then {
+                    self.confirm_exit = Some(exit);
+                }
+            }
+        }
+        if let Some(q) = self.queued_save.take() {
+            self.save_to_then(q.path, q.then, q.explicit);
         }
     }
 

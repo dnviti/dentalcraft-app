@@ -1,5 +1,7 @@
 //! The manual tools in the viewport: the label brush, the seed editor, the
-//! tooth pickers and the panel with their parameters.
+//! tooth pickers and their controls, drawn in the section "Manual
+//! corrections" of the inspector of the function they correct (see
+//! `function`).
 //!
 //! Nothing here changes the case itself. Every interaction is turned into
 //! the JSON parameters of a registered command of the module (the same
@@ -10,6 +12,7 @@
 //! | --- | --- |
 //! | click or drag on the scan with the brush (Shift: gingiva, Ctrl: fill the crown) | `aligners.preparation.segmentation.manual-brush` |
 //! | click with the seed tool (Shift: delete the nearest seed) | `aligners.preparation.numbering.place-seeds` |
+//! | click with "Delete a tooth" on a tooth number, a tooth mark or the scan (the nearest mark, else the tooth there) | `aligners.preparation.numbering.delete-seed` |
 //! | number in order: click each tooth, `S` skip the tooth, Backspace back, Enter or Esc done | `aligners.preparation.numbering.sequence` (once, at the end) |
 //! | clear the tooth marks (seed tool panel) | `aligners.preparation.numbering.clear-seeds` |
 //! | Apply in the renumber / missing / rebuild / clean / adjust panels | the command of the tool |
@@ -23,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use dc_case::{CaseState, Fdi, ScanRole};
 use dc_command::{Command, CommandError, JobCtx};
-use dc_module_api::{CommandSpec, MenuStatus, Toast, ToastLevel};
+use dc_module_api::{CommandSpec, NOT_AVAILABLE_KEY, Toast, ToastLevel};
 use dc_ui::theme::colors;
 use dc_ui::widgets::Button;
 use dc_viewport::{Pick, Viewport, ViewportResponse};
@@ -39,6 +42,7 @@ use crate::workspace::Workspace;
 pub(crate) const BRUSH: &str = "aligners.preparation.segmentation.manual-brush";
 pub(crate) const CLEAN: &str = "aligners.preparation.segmentation.clean-borders";
 pub(crate) const SEEDS: &str = "aligners.preparation.numbering.place-seeds";
+pub(crate) const DELETE_SEED: &str = "aligners.preparation.numbering.delete-seed";
 pub(crate) const SEQUENCE: &str = "aligners.preparation.numbering.sequence";
 pub(crate) const CLEAR_SEEDS: &str = "aligners.preparation.numbering.clear-seeds";
 pub(crate) const RENUMBER: &str = "aligners.preparation.numbering.renumber";
@@ -58,6 +62,8 @@ pub(crate) enum Tool {
     Clean,
     /// Place, move or delete seeds.
     Seeds,
+    /// Delete the seed of one tooth (not marked missing).
+    Delete,
     /// Renumber or swap teeth.
     Renumber,
     /// Mark a tooth missing or present.
@@ -69,12 +75,13 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    /// The tool that a menu command opens.
+    /// The tool whose command is `id` (its key opens it).
     pub(crate) fn from_command(id: &str) -> Option<Self> {
         [
             Self::Brush,
             Self::Clean,
             Self::Seeds,
+            Self::Delete,
             Self::Renumber,
             Self::Missing,
             Self::Rebuild,
@@ -90,6 +97,7 @@ impl Tool {
             Self::Brush => BRUSH,
             Self::Clean => CLEAN,
             Self::Seeds => SEEDS,
+            Self::Delete => DELETE_SEED,
             Self::Renumber => RENUMBER,
             Self::Missing => MISSING,
             Self::Rebuild => REBUILD,
@@ -97,11 +105,13 @@ impl Tool {
         }
     }
 
-    fn title_key(self) -> &'static str {
+    /// i18n key of its name (the button of the inspector).
+    pub(crate) fn title_key(self) -> &'static str {
         match self {
             Self::Brush => "ws-manual-brush",
             Self::Clean => "ws-manual-clean",
             Self::Seeds => "ws-manual-seeds",
+            Self::Delete => "ws-manual-delete",
             Self::Renumber => "ws-manual-renumber",
             Self::Missing => "ws-manual-missing",
             Self::Rebuild => "ws-manual-rebuild",
@@ -113,6 +123,7 @@ impl Tool {
         match self {
             Self::Brush => "ws-manual-hint-brush",
             Self::Seeds => "ws-manual-hint-seeds",
+            Self::Delete => "ws-manual-hint-delete",
             _ => "ws-manual-hint-pick",
         }
     }
@@ -242,6 +253,9 @@ pub(crate) enum Event {
     Click(Pick, Mods),
     /// A drag over the scan, one pick per step.
     Stroke(Vec<Pick>, Mods),
+    /// A click (no Alt) on the number chip or the mark of this tooth, while
+    /// "Delete a tooth" is open.
+    Mark(u8),
 }
 
 /// What an [`Event`] means.
@@ -545,6 +559,18 @@ fn nearest_seed(state: &CaseState, role: ScanRole, point: DVec3) -> Option<u8> {
         .map(|(_, f)| f)
 }
 
+/// What deleting the mark of tooth `fdi` runs: the command, or a notice when
+/// the tooth has no mark.
+pub(crate) fn delete_mark(state: &CaseState, fdi: u8) -> Action {
+    let marked =
+        overlay::aligners(state).is_some_and(|a| a.seeds.iter().any(|s| s.fdi.get() == fdi));
+    if marked {
+        Action::Run(DELETE_SEED, json!({ "fdi": fdi }))
+    } else {
+        Action::Hint("ws-manual-no-mark")
+    }
+}
+
 /// What a pointer event means for the tool open. A tooth picked by a
 /// picking tool is stored in `m.tooth` (the caller gets [`Action::Chose`]).
 pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -> Action {
@@ -554,6 +580,12 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
     let (picks, mods) = match ev {
         Event::Click(p, mods) => (std::slice::from_ref(p), *mods),
         Event::Stroke(p, mods) => (p.as_slice(), *mods),
+        Event::Mark(f) => {
+            return match tool {
+                Tool::Delete => delete_mark(state, *f),
+                _ => Action::None,
+            };
+        }
     };
     // Alt+click chooses the brush tooth (see `labels::alt_click_action`): it
     // never paints, places or picks
@@ -569,6 +601,12 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
     {
         m.tooth = f;
         return Action::Chose(f);
+    }
+    // a click on a built tooth deletes its mark
+    if let (Tool::Delete, Event::Click(p, _)) = (tool, ev)
+        && let Some(f) = tooth_of_mesh(p.mesh_id)
+    {
+        return delete_mark(state, f);
     }
     let Some(first) = picks.first().and_then(|p| target_of(state, p, eye)) else {
         return Action::None;
@@ -633,6 +671,18 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
                 }),
             )
         }
+        Tool::Delete => {
+            if !matches!(ev, Event::Click(..)) {
+                return Action::None;
+            }
+            // the mark at the click (what the user sees), else the tooth there
+            let near = nearest_seed(state, first.role, first.point)
+                .or_else(|| u8::try_from(first.label).ok().filter(|&f| f != 0));
+            match near {
+                Some(f) => delete_mark(state, f),
+                None => Action::Hint("ws-manual-no-seed"),
+            }
+        }
         Tool::Clean | Tool::Renumber | Tool::Missing | Tool::Rebuild | Tool::Adjust => {
             if !matches!(ev, Event::Click(..)) {
                 return Action::None;
@@ -652,7 +702,7 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
 /// missing. `stage` is the stage shown on the timeline (`0` = initial).
 pub(crate) fn params_for(m: &Manual, tool: Tool, stage: u32) -> Result<Value, &'static str> {
     match tool {
-        Tool::Brush | Tool::Seeds => Err("ws-manual-hint-pick"),
+        Tool::Brush | Tool::Seeds | Tool::Delete => Err("ws-manual-hint-pick"),
         Tool::Clean => {
             let mut p = json!({ "rings": m.rings });
             if m.tooth != 0 {
@@ -903,8 +953,16 @@ pub(crate) fn pos_color(c: dc_scene::Color) -> Color32 {
 }
 
 /// Reads the pointer in the viewport: the brush circle, the stroke being
-/// drawn and the events of this frame.
-pub(crate) fn collect(m: &mut Manual, ui: &Ui, vp: &Viewport, vr: &ViewportResponse) -> Vec<Event> {
+/// drawn and the events of this frame. `mark` is the tooth whose number chip
+/// or mark was clicked this frame (without Alt): "Delete a tooth" takes it
+/// instead of the scan under it.
+pub(crate) fn collect(
+    m: &mut Manual,
+    ui: &Ui,
+    vp: &Viewport,
+    vr: &ViewportResponse,
+    mark: Option<u8>,
+) -> Vec<Event> {
     let Some(tool) = m.tool else {
         m.stroke.clear();
         m.stroke_screen.clear();
@@ -978,7 +1036,9 @@ pub(crate) fn collect(m: &mut Manual, ui: &Ui, vp: &Viewport, vr: &ViewportRespo
             }
         }
     }
-    if let Some(p) = vr.pick {
+    if let Some(f) = mark.filter(|_| tool == Tool::Delete) {
+        out.push(Event::Mark(f));
+    } else if let Some(p) = vr.pick {
         out.push(Event::Click(p, mods));
     }
     out
@@ -1006,8 +1066,21 @@ fn number<N: egui::emath::Numeric>(
 }
 
 impl Workspace {
-    /// Opens a manual tool (a menu entry of the tool was activated).
-    pub(crate) fn open_manual_tool(&mut self, tool: Tool) {
+    /// `true` when the module registers the command of `tool`.
+    pub(crate) fn tool_ready(&self, tool: Tool) -> bool {
+        self.specs.iter().any(|s| s.id == tool.command_id())
+    }
+
+    /// Opens `tool` in the inspector of the function it corrects, which is
+    /// selected (the tool of another function closes). `false`, with the
+    /// "not available" notice, when the module has no such command or no
+    /// such function.
+    pub(crate) fn open_tool(&mut self, tool: Tool) -> bool {
+        let owner = crate::function::owner(tool);
+        if !self.tool_ready(tool) || !owner.is_some_and(|id| self.select_command(id)) {
+            self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
+            return false;
+        }
         self.manual.tool = Some(tool);
         self.manual.sequence = None;
         self.manual.seq_base = None;
@@ -1016,6 +1089,14 @@ impl Workspace {
             self.manual.third_molars = overlay::aligners(self.undo.current())
                 .is_some_and(|a| a.settings.find_teeth.third_molars);
         }
+        true
+    }
+
+    /// Closes the open tool and stops the numbering in order.
+    pub(crate) fn close_tool(&mut self) {
+        self.manual.tool = None;
+        self.manual.sequence = None;
+        self.manual.seq_base = None;
     }
 
     /// Stops the numbering in order when the case is no longer the one it
@@ -1041,8 +1122,7 @@ impl Workspace {
             .as_ref()
             .map_or(Vec3::ZERO, |vp| vp.camera().eye());
         for ev in events {
-            let (Event::Click(_, mods) | Event::Stroke(_, mods)) = &ev;
-            if mods.alt {
+            if matches!(&ev, Event::Click(_, m) | Event::Stroke(_, m) if m.alt) {
                 // Alt chooses the brush tooth (handled from the click itself)
                 continue;
             }
@@ -1068,27 +1148,16 @@ impl Workspace {
     }
 
     /// Alt+click on a tooth number, a tooth mark or the scan: the brush works
-    /// on that tooth (`0` = gingiva). Opens the brush when another tool (or
-    /// none, as in Find the teeth) is open. The numbering in order keeps the
-    /// pointer: finishing it comes first.
+    /// on that tooth (`0` = gingiva). Opens the brush, in "Separate teeth and
+    /// gum", when another tool (or none, as in Find the teeth) is open. The
+    /// numbering in order keeps the pointer: finishing it comes first.
     pub(crate) fn choose_brush(&mut self, fdi: u8) {
         if self.manual.sequence.is_some() {
             self.toast(Toast::new(ToastLevel::Info, "ws-manual-brush-busy"));
             return;
         }
-        if self.manual.tool != Some(Tool::Brush) {
-            let ready = self
-                .commands
-                .iter()
-                .any(|c| c.id == BRUSH && c.status == MenuStatus::Ready);
-            if !ready {
-                self.toast(Toast::new(
-                    ToastLevel::Info,
-                    dc_module_api::NOT_AVAILABLE_KEY,
-                ));
-                return;
-            }
-            self.open_manual_tool(Tool::Brush);
+        if self.manual.tool != Some(Tool::Brush) && !self.open_tool(Tool::Brush) {
+            return;
         }
         self.manual.tooth = fdi;
         let detail = if fdi == 0 {
@@ -1145,7 +1214,7 @@ impl Workspace {
             if let Some(toast) = feedback_toast(&id, &out) {
                 self.toast(toast);
             }
-            if matches!(id.as_str(), SEEDS | SEQUENCE | CLEAR_SEEDS) {
+            if matches!(id.as_str(), SEEDS | DELETE_SEED | SEQUENCE | CLEAR_SEEDS) {
                 for toast in marks_toasts(&out) {
                     self.toast(toast);
                 }
@@ -1154,11 +1223,11 @@ impl Workspace {
         self.sequence_follow_undo();
     }
 
-    /// The panel of the open tool, at the top left of the viewport.
-    pub(crate) fn manual_panel(&mut self, ui: &mut Ui) {
-        let Some(tool) = self.manual.tool else {
-            return;
-        };
+    /// The controls of the open tool `tool`, in the section "Manual
+    /// corrections" of the inspector of its function: what to do with the
+    /// pointer, the tooth, the values of the tool, Apply for the tools that
+    /// change a chosen tooth, and Close.
+    pub(crate) fn tool_controls(&mut self, ui: &mut Ui, tool: Tool) {
         let stage = self.timeline.current;
         let has_stages = self.timeline.current > 0;
         let mut apply = false;
@@ -1168,129 +1237,121 @@ impl Workspace {
         let mut seq_start = false;
         let mut clear = false;
         let c = *colors(ui);
-        egui::Frame::new()
-            .fill(c.bg_raised)
-            .stroke(Stroke::new(1.0, c.border_subtle))
-            .corner_radius(egui::CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.set_max_width(260.0);
-                let m = &mut self.manual;
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(t(tool.title_key())).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(t("ws-manual-close")).clicked() {
-                            close = true;
+        let m = &mut self.manual;
+        let hint = if m.sequence.is_some() {
+            "ws-manual-hint-seq"
+        } else {
+            tool.hint_key()
+        };
+        ui.label(egui::RichText::new(t(hint)).color(c.text_secondary).small());
+        // "Delete a tooth" acts on the click alone: no tooth to choose
+        if tool != Tool::Delete {
+            number(ui, t("ws-manual-tooth"), &mut m.tooth, 0..=48, 1.0, "");
+        }
+        match tool {
+            Tool::Brush => {
+                number(
+                    ui,
+                    t("ws-manual-radius"),
+                    &mut m.radius_mm,
+                    0.1..=8.0,
+                    0.05,
+                    " mm",
+                );
+            }
+            Tool::Clean => number(ui, t("ws-manual-rings"), &mut m.rings, 0..=3, 1.0, ""),
+            Tool::Seeds => {
+                if let Some(seq) = &m.sequence {
+                    let line = match (seq.next(), seq.arch) {
+                        (Some(f), _) => {
+                            dc_i18n::tr_args("ws-manual-seq-next", &[("fdi", &f.to_string())])
+                        }
+                        (None, None) => t("ws-manual-seq-first"),
+                        (None, Some(_)) => t("ws-manual-seq-done"),
+                    };
+                    ui.label(egui::RichText::new(line).strong());
+                    ui.horizontal_wrapped(|ui| {
+                        if Button::secondary(t("ws-manual-seq-skip"))
+                            .show(ui)
+                            .clicked()
+                        {
+                            seq_key = Some(SeqKey::Skip);
+                        }
+                        if Button::secondary(t("ws-manual-seq-back"))
+                            .show(ui)
+                            .clicked()
+                        {
+                            seq_key = Some(SeqKey::Undo);
                         }
                     });
-                });
-                let hint = if m.sequence.is_some() {
-                    "ws-manual-hint-seq"
+                    ui.horizontal_wrapped(|ui| {
+                        if Button::secondary(t("ws-manual-seq-finish"))
+                            .show(ui)
+                            .clicked()
+                        {
+                            seq_key = Some(SeqKey::Finish);
+                        }
+                        if Button::ghost(t("ws-manual-seq-cancel")).show(ui).clicked() {
+                            seq_cancel = true;
+                        }
+                    });
                 } else {
-                    tool.hint_key()
-                };
-                ui.label(egui::RichText::new(t(hint)).color(c.text_secondary).small());
-                number(ui, t("ws-manual-tooth"), &mut m.tooth, 0..=48, 1.0, "");
-                match tool {
-                    Tool::Brush => {
-                        number(
-                            ui,
-                            t("ws-manual-radius"),
-                            &mut m.radius_mm,
-                            0.1..=8.0,
-                            0.05,
-                            " mm",
-                        );
-                    }
-                    Tool::Clean => number(ui, t("ws-manual-rings"), &mut m.rings, 0..=3, 1.0, ""),
-                    Tool::Seeds => {
-                        if let Some(seq) = &m.sequence {
-                            let line = match (seq.next(), seq.arch) {
-                                (Some(f), _) => dc_i18n::tr_args(
-                                    "ws-manual-seq-next",
-                                    &[("fdi", &f.to_string())],
-                                ),
-                                (None, None) => t("ws-manual-seq-first"),
-                                (None, Some(_)) => t("ws-manual-seq-done"),
-                            };
-                            ui.label(egui::RichText::new(line).strong());
-                            ui.horizontal_wrapped(|ui| {
-                                if Button::secondary(t("ws-manual-seq-skip"))
-                                    .show(ui)
-                                    .clicked()
-                                {
-                                    seq_key = Some(SeqKey::Skip);
-                                }
-                                if Button::secondary(t("ws-manual-seq-back"))
-                                    .show(ui)
-                                    .clicked()
-                                {
-                                    seq_key = Some(SeqKey::Undo);
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                if Button::primary(t("ws-manual-seq-finish"))
-                                    .show(ui)
-                                    .clicked()
-                                {
-                                    seq_key = Some(SeqKey::Finish);
-                                }
-                                if Button::ghost(t("ws-manual-seq-cancel")).show(ui).clicked() {
-                                    seq_cancel = true;
-                                }
-                            });
-                        } else {
-                            ui.checkbox(&mut m.third_molars, t("ws-manual-seq-third"));
-                            if Button::secondary(t("ws-manual-seq-start"))
-                                .show(ui)
-                                .clicked()
-                            {
-                                seq_start = true;
-                            }
-                            if Button::ghost(t("ws-manual-clear")).show(ui).clicked() {
-                                clear = true;
-                            }
-                        }
-                    }
-                    Tool::Renumber => number(ui, t("ws-manual-dst"), &mut m.dst, 0..=48, 1.0, ""),
-                    Tool::Missing => {
-                        ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));
-                    }
-                    Tool::Rebuild => {
-                        ui.checkbox(&mut m.resegment, t("ws-manual-resegment"));
-                    }
-                    Tool::Adjust => {
-                        let f = &mut m.fields;
-                        for (key, v, unit) in [
-                            ("ws-manual-mesial", &mut f.mesial_mm, " mm"),
-                            ("ws-manual-buccal", &mut f.buccal_mm, " mm"),
-                            ("ws-manual-extrusion", &mut f.extrusion_mm, " mm"),
-                            ("ws-manual-torque", &mut f.torque_deg, "°"),
-                            ("ws-manual-tip", &mut f.tip_deg, "°"),
-                            ("ws-manual-rotation", &mut f.rotation_deg, "°"),
-                        ] {
-                            number(ui, t(key), v, -30.0..=30.0, 0.05, unit);
-                        }
-                        ui.add_enabled(
-                            has_stages,
-                            egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
-                        );
-                        ui.checkbox(&mut m.lock, t("ws-manual-lock"));
-                        ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
-                    }
-                }
-                if !matches!(tool, Tool::Brush | Tool::Seeds)
-                    && dc_ui::widgets::Button::primary(t("ws-manual-apply"))
+                    ui.checkbox(&mut m.third_molars, t("ws-manual-seq-third"));
+                    if Button::secondary(t("ws-manual-seq-start"))
                         .show(ui)
                         .clicked()
-                {
-                    apply = true;
+                    {
+                        seq_start = true;
+                    }
+                    if Button::ghost(t("ws-manual-clear")).show(ui).clicked() {
+                        clear = true;
+                    }
                 }
-            });
-        if close {
-            self.manual.tool = None;
+            }
+            Tool::Delete => {}
+            Tool::Renumber => number(ui, t("ws-manual-dst"), &mut m.dst, 0..=48, 1.0, ""),
+            Tool::Missing => {
+                ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));
+            }
+            Tool::Rebuild => {
+                ui.checkbox(&mut m.resegment, t("ws-manual-resegment"));
+            }
+            Tool::Adjust => {
+                let f = &mut m.fields;
+                for (key, v, unit) in [
+                    ("ws-manual-mesial", &mut f.mesial_mm, " mm"),
+                    ("ws-manual-buccal", &mut f.buccal_mm, " mm"),
+                    ("ws-manual-extrusion", &mut f.extrusion_mm, " mm"),
+                    ("ws-manual-torque", &mut f.torque_deg, "°"),
+                    ("ws-manual-tip", &mut f.tip_deg, "°"),
+                    ("ws-manual-rotation", &mut f.rotation_deg, "°"),
+                ] {
+                    number(ui, t(key), v, -30.0..=30.0, 0.05, unit);
+                }
+                ui.add_enabled(
+                    has_stages,
+                    egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
+                );
+                ui.checkbox(&mut m.lock, t("ws-manual-lock"));
+                ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
+            }
         }
-        if close || seq_cancel {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            // the run button of the function is the amber one of the page
+            if !matches!(tool, Tool::Brush | Tool::Seeds | Tool::Delete)
+                && Button::secondary(t("ws-manual-apply")).show(ui).clicked()
+            {
+                apply = true;
+            }
+            if Button::ghost(t("ws-manual-close")).show(ui).clicked() {
+                close = true;
+            }
+        });
+        if close {
+            self.close_tool();
+        }
+        if seq_cancel {
             self.manual.sequence = None;
             self.manual.seq_base = None;
         }
@@ -1761,9 +1822,9 @@ mod tests {
         let pick = pick_vertex(&state, v);
         let mut ws = workspace(state);
         let before = labels_ref(&ws);
-        // the menu entry opens the tool instead of running the command
-        ws.activate(BRUSH);
-        assert_eq!(ws.selected(), Some(BRUSH));
+        // the tool opens in the inspector of its function and runs nothing
+        assert!(ws.open_tool(Tool::Brush));
+        assert_eq!(ws.selected(), Some(crate::leaf::SEGMENT));
         assert_eq!(ws.manual.tool, Some(Tool::Brush));
         assert!(ws.toast_keys().is_empty());
         assert!(ws.wait_for_jobs(WAIT));
@@ -1787,6 +1848,141 @@ mod tests {
         ws.manual_events(vec![Event::Click(other, Mods::default())]);
         assert!(ws.wait_for_jobs(WAIT));
         assert_eq!(labels_ref(&ws), after);
+    }
+
+    fn seeds_of(ws: &Workspace) -> Vec<u8> {
+        data(ws.undo.current())
+            .seeds
+            .iter()
+            .map(|s| s.fdi.get())
+            .collect()
+    }
+
+    #[test]
+    fn delete_a_tooth_picks_the_mark_at_the_click_or_the_tooth_there() {
+        let state = lower_demo();
+        let v = vertex_of(&state, 35);
+        let eye = eye_above(&state, v);
+        let mut m = manual(Tool::Delete, 0);
+        // on the mark of 35, its number chip, its 3D tooth
+        let click = Event::Click(pick_vertex(&state, v), Mods::default());
+        let run = Action::Run(DELETE_SEED, json!({ "fdi": 35 }));
+        assert_eq!(handle(&mut m, &state, &click, eye), run);
+        assert_eq!(handle(&mut m, &state, &Event::Mark(35), eye), run);
+        let mut built = pick_vertex(&state, v);
+        built.mesh_id = tooth_mesh_id(35);
+        let built = Event::Click(built, Mods::default());
+        assert_eq!(handle(&mut m, &state, &built, eye), run);
+        // nothing is chosen: the tool has no tooth of its own
+        assert_eq!(m.tooth, 0);
+        // on the crown far from its mark: the tooth there
+        let seed = data(&state)
+            .seeds
+            .iter()
+            .find(|s| s.fdi.get() == 36)
+            .unwrap()
+            .position;
+        let scan = state.case.scan(ScanRole::Lower).unwrap();
+        let positions = &state.mesh(&scan.mesh).unwrap().positions;
+        let far_from_marks = |i: usize| {
+            data(&state)
+                .seeds
+                .iter()
+                .all(|s| s.position.distance(positions[i].as_dvec3()) > SEED_REACH_MM)
+        };
+        let crown = (0..mesh_len(&state))
+            .filter(|&i| label_at(&state, i) == 36 && far_from_marks(i))
+            .min_by(|&i, &j| {
+                let d = |k: usize| positions[k].as_dvec3().distance(seed);
+                d(i).total_cmp(&d(j))
+            })
+            .unwrap();
+        let c = Event::Click(pick_vertex(&state, crown), Mods::default());
+        assert_eq!(
+            handle(&mut m, &state, &c, eye),
+            Action::Run(DELETE_SEED, json!({ "fdi": 36 }))
+        );
+        // the gingiva far from any mark, a tooth without a mark: a notice
+        let gum = (0..mesh_len(&state))
+            .find(|&i| label_at(&state, i) == 0 && far_from_marks(i))
+            .unwrap();
+        let g = Event::Click(pick_vertex(&state, gum), Mods::default());
+        assert_eq!(
+            handle(&mut m, &state, &g, eye),
+            Action::Hint("ws-manual-no-seed")
+        );
+        assert_eq!(
+            handle(&mut m, &state, &Event::Mark(18), eye),
+            Action::Hint("ws-manual-no-mark")
+        );
+        // a drag deletes nothing, and no other tool takes the click on a number
+        let s = Event::Stroke(vec![pick_vertex(&state, v)], Mods::default());
+        assert_eq!(handle(&mut m, &state, &s, eye), Action::None);
+        for tool in [Tool::Seeds, Tool::Renumber, Tool::Missing, Tool::Brush] {
+            let mut m = manual(tool, 35);
+            assert_eq!(
+                handle(&mut m, &state, &Event::Mark(35), eye),
+                Action::None,
+                "{tool:?}"
+            );
+        }
+        // no Apply: the click runs it
+        assert!(params_for(&m, Tool::Delete, 0).is_err());
+    }
+
+    #[test]
+    fn delete_a_tooth_removes_the_mark_clicked_in_one_undo_step() {
+        let state = lower_demo();
+        let v = vertex_of(&state, 35);
+        let pick = pick_vertex(&state, v);
+        let missing = data(&state).missing.clone();
+        let mut ws = workspace(state);
+        let before = seeds_of(&ws);
+        assert!(before.contains(&36) && before.contains(&35));
+        // the tool opens in the inspector of Find the teeth and runs nothing
+        assert!(ws.open_tool(Tool::Delete));
+        assert_eq!(ws.selected(), Some(crate::leaf::FIND_TEETH));
+        assert_eq!(ws.active_tool(), Some(DELETE_SEED));
+        assert!(ws.wait_for_jobs(WAIT));
+        assert_eq!(seeds_of(&ws), before, "nothing ran");
+        assert!(ws.toast_keys().is_empty());
+        // a click on the number (or the mark) of 36 deletes its mark
+        ws.manual_events(vec![Event::Mark(36)]);
+        assert!(ws.wait_for_jobs(WAIT));
+        ws.manual_feedback();
+        let after = seeds_of(&ws);
+        assert_eq!(after.len(), before.len() - 1);
+        assert!(!after.contains(&36));
+        let st = Arc::clone(ws.undo.current());
+        assert_eq!(
+            data(&st).missing,
+            missing,
+            "the tooth is not marked missing"
+        );
+        // the notice of any change of the marks: what is now out of date
+        assert!(
+            ws.toast_keys()
+                .iter()
+                .any(|k| k == "ws-toast-marks-outdated"),
+            "{:?}",
+            ws.toast_keys()
+        );
+        // one step on the undo stack
+        assert!(ws.undo());
+        assert_eq!(seeds_of(&ws), before);
+        assert!(ws.redo());
+        assert_eq!(seeds_of(&ws), after);
+        // a click on the scan at the mark of 35 deletes that one
+        ws.manual_events(vec![Event::Click(pick, Mods::default())]);
+        assert!(ws.wait_for_jobs(WAIT));
+        assert!(!seeds_of(&ws).contains(&35));
+        assert_eq!(seeds_of(&ws).len(), before.len() - 2);
+        // a tooth that has no mark any more: a notice, nothing runs
+        let current = Arc::clone(ws.undo.current());
+        ws.manual_events(vec![Event::Mark(36)]);
+        assert!(ws.wait_for_jobs(WAIT));
+        assert!(Arc::ptr_eq(&current, ws.undo.current()));
+        assert!(ws.toast_keys().iter().any(|k| k == "ws-manual-no-mark"));
     }
 
     #[test]
@@ -1819,6 +2015,7 @@ mod tests {
             Tool::Brush,
             Tool::Clean,
             Tool::Seeds,
+            Tool::Delete,
             Tool::Renumber,
             Tool::Missing,
             Tool::Rebuild,
@@ -1849,7 +2046,7 @@ mod tests {
         let v = vertex_of(&state, 36);
         let pick = pick_vertex(&state, v);
         let mut ws = workspace(state);
-        ws.activate(BRUSH);
+        assert!(ws.open_tool(Tool::Brush));
         ws.manual.tooth = 35;
         let before = labels_ref(&ws);
         let alt = Mods {
@@ -1867,10 +2064,13 @@ mod tests {
     #[test]
     fn alt_click_opens_the_brush_from_any_tool_or_none_and_chooses_the_tooth() {
         let mut ws = workspace(lower_demo());
-        // no tool open (Find the teeth): the brush opens on the tooth
+        // no tool open (Find the teeth): the brush opens on the tooth, in the
+        // inspector of Separate teeth and gum
+        ws.select_item(crate::leaf::FIND_TEETH);
         assert_eq!(ws.manual.tool, None);
         ws.manual_action(Action::SelectBrush(36));
         assert_eq!(ws.manual.tool, Some(Tool::Brush));
+        assert_eq!(ws.selected(), Some(crate::leaf::SEGMENT));
         assert_eq!(ws.manual.tooth, 36);
         assert_eq!(ws.toast_keys().last().unwrap(), "ws-manual-brush-chosen");
         // the brush keeps its settings and takes the next tooth, or the gingiva
@@ -1878,19 +2078,47 @@ mod tests {
         ws.manual_action(Action::SelectBrush(0));
         assert_eq!((ws.manual.tool, ws.manual.tooth), (Some(Tool::Brush), 0));
         assert_eq!(ws.manual.radius_mm, 2.5);
-        // from another tool
-        ws.activate(MISSING);
+        // from another tool, of another function
+        assert!(ws.open_tool(Tool::Missing));
+        assert_eq!(ws.selected(), Some(crate::leaf::FIND_TEETH));
         assert_eq!(ws.manual.tool, Some(Tool::Missing));
         ws.manual_action(Action::SelectBrush(21));
         assert_eq!((ws.manual.tool, ws.manual.tooth), (Some(Tool::Brush), 21));
+        assert_eq!(ws.selected(), Some(crate::leaf::SEGMENT));
         // nothing was run
+        assert!(!ws.is_busy());
         assert!(ws.wait_for_jobs(WAIT));
+    }
+
+    #[test]
+    fn leaving_the_function_closes_its_tool_and_the_numbering() {
+        let mut ws = workspace(lower_demo());
+        assert!(ws.open_tool(Tool::Seeds));
+        ws.manual.sequence = Some(Sequence::default());
+        // another tool of the same function: the numbering stops
+        assert!(ws.open_tool(Tool::Renumber));
+        assert_eq!(ws.selected(), Some(crate::leaf::FIND_TEETH));
+        assert!(ws.manual.sequence.is_none());
+        // the same function again keeps its tool
+        ws.select_item(crate::leaf::FIND_TEETH);
+        assert_eq!(ws.manual.tool, Some(Tool::Renumber));
+        // another function, a group, or no selection close it
+        ws.select_item(crate::leaf::BUILD_TEETH);
+        assert_eq!(ws.manual.tool, None);
+        assert!(ws.open_tool(Tool::Rebuild));
+        ws.select_item("aligners.teeth");
+        assert_eq!(ws.manual.tool, None);
+        assert!(ws.open_tool(Tool::Adjust));
+        assert_eq!(ws.selected(), Some(crate::leaf::SETUP));
+        ws.clear_selection();
+        assert_eq!((ws.selected(), ws.manual.tool), (None, None));
+        assert!(!ws.is_busy());
     }
 
     #[test]
     fn alt_click_leaves_the_numbering_in_order_alone() {
         let mut ws = workspace(lower_demo());
-        ws.activate(SEEDS);
+        assert!(ws.open_tool(Tool::Seeds));
         ws.manual.sequence = Some(Sequence::default());
         ws.manual_action(Action::SelectBrush(36));
         assert_eq!(ws.manual.tool, Some(Tool::Seeds));
@@ -1953,15 +2181,24 @@ mod tests {
                     ws: workspace(state),
                 },
             );
-        harness.state_mut().ws.activate(ADJUST);
+        // the menu selects Final position; its tool is opened in its inspector
+        harness.state_mut().ws.select_item(crate::leaf::SETUP);
         harness.run();
-        // the panel of the tool is on screen
-        harness.get_by_label("Mesial");
+        assert_eq!(harness.state().ws.active_tool(), None);
+        harness.get_by_label("Move a tooth").click();
+        harness.run();
+        assert_eq!(harness.state().ws.active_tool(), Some(ADJUST));
+        // the controls of the tool are in the inspector, on the right
+        let mesial = harness.get_by_label("Mesial").rect();
+        assert!(mesial.min.x > 1600.0 - 360.0, "{mesial:?}");
         {
             let ws = &mut harness.state_mut().ws;
             ws.manual.tooth = 32;
             ws.manual.fields.mesial_mm = 3.0;
         }
+        harness.run();
+        // the inspector of a function can be longer than the window
+        harness.get_by_label("Apply").scroll_to_me();
         harness.run();
         harness.get_by_label("Apply").click();
         // the click starts a job and the app keeps repainting while it runs:
@@ -1987,11 +2224,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tools_open_from_their_menu_entries() {
+    fn every_tool_is_found_by_its_command() {
         for tool in [
             Tool::Brush,
             Tool::Clean,
             Tool::Seeds,
+            Tool::Delete,
             Tool::Renumber,
             Tool::Missing,
             Tool::Rebuild,

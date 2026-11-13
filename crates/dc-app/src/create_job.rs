@@ -510,7 +510,7 @@ mod tests {
             None,
         );
         ws.show_import_report(&report);
-        ws.activate("aligners.case.import-scans");
+        ws.select_item("aligners.case.import-scans");
         assert_eq!(ws.toast_keys()[0], "ws-toast-warn-provisional");
         assert_eq!(ws.sticky_toast_keys(), ["ws-toast-warn-provisional"]);
         let note = ws.toast_details()[0].1.clone().unwrap();

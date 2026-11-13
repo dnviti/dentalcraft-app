@@ -136,6 +136,8 @@ pub struct DentalCraftApp {
     open_job: Option<OpenJob>,
     thumbs: HashMap<PathBuf, Option<TextureHandle>>,
     ctx: Option<egui::Context>,
+    /// The open project is saved (or its user chose): the window may close.
+    closing: bool,
 }
 
 impl DentalCraftApp {
@@ -186,6 +188,7 @@ impl DentalCraftApp {
             open_job: None,
             thumbs: HashMap::new(),
             ctx: None,
+            closing: false,
         }
     }
 
@@ -243,6 +246,7 @@ impl DentalCraftApp {
             self.ctx = Some(ctx.clone());
         }
         self.poll_background(&ctx);
+        self.guard_close(&ctx);
         self.keyboard(&ctx);
 
         if self.screen == Screen::Workspace {
@@ -255,6 +259,10 @@ impl DentalCraftApp {
                     }
                     WorkspaceAction::Saved(path) => {
                         self.remember(&path, "aligners");
+                    }
+                    WorkspaceAction::Quit => {
+                        self.closing = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
             } else {
@@ -278,6 +286,41 @@ impl DentalCraftApp {
         }
         self.about_dialog(&ctx);
         self.overlays(&ctx);
+    }
+
+    /// The window is asked to close (its close button, the keys of the
+    /// system): see [`DentalCraftApp::close_requested`]. A close the app
+    /// cannot allow yet is cancelled; the window closes once the workspace
+    /// says it may.
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.close_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+    }
+
+    /// The window is asked to close. `true`: it may close now (no project
+    /// open, or nothing left to save). `false`: the open project is saved
+    /// first, or its user is asked (a project never saved, or opened
+    /// read-only, or a save that failed), on the workspace screen; the
+    /// window closes when that is done ([`WorkspaceAction::Quit`]).
+    pub fn close_requested(&mut self) -> bool {
+        if self.closing {
+            return true;
+        }
+        let Some(ws) = &mut self.workspace else {
+            return true;
+        };
+        if ws.request_quit() {
+            return true;
+        }
+        self.screen = Screen::Workspace;
+        false
+    }
+
+    /// `true` once the window may close: the open project is saved, or its
+    /// user chose not to save it.
+    pub fn may_close(&self) -> bool {
+        self.closing
     }
 
     // ------------------------------------------------------------ state helpers

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use dc_case::{CaseState, ScanRole};
+use dc_case::{CaseState, Fdi, ScanRole};
 use dca_model::Stage;
 use egui::{Color32, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 use glam::{DVec3, Mat4, Vec3};
@@ -114,7 +114,9 @@ pub(crate) fn anchors(state: &CaseState) -> Vec<Anchor> {
 
 /// [`anchors`] for what the viewport draws: with `built` the crown top of a
 /// built tooth is the top of its closed mesh (the 3D teeth are drawn), else
-/// the top of its crown painted on the scan (the scan is drawn).
+/// the top of its crown painted on the scan (the scan is drawn). An arch
+/// whose built teeth are out of date shows its scan whatever `built` says
+/// ([`overlay::outdated_arches`]).
 pub(crate) fn anchors_of(state: &CaseState, built: bool) -> Vec<Anchor> {
     let Some(al) = overlay::aligners(state) else {
         return Vec::new();
@@ -145,7 +147,16 @@ pub(crate) fn anchors_of(state: &CaseState, built: bool) -> Vec<Anchor> {
         crowns.extend(crown_spots(&mesh.positions, labels, xform, up));
     }
     // a built tooth: the top of its closed mesh (drawn instead of the scan)
-    for (f, blob) in al.crowns.iter().filter(|_| built) {
+    let outdated = overlay::outdated_arches(state);
+    let drawn = |f: &Fdi| {
+        let role = if f.is_upper() {
+            ScanRole::Upper
+        } else {
+            ScanRole::Lower
+        };
+        built && !outdated.contains(&role)
+    };
+    for (f, blob) in al.crowns.iter().filter(|(f, _)| drawn(f)) {
         let Some(mesh) = state.mesh(blob) else {
             continue;
         };
