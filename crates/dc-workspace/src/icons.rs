@@ -23,6 +23,7 @@ pub fn glyph(name: &str) -> &'static str {
         "scissors" => i::SCISSORS,
         "scales" => i::SCALES,
         "ruler" => i::RULER,
+        "trash" => i::TRASH,
         "prohibit" => i::PROHIBIT,
         "printer" => i::PRINTER,
         "play-circle" => i::PLAY_CIRCLE,

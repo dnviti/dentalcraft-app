@@ -1,16 +1,18 @@
 //! What the workspace shows around the menu leaves: the notice before a long
-//! job, the sentence after a command whose output matters, the action button
-//! and the results of the case analysis in the inspector.
+//! job, the sentence after a command whose output matters, the label of the
+//! run button and the parts of the inspector of some functions (the
+//! separation parameters and result, the results of the case analysis; see
+//! `function` for the layout).
 //!
 //! The commands run through the same registered specs as the CLI and the MCP
 //! server; the workspace only reads their JSON output.
 
 use dc_case::{CaseState, ScanRole};
 use dc_i18n::Lang;
-use dc_module_api::{LeafInput, MenuItem, Toast, ToastLevel};
+use dc_module_api::{LeafInput, Toast, ToastLevel};
 use dc_ui::fonts;
 use dc_ui::theme::colors;
-use dc_ui::widgets::{self, BadgeKind, Button};
+use dc_ui::widgets::{self, BadgeKind};
 use dca_algo::diagnosis::{Level, LittleCategory};
 use dca_model::{AlignersState, ArchSpace, MODULE_ID, SegmentationSettings};
 use egui::{RichText, Ui};
@@ -38,12 +40,16 @@ pub(crate) const SEGMENT: &str = "aligners.preparation.segmentation.automatic";
 /// The check of the separated teeth (run by the pipeline after the
 /// separation): its output lists what it left out of date too.
 pub(crate) const SEGMENT_CHECK: &str = "aligners.preparation.segmentation.check";
+/// "Final position".
+pub(crate) const SETUP: &str = "aligners.planning.setup.automatic";
+/// "Study models".
+pub(crate) const STUDY_MODELS: &str = "aligners.output.study-models";
 /// The separation parameters stored in the case.
 const SEGMENT_SETTINGS: &str = "aligners.settings.segmentation";
 
-/// The parameters leaf `id` runs with when it is clicked: none for most
-/// leaves; "Find the teeth" takes the third-molars box and the missing teeth
-/// of its inspector, which are settings of the case.
+/// The parameters leaf `id` runs with: none for most leaves; "Find the
+/// teeth" takes the third-molars box and the missing teeth of its inspector,
+/// which are settings of the case.
 pub(crate) fn run_params(id: &str, state: &CaseState) -> Value {
     match id {
         FIND_TEETH => state
@@ -389,8 +395,8 @@ pub(crate) fn pick(input: LeafInput) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Label of the action button of leaf `id`.
-fn button_key(id: &str, input: Option<LeafInput>, done: bool) -> &'static str {
+/// Label of the run button of leaf `id`.
+pub(crate) fn button_key(id: &str, input: Option<LeafInput>, done: bool) -> &'static str {
     if dc_module_api::is_import_scans_command(id) {
         return "ws-btn-choose-scans";
     }
@@ -478,102 +484,40 @@ pub(crate) struct SegmentUi {
 }
 
 impl Workspace {
-    /// What the inspector adds under the module's text for the selected menu
-    /// entry: the action button of a leaf and, for the case analysis, its
-    /// results; for "Separate teeth and gum" its parameters and its result.
-    pub(crate) fn leaf_inspector(&mut self, ui: &mut Ui, item: Option<&MenuItem>) {
-        let Some(item) = item else { return };
-        let Some(id) = item.command_id() else { return };
-        let ready = self
-            .commands
-            .iter()
-            .any(|c| c.id == id && c.status == dc_module_api::MenuStatus::Ready);
-        // a manual tool opens its own panel
-        if !ready || crate::manual::Tool::from_command(id).is_some() {
-            return;
-        }
-        let c = *colors(ui);
-        ui.add_space(12.0);
-        if id == SEGMENT {
-            self.segment_inspector(ui);
-        }
-        let done = self.is_done(id);
-        let label = t(button_key(id, item.input, done));
-        let enabled = !self.is_busy();
-        let button = if done && item.input.is_none() && !dc_module_api::is_import_scans_command(id)
-        {
-            Button::secondary(label)
-        } else {
-            Button::primary(label)
-        };
-        if button.enabled(enabled).full_width(true).show(ui).clicked() {
-            self.activate(id);
-        }
-        if let Some((_, line)) = long_notice(id) {
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(t(line))
-                    .font(fonts::ui(12.0))
-                    .color(c.text_secondary),
-            );
-        }
-        if id == CASE_ANALYSIS {
-            let state = self.undo.current().clone();
-            ui.add_space(16.0);
-            case_analysis(ui, &state);
-        }
-    }
-
-    /// The info line, the folded separation parameters (one undo step each,
-    /// read from the case settings) and the result of the last run of each
-    /// arch, read from the case (it goes with the colours it describes).
-    fn segment_inspector(&mut self, ui: &mut Ui) {
-        let c = *colors(ui);
+    /// The separation parameters, read from the case settings: a change is
+    /// sent when the slider is let go, one undo step each.
+    pub(crate) fn segment_params(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();
-        let data = crate::overlay::aligners(&state);
-        let settings = data.map(|d| d.settings.segmentation).unwrap_or_default();
-        ui.label(
-            RichText::new(t("ws-seg-info"))
-                .font(fonts::ui(12.0))
-                .color(c.text_secondary),
-        );
-        ui.add_space(8.0);
+        let settings = crate::overlay::aligners(&state)
+            .map(|d| d.settings.segmentation)
+            .unwrap_or_default();
         let busy = self.is_busy();
         let mut commit = None;
         let drag = &mut self.segment.drag;
-        egui::CollapsingHeader::new(
-            RichText::new(t("ws-seg-params"))
-                .font(fonts::semibold(13.0))
-                .color(c.text_primary),
-        )
-        .id_salt("ws-seg-params")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                for (i, p) in SEG_PARAMS.iter().enumerate() {
-                    let mut v = match *drag {
-                        Some((d, v)) if d == i => v,
-                        _ => seg_value(&settings, i) as f32,
-                    };
-                    let r = widgets::labeled_slider(
-                        ui,
-                        &t(p.key),
-                        &mut v,
-                        p.lo..=p.hi,
-                        p.step,
-                        p.decimals,
-                        "",
-                        p.default,
-                    );
-                    if r.dragged() {
-                        *drag = Some((i, v));
-                    } else if r.drag_stopped() || r.changed() {
-                        *drag = None;
-                        commit = Some((i, v));
-                    }
-                    ui.add_space(4.0);
+        ui.add_enabled_ui(!busy, |ui| {
+            for (i, p) in SEG_PARAMS.iter().enumerate() {
+                let mut v = match *drag {
+                    Some((d, v)) if d == i => v,
+                    _ => seg_value(&settings, i) as f32,
+                };
+                let r = widgets::labeled_slider(
+                    ui,
+                    &t(p.key),
+                    &mut v,
+                    p.lo..=p.hi,
+                    p.step,
+                    p.decimals,
+                    "",
+                    p.default,
+                );
+                if r.dragged() {
+                    *drag = Some((i, v));
+                } else if r.drag_stopped() || r.changed() {
+                    *drag = None;
+                    commit = Some((i, v));
                 }
-            });
+                ui.add_space(4.0);
+            }
         });
         if let Some((i, v)) = commit
             && let Some(params) = seg_patch(&settings, i, v)
@@ -582,19 +526,49 @@ impl Workspace {
             let cmd = spec.command(params);
             self.run_command(Box::new(cmd));
         }
-        // the last run of each arch, kept in the case with its colours
-        let shown = case_seg_runs(data);
-        if !shown.is_empty() {
-            ui.add_space(8.0);
-            for line in seg_lines(&shown) {
-                ui.label(
-                    RichText::new(line)
-                        .font(fonts::ui(13.0))
-                        .color(c.text_primary),
-                );
-            }
+    }
+
+    /// The result of the last run of each arch, read from the case (it goes
+    /// with the colours it describes).
+    pub(crate) fn segment_results(&mut self, ui: &mut Ui) {
+        let c = *colors(ui);
+        let state = self.undo.current().clone();
+        for line in seg_lines(&case_seg_runs(crate::overlay::aligners(&state))) {
+            ui.label(
+                RichText::new(line)
+                    .font(fonts::ui(13.0))
+                    .color(c.text_primary),
+            );
         }
-        ui.add_space(12.0);
+    }
+
+    /// The status of the 3D teeth when they are out of date: the arches whose
+    /// colours, tooth marks or missing teeth changed by hand since the teeth
+    /// were built, and what to do (run again builds them again; those arches
+    /// show the scan until then). Nothing while the built teeth match the
+    /// case.
+    pub(crate) fn teeth_results(&mut self, ui: &mut Ui) {
+        let Some(arches) = crate::overlay::outdated_arch_names(self.undo.current()) else {
+            return;
+        };
+        let c = *colors(ui);
+        widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-outdated"));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(dc_i18n::tr_args(
+                "ws-teeth-outdated-detail",
+                &[("arches", &arches)],
+            ))
+            .font(fonts::ui(12.0))
+            .color(c.text_secondary),
+        );
+    }
+
+    /// The results of the case analysis, or the line that says it has not
+    /// run.
+    pub(crate) fn case_analysis_results(&mut self, ui: &mut Ui) {
+        let state = self.undo.current().clone();
+        case_analysis(ui, &state);
     }
 }
 

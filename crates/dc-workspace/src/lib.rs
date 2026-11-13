@@ -1,11 +1,15 @@
 //! The DentalCraft module workspace (screen `05 Aligners workspace` of the
 //! design): top bar, left menu tree from [`dc_module_api::Module::menu`],
-//! 3D viewport ([`dc_viewport`]) with its overlays, inspector
-//! ([`dc_module_api::Module::inspector`]), stage timeline and status bar.
+//! 3D viewport ([`dc_viewport`]) with its overlays, inspector of the selected
+//! function (laid out by `function`, with the module's part from
+//! [`dc_module_api::Module::inspector`]), stage timeline and status bar.
 //!
 //! The case lives in a [`dc_command::UndoStack`]; module commands and the
 //! scan import run as background jobs ([`dc_jobs::JobSystem`]) and land on
-//! the undo stack. Saving writes a `.dcprj` atomically on a job thread.
+//! the undo stack. Saving writes a `.dcprj` atomically on a job thread; a
+//! project that has a file is also saved by itself shortly after each change
+//! ([`autosave`], driven by [`Workspace::tick`], which [`Workspace::show`]
+//! calls every frame).
 //!
 //! ```ignore
 //! let mut ws = Workspace::new(Box::new(AlignersModule::new()), None, None, render_state);
@@ -13,13 +17,18 @@
 //! match ws.ui(ctx) {
 //!     WorkspaceAction::GoHome | WorkspaceAction::Closed => { /* back to Home */ }
 //!     WorkspaceAction::Saved(path) => { /* add to recent projects */ }
+//!     WorkspaceAction::Quit => { /* close the window: nothing is left to save */ }
 //!     WorkspaceAction::None => {}
 //! }
+//! // the window is asked to close
+//! if !ws.request_quit() { /* keep it open: Quit comes once it is saved */ }
 //! ```
 //!
 //! Tests and headless tools use [`Workspace::new_headless`] (no GPU, no
 //! native file dialogs).
 
+pub mod autosave;
+mod function;
 mod icons;
 pub mod import;
 mod keys;

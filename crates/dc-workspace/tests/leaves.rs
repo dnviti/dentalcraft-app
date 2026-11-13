@@ -1,6 +1,8 @@
-//! The leaves that ask for a folder or a file, and what the workspace shows
-//! of the output of a command: tested with a module of its own whose commands
-//! record their parameters, so no dialog and no real pipeline is needed.
+//! The leaves that ask for a folder or a file, what the workspace shows of
+//! the output of a command, and the run button of the inspector (the only
+//! way to run a function: a click on the menu selects it): tested with a
+//! module of its own whose commands record their parameters, so no dialog
+//! and no real pipeline is needed.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +17,7 @@ use dc_module_api::{
 };
 use dc_workspace::Workspace;
 use dca_module::AlignersModule;
-use egui::vec2;
+use egui::{Role, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
@@ -36,12 +38,15 @@ static SLOW: AtomicBool = AtomicBool::new(false);
 static STUBBORN: AtomicBool = AtomicBool::new(false);
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 static METHOD: Mutex<&'static str> = Mutex::new("virtual_bite");
+/// The case holds the result of `OTHER`.
+static OTHER_DONE: AtomicBool = AtomicBool::new(false);
 
 fn exclusive() -> MutexGuard<'static, ()> {
     let g = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     CALLS.lock().unwrap().clear();
     SLOW.store(false, Ordering::SeqCst);
     STUBBORN.store(false, Ordering::SeqCst);
+    OTHER_DONE.store(false, Ordering::SeqCst);
     g
 }
 
@@ -173,6 +178,9 @@ impl Module for Fake {
         ctx.queue(Box::new(spec.command(Value::Null)));
         Ok(())
     }
+    fn leaf_done(&self, _state: &CaseState, id: &str) -> bool {
+        id == OTHER && OTHER_DONE.load(Ordering::SeqCst)
+    }
     fn inspector(&mut self, ui: &mut egui::Ui, ctx: &mut ModuleCtx<'_>) {
         self.inner.inspector(ui, ctx);
     }
@@ -216,7 +224,7 @@ fn settle(h: &mut Harness<'static, Workspace>) {
 fn a_folder_answer_runs_the_command_with_the_dir_parameter() {
     let _g = exclusive();
     let mut ws = fake();
-    ws.activate(EXPORT);
+    ws.run_leaf(EXPORT);
     assert_eq!(ws.dialog_requests(), 1);
     assert!(calls().is_empty(), "nothing runs before the answer");
     ws.answer_leaf_input(EXPORT, Some(PathBuf::from("/tmp/dc-print")));
@@ -240,7 +248,7 @@ fn a_folder_answer_runs_the_command_with_the_dir_parameter() {
 fn a_scan_answer_runs_the_visit_with_the_scan_parameter_in_one_undo_step() {
     let _g = exclusive();
     let mut ws = fake();
-    ws.activate(VISIT);
+    ws.run_leaf(VISIT);
     ws.answer_leaf_input(VISIT, Some(PathBuf::from("/tmp/visit.stl")));
     assert!(ws.wait_for_jobs(WAIT));
     assert_eq!(calls(), [(VISIT, json!({ "scan": "/tmp/visit.stl" }))]);
@@ -257,7 +265,7 @@ fn a_scan_answer_runs_the_visit_with_the_scan_parameter_in_one_undo_step() {
 fn a_cancelled_dialog_does_nothing() {
     let _g = exclusive();
     let mut ws = fake();
-    ws.activate(EXPORT);
+    ws.run_leaf(EXPORT);
     ws.answer_leaf_input(EXPORT, None);
     assert!(!ws.is_busy());
     assert!(calls().is_empty());
@@ -273,11 +281,11 @@ fn while_a_command_runs_the_leaf_gets_the_busy_toast_and_no_dialog() {
     ws.answer_leaf_input(EXPORT, Some(PathBuf::from("/tmp/a")));
     assert!(ws.is_busy());
     let asked = ws.dialog_requests();
-    // the click on another input leaf, and a late answer
-    ws.activate(VISIT);
+    // the button of another input leaf, and a late answer
+    ws.run_leaf(VISIT);
     assert_eq!(ws.dialog_requests(), asked, "no dialog while busy");
     ws.answer_leaf_input(VISIT, Some(PathBuf::from("/tmp/v.stl")));
-    ws.activate(OTHER);
+    ws.run_leaf(OTHER);
     let busy = ws
         .toast_keys()
         .iter()
@@ -348,7 +356,7 @@ fn the_bite_says_which_method_ran() {
     ] {
         *METHOD.lock().unwrap() = method;
         let mut ws = fake();
-        ws.activate(BITE);
+        ws.run_leaf(BITE);
         assert!(ws.wait_for_jobs(WAIT));
         assert_eq!(ws.toast_keys(), [key], "{method}");
         assert_eq!(
@@ -368,13 +376,17 @@ fn the_selected_leaf_has_a_primary_button_that_runs_it() {
     ws.select_item(OTHER);
     let mut h = harness(ws);
     h.run();
+    assert!(calls().is_empty(), "the selection runs nothing");
+    assert!(h.query_by_label("Not done yet").is_some());
     h.get_by_label("Run").click();
     settle(&mut h);
     assert_eq!(calls(), [(OTHER, Value::Null)]);
 
-    // a leaf that asks for a folder: the button asks again
+    // a leaf that asks for a folder: the selection asks nothing, the button
+    // asks again
     h.state_mut().select_item(EXPORT);
     h.run();
+    assert_eq!(h.state().dialog_requests(), 0);
     h.get_by_label("Choose the folder and export…").click();
     h.run();
     assert_eq!(h.state().dialog_requests(), 1);
@@ -382,6 +394,27 @@ fn the_selected_leaf_has_a_primary_button_that_runs_it() {
         h.query_by_label_contains("can take a long time").is_some(),
         "the line is in the inspector before the click"
     );
+}
+
+#[test]
+fn a_step_already_done_offers_run_again_and_runs_only_from_it() {
+    let _g = exclusive();
+    OTHER_DONE.store(true, Ordering::SeqCst);
+    let mut h = harness(fake());
+    h.run();
+    // the click on its row selects it: nothing runs again by itself (the
+    // toolbar has a "3D teeth" toggle too)
+    h.get_by_role_and_label(Role::TreeItem, "3D teeth").click();
+    h.run();
+    assert_eq!(h.state().selected(), Some(OTHER));
+    assert!(!h.state().is_busy());
+    assert!(calls().is_empty(), "{:?}", calls());
+    assert!(h.query_by_label("Done").is_some());
+    assert!(h.query_by_label("Run").is_none());
+    // the secondary button runs it again
+    h.get_by_label("Run again").click();
+    settle(&mut h);
+    assert_eq!(calls(), [(OTHER, Value::Null)]);
 }
 
 #[test]
