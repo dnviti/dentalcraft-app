@@ -83,7 +83,8 @@ impl ButtonSize {
 }
 
 /// A design-system button. Use [`primary_button`] and friends for the
-/// common cases, this builder for icons, sizes and disabled state.
+/// common cases, this builder for icons, sizes, disabled state and the
+/// buttons that stay pressed while what they open is open.
 #[must_use = "call .show(ui)"]
 pub struct Button {
     kind: ButtonKind,
@@ -93,6 +94,7 @@ pub struct Button {
     enabled: bool,
     full_width: bool,
     min_width: f32,
+    selected: Option<bool>,
 }
 
 impl Button {
@@ -106,6 +108,7 @@ impl Button {
             enabled: true,
             full_width: false,
             min_width: 0.0,
+            selected: None,
         }
     }
 
@@ -164,6 +167,14 @@ impl Button {
         self
     }
 
+    /// A button that stays pressed: when `selected` it takes the selection
+    /// look (`select_soft` fill, `select_blue` border) and says so to screen
+    /// readers.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
     /// Adds the button.
     pub fn show(self, ui: &mut Ui) -> Response {
         let c = *colors(ui);
@@ -208,13 +219,20 @@ impl Button {
         let (rect, response) = ui.allocate_exact_size(vec2(width, self.size.height()), sense);
         let label = self.label.clone();
         let enabled = self.enabled;
-        response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, &label));
+        let selected = self.selected;
+        response.widget_info(|| match selected {
+            Some(s) => WidgetInfo::selected(Role::Button, enabled, s, &label),
+            None => WidgetInfo::labeled(Role::Button, enabled, &label),
+        });
         if ui.is_rect_visible(rect) {
             let hovered = self.enabled && response.hovered();
             let pressed = self.enabled && response.is_pointer_button_down_on();
             let r = radius(tokens().radius.sm);
             let (fill, stroke) = match (self.kind, self.enabled) {
                 (_, false) => (c.bg_hover, Stroke::NONE),
+                _ if self.selected == Some(true) => {
+                    (c.select_soft, Stroke::new(1.0, c.select_blue))
+                }
                 (ButtonKind::Primary, _) => (
                     if pressed {
                         c.accent_amber_pressed
@@ -1072,6 +1090,154 @@ pub fn labeled_slider(
     response
 }
 
+/// Height of a [`stage_slider`]: the row of the thumb label, the track, the
+/// row of the end labels.
+pub const STAGE_SLIDER_HEIGHT: f32 = 52.0;
+/// Height of the thumb label row at the top of a [`stage_slider`] (empty
+/// while the slider is disabled).
+pub const STAGE_SLIDER_LABEL_ROW: f32 = 18.0;
+
+/// Plain slider over the whole numbers `0..=last`, full width of the layout.
+///
+/// Same look as [`labeled_slider`] (4 pt rail, `select_blue` fill, 14 pt
+/// thumb). A press on the track jumps there and dragging scrubs; with the
+/// keyboard focus the arrow keys step by 1 (Shift: 5). The number of the
+/// thumb is written above it (kept inside the track bounds) and the first
+/// and last numbers below the track ends; an end label that would sit under
+/// the thumb label is left out. There are no other ticks or labels. With
+/// `last == 0` the slider is disabled and shows no numbers. `label` is the
+/// accessible name. The response is the track's and is marked changed when
+/// `value` moves.
+pub fn stage_slider(ui: &mut Ui, value: &mut u32, last: u32, label: &str) -> Response {
+    const THUMB_R: f32 = 7.0;
+    const TRACK_H: f32 = 20.0;
+    let c = *colors(ui);
+    let enabled = last > 0 && ui.is_enabled();
+    let (rect, all) = ui.allocate_exact_size(
+        vec2(ui.available_width(), STAGE_SLIDER_HEIGHT),
+        Sense::hover(),
+    );
+    let track = Rect::from_min_size(
+        pos2(rect.left(), rect.top() + STAGE_SLIDER_LABEL_ROW),
+        vec2(rect.width(), TRACK_H),
+    );
+    let sense = if enabled {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let mut response = ui.interact(track, all.id.with("track"), sense);
+    let id = response.id;
+    response.widget_info(|| WidgetInfo::labeled(Role::Slider, enabled, label));
+    *value = (*value).min(last);
+    let old = *value;
+    let x0 = track.left() + THUMB_R;
+    let x1 = track.right() - THUMB_R;
+    if enabled {
+        if let Some(pos) = response.interact_pointer_pos()
+            && response.is_pointer_button_down_on()
+            && x1 > x0
+        {
+            let t = ((pos.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+            *value = (t * last as f32).round() as u32;
+        }
+        if response.has_focus() {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    id,
+                    EventFilter {
+                        horizontal_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            let (left, right, shift) = ui.input(|i| {
+                (
+                    i.key_pressed(Key::ArrowLeft),
+                    i.key_pressed(Key::ArrowRight),
+                    i.modifiers.shift,
+                )
+            });
+            let s = if shift { 5 } else { 1 };
+            if left {
+                *value = value.saturating_sub(s);
+            }
+            if right {
+                *value = value.saturating_add(s).min(last);
+            }
+        }
+    }
+    if *value != old {
+        response.mark_changed();
+    }
+    let t = if last > 0 {
+        *value as f32 / last as f32
+    } else {
+        0.0
+    };
+    let xv = egui::lerp(x0..=x1.max(x0), t);
+    let cy = track.center().y;
+    let p = ui.painter();
+    let rail = Rect::from_min_max(pos2(x0, cy - 2.0), pos2(x1.max(x0), cy + 2.0));
+    p.rect_filled(rail, radius(2.0), c.bg_sunken);
+    if enabled {
+        p.rect_filled(
+            Rect::from_min_max(rail.min, pos2(xv, rail.max.y)),
+            radius(2.0),
+            c.select_blue,
+        );
+    }
+    let thumb = pos2(xv, cy);
+    if enabled && response.has_focus() {
+        p.circle_stroke(thumb, 9.0, Stroke::new(4.0, c.focus_ring));
+    }
+    if enabled {
+        p.circle(
+            thumb,
+            THUMB_R,
+            c.text_primary,
+            Stroke::new(2.0, c.select_blue),
+        );
+    } else {
+        p.circle(
+            thumb,
+            THUMB_R,
+            c.bg_sunken,
+            Stroke::new(1.0, c.border_strong),
+        );
+        return response;
+    }
+    // the numbers: the thumb's above it, the ends' below the track
+    let lay = |s: String, font: egui::FontId, color: Color32| p.layout_no_wrap(s, font, color);
+    let now = lay(value.to_string(), fonts::mono_bold(12.0), c.text_primary);
+    let half = now.size().x / 2.0;
+    let cx = xv.clamp(
+        rect.left() + half,
+        (rect.right() - half).max(rect.left() + half),
+    );
+    let now_rect = Rect::from_center_size(
+        pos2(cx, rect.top() + STAGE_SLIDER_LABEL_ROW / 2.0),
+        now.size(),
+    );
+    p.galley(now_rect.min, now, c.text_primary);
+    let row_y = rect.bottom() - (STAGE_SLIDER_HEIGHT - STAGE_SLIDER_LABEL_ROW - TRACK_H) / 2.0;
+    for (n, at, anchor) in [
+        (0, rect.left(), Align2::LEFT_CENTER),
+        (last, rect.right(), Align2::RIGHT_CENTER),
+    ] {
+        let g = lay(n.to_string(), fonts::mono(11.0), c.text_secondary);
+        let r = anchor.anchor_size(pos2(at, row_y), g.size());
+        if r.expand2(vec2(2.0, 0.0))
+            .x_range()
+            .intersects(now_rect.x_range())
+        {
+            continue;
+        }
+        p.galley(r.min, g, c.text_secondary);
+    }
+    response
+}
+
 /// Determinate (`Some(0..=1)`) or indeterminate (`None`, 120 pt run
 /// sliding) 4 pt progress bar over `width`.
 pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) -> Response {
@@ -1211,5 +1377,186 @@ mod tests {
             width < 3.7 * cell,
             "readout {width} px is not tight ({cell} px cell)"
         );
+    }
+
+    /// What one frame of a [`stage_slider`] drew and did.
+    struct SliderFrame {
+        /// Every text drawn, with its bounds.
+        texts: Vec<(String, Rect)>,
+        track: Rect,
+        changed: bool,
+    }
+
+    fn slider_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        value: &mut u32,
+        last: u32,
+    ) -> SliderFrame {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 120.0))),
+            events,
+            ..Default::default()
+        };
+        let (mut track, mut changed) = (Rect::NOTHING, false);
+        let mut out = ctx.run_ui(raw, |ui| {
+            let r = stage_slider(ui, value, last, "Stage");
+            (track, changed) = (r.rect, r.changed());
+        });
+        out.textures_delta.clear();
+        let texts = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), s.shape.visual_bounding_rect()))
+                }
+                _ => None,
+            })
+            .collect();
+        SliderFrame {
+            texts,
+            track,
+            changed,
+        }
+    }
+
+    fn pointer(pos: Pos2, pressed: Option<bool>) -> Vec<egui::Event> {
+        let mut ev = vec![egui::Event::PointerMoved(pos)];
+        if let Some(pressed) = pressed {
+            ev.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+        }
+        ev
+    }
+
+    fn slider_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, crate::theme::Mode::Dark);
+        ctx
+    }
+
+    /// The x of stage `n` of `last` on `track`, as the widget maps it.
+    fn x_of(track: Rect, n: u32, last: u32) -> f32 {
+        egui::lerp(
+            track.left() + 7.0..=track.right() - 7.0,
+            n as f32 / last as f32,
+        )
+    }
+
+    #[test]
+    fn stage_slider_writes_only_the_thumb_and_the_end_numbers() {
+        let ctx = slider_ctx();
+        for (value, want) in [
+            (360, vec!["360", "0", "721"]),
+            (0, vec!["0", "721"]),
+            (1, vec!["1", "721"]),
+            (721, vec!["0", "721"]),
+            (720, vec!["0", "720"]),
+        ] {
+            let mut v = value;
+            let f = slider_frame(&ctx, vec![], &mut v, 721);
+            let mut got: Vec<_> = f.texts.iter().map(|t| t.0.as_str()).collect();
+            let mut want = want;
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "stage {value}");
+            let mut above = 0;
+            for (text, r) in &f.texts {
+                // every number stays inside the track bounds
+                assert!(
+                    r.left() >= f.track.left() - 0.5 && r.right() <= f.track.right() + 0.5,
+                    "stage {value}: {text:?} at {r:?} leaves {:?}",
+                    f.track
+                );
+                // the thumb number is above the track, the end numbers below it
+                if r.bottom() <= f.track.top() {
+                    above += 1;
+                } else {
+                    assert!(r.top() >= f.track.bottom(), "{text:?} at {r:?}");
+                }
+            }
+            assert_eq!(above, 1, "stage {value}: one number above the thumb");
+        }
+        // no stages: disabled, nothing written
+        let mut v = 0;
+        assert!(slider_frame(&ctx, vec![], &mut v, 0).texts.is_empty());
+    }
+
+    #[test]
+    fn stage_slider_jumps_on_press_and_scrubs_on_drag() {
+        let ctx = slider_ctx();
+        let last = 721;
+        let mut v = 0;
+        // one frame so the widget exists before the pointer reaches it
+        let track = slider_frame(&ctx, vec![], &mut v, last).track;
+        let y = track.center().y;
+        let at = |n: u32| pos2(x_of(track, n, last), y);
+        // press at stage 100: it jumps there
+        let f = slider_frame(&ctx, pointer(at(100), Some(true)), &mut v, last);
+        assert_eq!(v, 100);
+        assert!(f.changed);
+        // drag: each move sets the stage under the pointer
+        for n in [101, 250, 700] {
+            slider_frame(&ctx, pointer(at(n), None), &mut v, last);
+            assert_eq!(v, n);
+        }
+        // past the ends it clamps, even when the pointer leaves the bar
+        let far = pos2(track.right() + 50.0, y + 30.0);
+        slider_frame(&ctx, pointer(far, None), &mut v, last);
+        assert_eq!(v, last);
+        let far = pos2(track.left() - 50.0, y);
+        slider_frame(&ctx, pointer(far, None), &mut v, last);
+        assert_eq!(v, 0);
+        // release changes nothing
+        let f = slider_frame(&ctx, pointer(far, Some(false)), &mut v, last);
+        assert_eq!(v, 0);
+        assert!(!f.changed);
+        // a later click on the track jumps
+        slider_frame(&ctx, pointer(at(721), Some(true)), &mut v, last);
+        slider_frame(&ctx, pointer(at(721), Some(false)), &mut v, last);
+        assert_eq!(v, 721);
+    }
+
+    #[test]
+    fn stage_slider_arrow_keys_step_and_a_disabled_one_ignores_input() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = Harness::builder()
+            .with_size(vec2(400.0, 120.0))
+            .with_context_setup(|ctx| crate::theme::install(ctx, crate::theme::Mode::Dark))
+            .build_ui_state(
+                |ui, s: &mut (u32, u32)| {
+                    let last = s.1;
+                    stage_slider(ui, &mut s.0, last, "Stage");
+                },
+                (3u32, 10u32),
+            );
+        h.run();
+        h.get_by_role(Role::Slider).focus();
+        h.run();
+        h.key_press(Key::ArrowRight);
+        h.run();
+        assert_eq!(h.state().0, 4);
+        h.key_press(Key::ArrowLeft);
+        h.key_press(Key::ArrowLeft);
+        h.run();
+        assert_eq!(h.state().0, 2);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, Key::ArrowRight);
+        h.run();
+        assert_eq!(h.state().0, 7);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, Key::ArrowRight);
+        h.run();
+        assert_eq!(h.state().0, 10, "clamped at the last stage");
+        // a shrunk range pulls the value in, and with no stages nothing moves
+        h.state_mut().1 = 0;
+        h.run();
+        assert_eq!(h.state().0, 0);
+        h.get_by_role(Role::Slider).click();
+        h.run();
+        assert_eq!(h.state().0, 0);
     }
 }
