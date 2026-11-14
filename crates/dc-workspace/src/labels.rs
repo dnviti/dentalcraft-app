@@ -197,8 +197,8 @@ pub(crate) fn anchors_of(state: &CaseState, built: bool) -> Vec<Anchor> {
 }
 
 /// `p`, a point of the tooth `fdi` in the world, moved to where the tooth is
-/// at `stage` (the pose is relative to the rest frame of the tooth, as in
-/// `overlay::posed_mesh`).
+/// at `stage` (the pose is relative to the rest pose of the tooth,
+/// `dca_algo::teeth::rest_pose`, as the plan and the 3D teeth read it).
 pub(crate) fn posed_point(state: &CaseState, stage: &Stage, fdi: u8, p: Vec3) -> Vec3 {
     let Some(al) = overlay::aligners(state) else {
         return p;
@@ -210,7 +210,7 @@ pub(crate) fn posed_point(state: &CaseState, stage: &Stage, fdi: u8, p: Vec3) ->
         return p;
     };
     let world = state.case.world_frame.from_case;
-    let moved = fr.pose.compose(pose).compose(&fr.pose.inverse());
+    let moved = overlay::tooth_move(fr, pose);
     // case coordinates -> moved -> world
     let case_p = world.inverse().apply_point(p.as_dvec3());
     world.apply_point(moved.apply_point(case_p)).as_vec3()

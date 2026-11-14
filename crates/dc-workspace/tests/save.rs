@@ -399,6 +399,17 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.planning.movements",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 3), "mesial_mm": 0.3 })),
         ),
+        // the gizmo of the viewport: a tooth scaled, the lower arch moved
+        (
+            "aligners.components.transform",
+            Run(|ws, _| json!({ "component": "tooth", "fdi": lower_crown(ws, 3), "scale": 1.05 })),
+        ),
+        (
+            "aligners.components.transform",
+            Run(
+                |_, _| json!({ "component": "gingiva", "arch": "lower", "move": { "t": [0.2, -0.1, 0.3], "q": [0.0, 0.0, 0.0087, 0.99996] } }),
+            ),
+        ),
         // the report of 2026-11-13: the brush over built teeth, then the marks
         (
             "aligners.preparation.segmentation.manual-brush",

@@ -142,11 +142,14 @@ impl Workspace {
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
+        // W, E, R: the mode of the gizmo of the selected component
+        self.selection_keys(ui);
         if consume(Modifiers::NONE, Key::Escape) {
             if std::mem::take(&mut self.menu_view.filter_focused) {
                 // Escape in the filter field: clear it
                 self.menu_view.filter.clear();
-            } else {
+            } else if !self.selection_escape() {
+                // a drag of the gizmo, then the selected component, go first
                 self.clear_selection();
             }
         }
@@ -392,14 +395,18 @@ impl Workspace {
         egui::ScrollArea::vertical()
             .id_salt("dc-workspace-inspector-scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| match &item {
-                // a function: the workspace lays it out, by the menu law
-                Some(item) if item.command_id().is_some() => self.function_inspector(ui, item),
-                // a group: what the module says of it
-                Some(_) => self.module_ctx_run(|m, ctx| m.inspector(ui, ctx)),
-                None => {
-                    ui.heading(t(self.module.name_key()));
-                    ui.label(t("ws-inspector-select"));
+            .show(ui, |ui| {
+                // the component selected in the viewport, above the function
+                self.selection_inspector(ui);
+                match &item {
+                    // a function: the workspace lays it out, by the menu law
+                    Some(item) if item.command_id().is_some() => self.function_inspector(ui, item),
+                    // a group: what the module says of it
+                    Some(_) => self.module_ctx_run(|m, ctx| m.inspector(ui, ctx)),
+                    None => {
+                        ui.heading(t(self.module.name_key()));
+                        ui.label(t("ws-inspector-select"));
+                    }
                 }
             });
     }
@@ -736,6 +743,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl Shift S", "save-as"),
     ("/", "ws-key-find"),
     ("Esc", "ws-key-clear"),
+    ("W E R", "ws-key-gizmo"),
     (", .", "ws-key-stage"),
     ("Space", "ws-key-play"),
     ("Home End", "ws-key-first-last"),

@@ -146,6 +146,9 @@ pub(crate) struct ViewState {
     scan_ids: Vec<uuid::Uuid>,
     /// The meshes of the last scene (also without a viewport).
     pub meshes: Vec<ViewMesh>,
+    /// Counts the scenes built: the selection decorates the scene of this
+    /// generation (`select`).
+    pub generation: u64,
 }
 
 /// Which arches are shown. Kept for the workspace session, apart from the
@@ -209,6 +212,13 @@ fn scene_color(c: Color32) -> Color {
         f32::from(b) / 255.0,
         f32::from(a) / 255.0,
     )
+}
+
+/// The selection colour of the design (an sRGB token) as the linear colour
+/// the viewport draws the outline with.
+fn outline_color(c: Color32) -> Color {
+    let l = egui::Rgba::from(c);
+    Color::rgba(l.r(), l.g(), l.b(), 1.0)
 }
 
 /// What a scene is built from.
@@ -511,16 +521,25 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     }
     let entry_mesh = |i: usize, e: &SceneEntry| -> Option<ViewMesh> {
         let SceneItem::Mesh {
+            blob,
             coloring,
             xform,
             pickable,
-            ..
         } = &e.item
         else {
             return None;
         };
         let mesh = e.resolve_mesh(|b| state.blobs.get(b))?;
-        let id = e.tooth.map_or((1 << 63) | i as u64, manual::tooth_mesh_id);
+        // a tooth or the gingiva of an arch has an id that names it (a pick
+        // and the selection read it back)
+        let gingiva = e
+            .arch
+            .filter(|a| e.tooth.is_none() && al.is_some_and(|d| d.gingiva.get(a) == Some(blob)));
+        let id = match (e.tooth, gingiva) {
+            (Some(f), _) => manual::tooth_mesh_id(f),
+            (None, Some(a)) => crate::select::gingiva_mesh_id(a),
+            (None, None) => (1 << 63) | i as u64,
+        };
         let coloring = match e.tooth {
             Some(_) if !input.layers.labels => MeshColoring::Uniform(input.enamel),
             _ => coloring.clone(),
@@ -656,6 +675,7 @@ impl Workspace {
         let new_scans = ids != self.view.scan_ids && !ids.is_empty();
         self.view.scan_ids = ids;
         self.view.meshes = meshes.clone();
+        self.view.generation += 1;
         if let Some(vp) = &mut self.view.viewport {
             vp.settings.wireframe = self.view.display == Display::Wireframe;
             vp.set_meshes(meshes);
@@ -777,6 +797,9 @@ impl Workspace {
     pub(crate) fn center_ui(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
         self.sync_scene(ui);
+        // the selection: outline, tint, gizmo, and the change being dragged
+        self.selection_follow_case();
+        self.selection_to_viewport();
         let rect = ui.available_rect_before_wrap();
         let inset = OVERLAY_INSET;
         let inner = rect.shrink(inset);
@@ -785,16 +808,22 @@ impl Workspace {
         let mut px_per_mm = None;
         let mut manual_events = Vec::new();
         let mut alt_action = Action::None;
+        let mut sel_input = crate::select::SelInput::default();
         let anchors = self.tooth_anchors();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
-                vp.settings.hover_pick = self.manual.wants_hover();
+                // a painting tool, or the selection (no tool open), reads the
+                // mesh under the pointer
+                vp.settings.hover_pick = self.manual.wants_hover() || self.manual.tool.is_none();
+                vp.settings.outline_color = outline_color(c.select_blue);
+                vp.settings.outline_width = dc_ui::tokens::tokens().stroke.selected_tooth;
                 vp.settings.fit_insets = fit_insets(toolbar_height(toolbar_rows.len()));
                 if std::mem::take(&mut self.view.refit) {
                     vp.fit();
                 }
-                // the clicks and strokes go to the manual tool that is open
+                // the clicks and strokes go to the manual tool that is open,
+                // else to the selection and its gizmo
                 let vr = vp.ui(ui);
                 // the tooth numbers, the Alt+click that chooses the brush tooth
                 // and the click on a number or a mark ("Delete a tooth")
@@ -816,6 +845,22 @@ impl Workspace {
                     },
                 );
                 manual_events = crate::manual::collect(&mut self.manual, ui, vp, &vr, mark_click);
+                if self.manual.tool.is_none() {
+                    let alt = ui.input(|i| i.modifiers.alt);
+                    let clicked = vr.response.clicked_by(egui::PointerButton::Primary)
+                        && !vr.gizmo_consumed
+                        && !alt;
+                    sel_input = crate::select::SelInput {
+                        pick: vr.pick.filter(|_| clicked && mark_click.is_none()),
+                        hovered: vr.hovered.filter(|_| !vr.gizmo_hovered),
+                        empty_click: clicked && vr.pick.is_none() && mark_click.is_none(),
+                        chip: mark_click.filter(|_| clicked),
+                        gizmo: vr.gizmo,
+                        eye: vp.camera().eye(),
+                    };
+                }
+                // the gizmo over the numbers
+                vp.paint_transform_gizmo(ui.painter(), vr.response.hover_pos());
                 let half = vp.camera().half_height();
                 if half > 0.0 {
                     px_per_mm = Some(rect.height() / (2.0 * half));
@@ -830,6 +875,7 @@ impl Workspace {
 
         self.manual_action(alt_action);
         self.manual_events(manual_events);
+        self.selection_input(sel_input, Some(ui.ctx()));
         self.manual_feedback();
 
         // toolbar + caption (top left)
@@ -2415,8 +2461,10 @@ mod built_teeth_tests {
         h.run();
         assert!(h.query_by_label("Out of date").is_some());
         assert!(
-            h.query_by_label_contains("changed after the 3D teeth were built (Lower)")
-                .is_some()
+            h.query_by_label_contains(
+                "Changed after the 3D teeth were built (Lower: teeth corrected by hand)"
+            )
+            .is_some()
         );
         // the toggle says why the lower arch shows its scan
         let teeth = h.get_by_role_and_label(Role::RadioButton, "3D teeth");

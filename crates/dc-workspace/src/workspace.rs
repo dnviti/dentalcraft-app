@@ -257,6 +257,8 @@ pub struct Workspace {
     pub(crate) egui_ctx: Option<egui::Context>,
     pub(crate) view: ViewState,
     pub(crate) manual: crate::manual::Manual,
+    /// The component selected in the viewport and its gizmo.
+    pub(crate) selection: crate::select::Selection,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
     pub(crate) menu_view: MenuView,
@@ -365,6 +367,7 @@ impl Workspace {
             egui_ctx: None,
             view: ViewState::default(),
             manual: crate::manual::Manual::default(),
+            selection: crate::select::Selection::default(),
             segment: leaf::SegmentUi::default(),
             selected: None,
             import_role: None,

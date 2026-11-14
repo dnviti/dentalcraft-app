@@ -791,6 +791,20 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
                 )
             }
         }
+        // the gizmo: quiet unless a moved tooth collides or a scaled one
+        // leaves its plan out of date
+        crate::select::TRANSFORM => {
+            if out["plan"]["collides"] == true {
+                feedback_toast(ADJUST, &out["plan"])
+            } else if out["setup_outdated"] == true {
+                Some(
+                    Toast::new(ToastLevel::Info, "ws-toast-tooth-resized")
+                        .with_detail(t("ws-toast-tooth-resized-detail")),
+                )
+            } else {
+                None
+            }
+        }
         BRUSH | CLEAN => {
             let teeth: Vec<String> = match id {
                 BRUSH => out["to_rebuild"].as_array(),
