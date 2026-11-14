@@ -14,6 +14,7 @@ use dc_module_api::{
 };
 use dc_project::{Manifest, Project};
 use dc_session::builtins::{CASE_IMPORT, CASE_SET_ROLE};
+use dca_algo::diagnosis::edit::EditField;
 use egui::KeyboardShortcut;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -263,6 +264,9 @@ pub struct Workspace {
     pub(crate) region: crate::region::RegionView,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
+    /// The value of "Manual corrections" of the case analysis being typed
+    /// or dragged.
+    pub(crate) diagnosis_ui: leaf::DiagnosisUi,
     /// Whether the case needs the bite before "Final position".
     pub(crate) bite_check: leaf::BiteCheck,
     pub(crate) menu_view: MenuView,
@@ -377,6 +381,7 @@ impl Workspace {
             selection: crate::select::Selection::default(),
             region: crate::region::RegionView::default(),
             segment: leaf::SegmentUi::default(),
+            diagnosis_ui: leaf::DiagnosisUi::default(),
             bite_check: leaf::BiteCheck::default(),
             selected: None,
             import_role: None,
@@ -868,6 +873,29 @@ impl Workspace {
                 spec,
                 params,
                 SpecKind::Leaf(leaf::MAKE_BASE),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// Writes by hand (`Some`, mm) or resets to the computed one (`None`) a
+    /// value of the case analysis of the arch `role`
+    /// (`aligners.diagnosis.edit-values`). One undoable change; the
+    /// complexity follows. Refused while an import or command runs.
+    pub fn edit_diagnosis(&mut self, role: ScanRole, field: EditField, value: Option<f64>) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::DIAGNOSIS_EDIT) {
+            let params = json!({
+                "arch": import::role_id(role),
+                "values": { field.key(): value },
+            });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::DIAGNOSIS_EDIT),
                 "ws-job-command",
             );
         }

@@ -15,8 +15,9 @@ use dc_module_api::{LeafInput, Toast, ToastLevel};
 use dc_ui::fonts;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind};
+use dca_algo::diagnosis::edit::{self, EditField};
 use dca_algo::diagnosis::{Level, LittleCategory};
-use dca_model::{AlignersState, ArchSpace, MODULE_ID, SegmentationSettings};
+use dca_model::{AlignersState, ArchSpace, Diagnosis, MODULE_ID, SegmentationSettings};
 use egui::{RichText, Ui};
 use serde_json::Value;
 
@@ -51,6 +52,9 @@ pub(crate) const STUDY_MODELS: &str = "aligners.output.study-models";
 pub(crate) const SET_ARCH: &str = "aligners.case.set-arch";
 /// "Close with a base" (the manual corrections of "Import scans").
 pub(crate) const MAKE_BASE: &str = "aligners.case.make-base";
+/// The values of the case analysis written by hand (the manual corrections
+/// of "Case analysis").
+pub(crate) const DIAGNOSIS_EDIT: &str = "aligners.diagnosis.edit-values";
 /// The separation parameters stored in the case.
 const SEGMENT_SETTINGS: &str = "aligners.settings.segmentation";
 
@@ -173,8 +177,72 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
         }),
         SET_ARCH => arch_report(out),
         MAKE_BASE => Some(base_report(out)),
+        CASE_ANALYSIS => diagnosis_reset_report(out),
+        DIAGNOSIS_EDIT => Some(diagnosis_edit_report(out)),
         _ => None,
     }
+}
+
+/// The text key of the level of a complexity score.
+fn level_key(level: Level) -> &'static str {
+    match level {
+        Level::Easy => "ws-ca-level-easy",
+        Level::Moderate => "ws-ca-level-moderate",
+        Level::Difficult => "ws-ca-level-difficult",
+        Level::VeryComplex => "ws-ca-level-very-complex",
+    }
+}
+
+/// What the correction of the case analysis by hand gave: the complexity
+/// now, and that the aligners planned with the old values are to be planned
+/// again.
+fn diagnosis_edit_report(out: &Value) -> Reported {
+    let score = out["catcat_score"].as_u64().unwrap_or(0);
+    let level = t(level_key(Level::of(u32::try_from(score).unwrap_or(0))));
+    let mut lines = vec![tr_args(
+        "ws-diag-edited-detail",
+        &[("score", &score.to_string()), ("level", &level)],
+    )];
+    if out["staging_outdated"] == true {
+        lines.push(t("ws-diag-edited-stale"));
+    }
+    Reported {
+        toast: Toast::new(ToastLevel::Success, "ws-toast-diag-edited")
+            .with_detail(lines.join("\n")),
+        sticky: false,
+    }
+}
+
+/// A new case analysis writes the diagnosis anew: the values the clinician
+/// had set by hand in the arches it analysed are gone, and the toast says
+/// which. Nothing when there were none.
+fn diagnosis_reset_report(out: &Value) -> Option<Reported> {
+    let mut names: Vec<String> = Vec::new();
+    for arch in ["upper", "lower"] {
+        for key in out[arch]["hand_values_reset"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let Some(field) = key.as_str().and_then(EditField::from_key) else {
+                continue;
+            };
+            let name = t(edit_label_key(field));
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(Reported {
+        toast: Toast::new(ToastLevel::Info, "ws-toast-diag-reset").with_detail(tr_args(
+            "ws-diag-reset-detail",
+            &[("values", &names.join(", "))],
+        )),
+        sticky: false,
+    })
 }
 
 /// What "Choose the arch" and "Flip the occlusal side" did: the arch the
@@ -561,6 +629,14 @@ pub(crate) struct SegmentUi {
     drag: Option<(usize, f32)>,
 }
 
+/// What the "Manual corrections" of the case analysis keep between frames.
+#[derive(Debug, Default)]
+pub(crate) struct DiagnosisUi {
+    /// The field being typed in or dragged, with its value, written when it
+    /// is let go.
+    pub(crate) field: Option<(ScanRole, EditField, f64)>,
+}
+
 /// Whether the case needs the bite before the final position
 /// ([`dca_algo::occlusion::bite_needed`]), worked out once per state of the
 /// case: it reads the arch frames from the scans.
@@ -685,6 +761,76 @@ impl Workspace {
         case_analysis(ui, &state);
     }
 
+    /// "Manual corrections" of the case analysis: the values the clinician
+    /// measured themselves, per arch. Each shows the computed value, a field
+    /// for the clinician's own value (written when the field is let go or
+    /// confirmed, `aligners.diagnosis.edit-values`, one undo step), a badge
+    /// when it is set by hand and a button that brings the computed one
+    /// back. The complexity follows them. Nothing runs by being shown.
+    pub(crate) fn case_analysis_corrections(&mut self, ui: &mut Ui) {
+        let state = self.undo.current().clone();
+        let Some(data) = state.module_data::<AlignersState>(MODULE_ID) else {
+            crate::function::caption(ui, t("ws-ca-edit-none"));
+            return;
+        };
+        let d = &data.diagnosis;
+        if d.arches.is_empty() {
+            crate::function::caption(ui, t("ws-ca-edit-none"));
+            return;
+        }
+        let c = *colors(ui);
+        crate::function::caption(ui, t("ws-ca-edit-hint"));
+        ui.add_space(6.0);
+        let enabled = !self.is_busy();
+        let mut write = None;
+        for role in d.arches.keys().copied() {
+            let name = match role {
+                ScanRole::Upper => "ws-role-upper",
+                ScanRole::Lower => "ws-role-lower",
+                ScanRole::Bite => continue,
+            };
+            let Some(computed) = edit::computed_values(data, role) else {
+                continue;
+            };
+            let hand = d.edits_of(role);
+            let typing = &mut self.diagnosis_ui;
+            card(ui, |ui| {
+                ui.label(
+                    RichText::new(t(name))
+                        .font(fonts::semibold(13.0))
+                        .color(c.text_primary),
+                );
+                for field in EditField::ALL {
+                    let in_force = match field {
+                        EditField::Discrepancy => d.discrepancy_mm(role),
+                        EditField::Little => d.little_index_mm(role),
+                        EditField::MidlineOffset => Some(d.midline_offset_mm(role)),
+                        EditField::LargestSpace => Some(d.largest_space_mm(role)),
+                    }
+                    .unwrap_or_else(|| computed.get(field));
+                    let done = correction_row(
+                        ui,
+                        typing,
+                        role,
+                        field,
+                        shown_value(field, computed.get(field)),
+                        shown_value(field, in_force),
+                        field.get(&hand).is_some(),
+                        enabled,
+                    );
+                    if let Some(v) = done {
+                        // the field shows crowding where the command has discrepancy
+                        write = Some((role, field, v.map(|v| shown_value(field, v))));
+                    }
+                }
+            });
+            ui.add_space(8.0);
+        }
+        if let Some((role, field, value)) = write {
+            self.edit_diagnosis(role, field, value);
+        }
+    }
+
     /// The notice of "Final position" while the case needs the bite first
     /// (both arches separated and not related,
     /// [`dca_algo::occlusion::bite_needed`]): it points to Bite. The run
@@ -732,7 +878,7 @@ fn case_analysis(ui: &mut Ui, state: &CaseState) {
             ScanRole::Lower => "ws-role-lower",
             ScanRole::Bite => continue,
         };
-        arch_card(ui, &t(name), space);
+        arch_card(ui, &t(name), d, *role, space);
         ui.add_space(8.0);
     }
     // the ratios need both arches; when a tooth of the segment is missing in
@@ -815,8 +961,9 @@ fn figure(ui: &mut Ui, name: &str, value: String) {
     });
 }
 
-fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
+fn arch_card(ui: &mut Ui, name: &str, d: &Diagnosis, role: ScanRole, space: &ArchSpace) {
     let c = *colors(ui);
+    let by_hand = !d.edits_of(role).is_empty();
     card(ui, |ui| {
         ui.label(
             RichText::new(name)
@@ -833,7 +980,8 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             &t("ws-ca-required"),
             format!("{} mm", mm(space.required_mm)),
         );
-        let gap = space.required_mm - space.available_mm;
+        // the values in force: the ones written by hand over the computed
+        let gap = d.crowding_mm(role).unwrap_or_else(|| space.crowding_mm());
         figure(ui, &t("ws-ca-difference"), format!("{} mm", signed(gap)));
         ui.horizontal(|ui| {
             let (kind, key) = if gap > 0.5 {
@@ -845,12 +993,9 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             };
             widgets::badge(ui, kind, t(key));
         });
-        figure(
-            ui,
-            &t("ws-ca-little"),
-            format!("{} mm", mm(space.little_index_mm)),
-        );
-        let (kind, key) = match LittleCategory::of(space.little_index_mm) {
+        let little = d.little_index_mm(role).unwrap_or(space.little_index_mm);
+        figure(ui, &t("ws-ca-little"), format!("{} mm", mm(little)));
+        let (kind, key) = match LittleCategory::of(little) {
             LittleCategory::Perfect => (BadgeKind::Success, "ws-ca-little-perfect"),
             LittleCategory::Minimal => (BadgeKind::Success, "ws-ca-little-minimal"),
             LittleCategory::Moderate => (BadgeKind::Info, "ws-ca-little-moderate"),
@@ -858,7 +1003,120 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             LittleCategory::VerySevere => (BadgeKind::Danger, "ws-ca-little-very-severe"),
         };
         widgets::badge(ui, kind, t(key));
+        if d.details.contains_key(&role) {
+            figure(
+                ui,
+                &t("ws-ca-midline"),
+                format!("{} mm", signed(d.midline_offset_mm(role))),
+            );
+            figure(
+                ui,
+                &t("ws-ca-largest"),
+                format!("{} mm", mm(d.largest_space_mm(role))),
+            );
+        }
+        if by_hand {
+            widgets::badge(ui, BadgeKind::Info, t("ws-ca-has-hand"));
+        }
     });
+}
+
+/// The label of a value of "Manual corrections" of the case analysis.
+fn edit_label_key(field: EditField) -> &'static str {
+    match field {
+        EditField::Discrepancy => "ws-ca-edit-crowding",
+        EditField::Little => "ws-ca-edit-little",
+        EditField::MidlineOffset => "ws-ca-edit-midline",
+        EditField::LargestSpace => "ws-ca-edit-largest",
+    }
+}
+
+/// The value of a field as the inspector shows and edits it: the
+/// discrepancy (negative is crowding) as crowding, positive when the teeth
+/// need more room, as the cards show it. The other fields as they are. The
+/// conversion is its own inverse.
+fn shown_value(field: EditField, v: f64) -> f64 {
+    if field == EditField::Discrepancy {
+        -v
+    } else {
+        v
+    }
+}
+
+/// One value of "Manual corrections": its name, the field (a click or a
+/// drag-and-let-go writes it), the computed value, and when the value is
+/// by hand its badge and the button that brings the computed one back.
+/// Returns what to write: `Some(Some(v))` a value (as the field shows it),
+/// `Some(None)` a reset.
+#[allow(clippy::too_many_arguments)]
+fn correction_row(
+    ui: &mut Ui,
+    typing: &mut DiagnosisUi,
+    role: ScanRole,
+    field: EditField,
+    computed: f64,
+    in_force: f64,
+    by_hand: bool,
+    enabled: bool,
+) -> Option<Option<f64>> {
+    let c = *colors(ui);
+    let (lo, hi) = field.range();
+    let (lo, hi) = (shown_value(field, lo), shown_value(field, hi));
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let mut out = None;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(t(edit_label_key(field)))
+                .font(fonts::medium(12.0))
+                .color(c.text_secondary),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut v = match typing.field {
+                Some((r, f, v)) if r == role && f == field => v,
+                _ => in_force,
+            };
+            let r = ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut v)
+                    .speed(0.1)
+                    .range(lo..=hi)
+                    .fixed_decimals(1)
+                    .suffix(" mm"),
+            );
+            if (r.dragged() || r.has_focus()) && (v - in_force).abs() > 1e-9 {
+                typing.field = Some((role, field, v));
+            }
+            if (r.drag_stopped() || r.lost_focus())
+                && let Some((rr, ff, vv)) = typing.field.take()
+                && rr == role
+                && ff == field
+            {
+                out = Some(Some(vv));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(dc_i18n::tr_args(
+                "ws-ca-edit-computed",
+                &[("value", &mm(computed))],
+            ))
+            .font(fonts::ui(12.0))
+            .color(c.text_secondary),
+        );
+        if by_hand {
+            widgets::badge(ui, BadgeKind::Info, t("ws-ca-by-hand"));
+            if widgets::Button::ghost(t("ws-ca-reset"))
+                .size(widgets::ButtonSize::Compact)
+                .enabled(enabled)
+                .show(ui)
+                .clicked()
+            {
+                out = Some(None);
+            }
+        }
+    });
+    out
 }
 
 #[cfg(test)]

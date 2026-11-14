@@ -1559,6 +1559,185 @@ fn a_bolton_that_could_not_be_calculated_says_so() {
     );
 }
 
+/// A case with the lower arch analysed: 62.4 mm available, 66.1 needed (3.7 mm
+/// of crowding), Little index 4.2 mm, midline 0.5 mm off, largest space 1.5 mm,
+/// complexity 3.
+fn analysed_project() -> Project {
+    let mut project = demo_project(&["lower"]);
+    let mut al = aligners_of(&project.case_state);
+    al.diagnosis.arches.insert(
+        ScanRole::Lower,
+        dca_model::ArchSpace {
+            available_mm: 62.4,
+            required_mm: 66.1,
+            little_index_mm: 4.2,
+        },
+    );
+    al.diagnosis.details.insert(
+        ScanRole::Lower,
+        dca_model::ArchDetails {
+            largest_space_mm: 1.5,
+            midline_offset_mm: 0.5,
+            catcat_score: 3,
+        },
+    );
+    al.diagnosis.complexity_score = Some(3.0);
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    project
+}
+
+const CASE_ANALYSIS_ID: &str = "aligners.diagnosis.space-analysis";
+
+/// Something on the screen has this label (a figure may be shown twice, as a
+/// card and as a field).
+fn has(h: &Harness<'static, App>, label: &str) -> bool {
+    h.query_all_by_label(label).count() > 0
+}
+
+#[test]
+fn the_case_analysis_inspector_lists_the_values_to_correct_and_runs_nothing() {
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let before = ws.state().clone();
+    let mut h = harness(ws);
+    h.run();
+    for label in [
+        "Manual corrections",
+        "Your crowding (+) or spacing (−)",
+        "Your Little index",
+        "Your midline offset",
+        "Your largest space",
+        // the computed values stay next to the fields
+        "Computed: 3.7 mm",
+        "Computed: 4.2 mm",
+        "Computed: 0.5 mm",
+        "Computed: 1.5 mm",
+    ] {
+        assert!(has(&h, label), "{label}");
+    }
+    // none set by hand yet; showing the section started nothing
+    assert!(!has(&h, "Set by hand") && !has(&h, "Reset"));
+    assert!(!h.state().ws.is_busy());
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
+    assert!(h.state().ws.toast_keys().is_empty());
+
+    // a case that has no analysis says what to do first
+    let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    assert!(has(&h, "Manual corrections"));
+    assert!(
+        h.query_by_label_contains("Run the case analysis first")
+            .is_some()
+    );
+    assert!(!has(&h, "Your Little index"));
+}
+
+#[test]
+fn a_value_written_by_hand_shows_in_the_cards_undoes_and_resets() {
+    use dca_algo::diagnosis::edit::EditField;
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    let start = aligners_of(h.state().ws.state());
+    let lower = ScanRole::Lower;
+
+    // 9 mm of crowding by hand (the command's discrepancy is -9)
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Discrepancy, Some(-9.0));
+    settle(&mut h);
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis.edits_of(lower).discrepancy_mm, Some(-9.0));
+    // the computed values are as they were; the complexity follows (crowding 9: 4 points)
+    assert_eq!(al.diagnosis.arches, start.diagnosis.arches);
+    assert_eq!(al.diagnosis.complexity_score, Some(4.0));
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-diag-edited".to_owned())
+    );
+    // the cards show the value in force, the section the badge and the reset
+    for label in [
+        "+9.0 mm",
+        "Includes values set by hand",
+        "Set by hand",
+        "Reset",
+        "Computed: 3.7 mm",
+    ] {
+        assert!(has(&h, label), "{label}");
+    }
+    assert!(!has(&h, "+3.7 mm"));
+    // the complexity card: 4 is still easy
+    assert!(has(&h, "Easy"));
+
+    // a Little index by hand, then the card words it
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Little, Some(12.0));
+    settle(&mut h);
+    assert!(has(&h, "12.0 mm"));
+    assert!(has(&h, "Very severe irregularity"));
+    assert_eq!(h.get_all_by_label("Set by hand").count(), 2);
+
+    // one undo step each
+    assert!(h.state_mut().ws.undo());
+    h.run();
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis.edits_of(lower).little_index_mm, None);
+    assert_eq!(al.diagnosis.edits_of(lower).discrepancy_mm, Some(-9.0));
+    assert!(h.state_mut().ws.redo());
+    h.run();
+    assert_eq!(
+        aligners_of(h.state().ws.state())
+            .diagnosis
+            .edits_of(lower)
+            .little_index_mm,
+        Some(12.0)
+    );
+
+    // a reset by the command, then the Reset button of the other value
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Little, None);
+    settle(&mut h);
+    assert_eq!(h.get_all_by_label("Set by hand").count(), 1);
+    click_in_view(&mut h, "Reset");
+    settle(&mut h);
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis, start.diagnosis);
+    assert!(!has(&h, "Reset"));
+    assert!(has(&h, "+3.7 mm"));
+}
+
+#[test]
+fn a_value_out_of_range_is_refused_and_leaves_the_case_as_it_was() {
+    use dca_algo::diagnosis::edit::EditField;
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    let before = h.state().ws.state().clone();
+    h.state_mut()
+        .ws
+        .edit_diagnosis(ScanRole::Lower, EditField::Little, Some(99.0));
+    settle(&mut h);
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-command-failed".to_owned())
+    );
+    // nothing to undo from it
+    assert!(!h.state_mut().ws.undo());
+}
+
 #[test]
 fn the_shortcut_list_names_the_leaves_in_key_order() {
     let mut h = harness(Workspace::new_headless(module(), None, None));

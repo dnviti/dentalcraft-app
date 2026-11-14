@@ -120,6 +120,7 @@ static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::CASE_ANALYSIS,
         results: Some(Workspace::case_analysis_results),
+        corrections: Corrections::Own(Workspace::case_analysis_corrections),
         ..PLAIN
     },
     Function {

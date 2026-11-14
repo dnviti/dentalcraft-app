@@ -364,6 +364,13 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.diagnosis.little-index", Run(|_, _| json!({}))),
         ("aligners.diagnosis.bolton", Run(|_, _| json!({}))),
         ("aligners.diagnosis.complexity", Run(|_, _| json!({}))),
+        // the clinician's own values over the computed ones: the complexity follows
+        (
+            "aligners.diagnosis.edit-values",
+            Run(
+                |_, _| json!({ "arch": "lower", "values": { "discrepancy": -9.5, "little": 11.0, "midline_offset": 3.0 } }),
+            ),
+        ),
         // with both arches the bite comes before the final position
         ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
@@ -626,7 +633,10 @@ fn every_change_comes_back_after_save_and_reopen() {
             (start.elapsed() - ran).as_secs_f64()
         );
         // undo after an edit: the file goes back with it
-        if id == "aligners.preparation.segmentation.clean-borders" {
+        if matches!(
+            id,
+            "aligners.preparation.segmentation.clean-borders" | "aligners.diagnosis.edit-values"
+        ) {
             assert!(ws.undo());
             save_and_compare(&mut ws, &path, "undo");
             assert!(ws.redo());
