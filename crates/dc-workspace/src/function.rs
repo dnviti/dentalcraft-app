@@ -150,6 +150,11 @@ static FUNCTIONS: &[Function] = &[
         ..PLAIN
     },
     Function {
+        id: leaf::EXPORT_ALL,
+        params: Params::Own(Workspace::production_params),
+        ..PLAIN
+    },
+    Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
         ..PLAIN
@@ -379,7 +384,7 @@ mod tests {
 
     #[test]
     fn a_function_not_listed_has_only_its_run_button() {
-        let f = of(leaf::EXPORT_ALL);
+        let f = of(leaf::VISITS);
         assert!(f.results.is_none() && f.note.is_none() && f.more.is_none());
         assert!(matches!(f.params, Params::None));
         assert!(matches!(f.corrections, Corrections::None));
@@ -431,5 +436,15 @@ mod tests {
         // a run takes no parameter: the filter and the decisions are corrections
         assert!(matches!(f.params, Params::None));
         assert!(matches!(f.corrections, Corrections::Own(_)));
+    }
+
+    #[test]
+    fn export_for_printing_shows_the_production_parameters() {
+        let f = of(leaf::EXPORT_ALL);
+        assert!(matches!(f.params, Params::Own(_)));
+        // the aligner end and the settings are parameters of the export:
+        // nothing of it is corrected by hand
+        assert!(matches!(f.corrections, Corrections::None));
+        assert!(f.results.is_none() && f.note.is_none());
     }
 }

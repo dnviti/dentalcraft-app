@@ -2069,3 +2069,72 @@ fn the_bite_inspector_shows_the_report_the_scans_and_the_corrections() {
     assert!(!ws.is_busy());
     assert!(Arc::ptr_eq(&before, ws.state()));
 }
+
+/// "Export for printing": where the aligner ends (the teeth left out, the
+/// advice, the final position computed with another end), the quality and
+/// the folded groups of the production settings; selecting it runs
+/// nothing, the advice button ends the aligner in one undo step.
+#[test]
+fn the_export_inspector_shows_the_aligner_end_and_the_production_settings() {
+    let mut project = demo_project(&["lower"]);
+    let mut d = aligners_of(&project.case_state);
+    let lower = ScanRole::Lower;
+    d.seeds.retain(|s| s.fdi.get() != 35);
+    d.crowns.retain(|f, _| f.get() != 35);
+    d.aligner_end.insert(
+        lower,
+        dca_model::AlignerEnd {
+            right: Some(Fdi::new(46).unwrap()),
+            left: None,
+        },
+    );
+    d.setup
+        .results
+        .insert(lower, dca_model::SetupSummary::default());
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(d));
+    let mut h = harness(Workspace::new_headless(module(), Some(project), None));
+    h.run();
+    let before = Arc::clone(h.state().ws.state());
+    h.state_mut().ws.select_item("aligners.output.export-all");
+    h.run();
+    for label in [
+        "Where the aligner ends",
+        "Lower arch",
+        "Right side",
+        "Left side",
+        "Out of the aligner: 47.",
+        "Computed with another end",
+        "computed with another end of the aligner",
+        "Advice, left side",
+        "Tooth 35 is missing",
+        "End at 34",
+        "Quality of the print files",
+        "Standard (production files, 0.1 mm detail)",
+        "Aligner edge",
+        "Shell",
+        "Identification text",
+        "Bite with the aligners worn",
+        "Bite ramps",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    let ws = &h.state().ws;
+    assert!(!ws.is_busy());
+    assert_eq!(ws.dialog_requests(), 0);
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(
+        Arc::ptr_eq(&before, ws.state()),
+        "the selection changed the case"
+    );
+    // nothing of the inspector is wider than the window (a long line wraps)
+    let button = h.get_by_label("End at 34").rect();
+    assert!(button.max.x <= 1920.0, "{button:?}");
+    // the advice ends the aligner at 34 on the left
+    click_in_view(&mut h, "End at 34");
+    settle(&mut h);
+    let end = aligners_of(h.state().ws.state()).aligner_end_of(lower);
+    assert_eq!(end.left.map(|f| f.get()), Some(34));
+    assert_eq!(end.right.map(|f| f.get()), Some(46));
+}

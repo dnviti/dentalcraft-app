@@ -872,6 +872,7 @@ mod tests {
                     json!({ "kind": "moved", "count": 4, "of": 12, "max_mm": 0.63, "mean_mm": 0.3 }),
                     json!({ "kind": "nothing_we_know" }),
                 ],
+                aligner_end: Default::default(),
             },
         );
         data.setup.ipr = vec![

@@ -350,6 +350,20 @@ fn plan() -> Vec<(&'static str, Plan)> {
                 |_, _| json!({ "pattern": "proportional", "step_linear_mm": 0.2, "overcorrection": true, "interval_policy": "adaptive", "interval_days": 10, "start_date": "2026-11-16" }),
             ),
         ),
+        // the production settings: trim, shell, stamp, bite, ramps, quality
+        (
+            "aligners.settings.production",
+            Run(|_, _| {
+                json!({
+                    "trim": { "mode": "scalloped", "margin_gap_mm": 1.0, "insertion_axis": "common" },
+                    "shell": { "shell_thickness_mm": 0.8 },
+                    "stamp": { "tooth": "M7L", "code": "CASE-1", "date": "start" },
+                    "bite": { "mode": "manual", "thickness_mm": 0.6 },
+                    "ramps": { "width_mm": 4.0 },
+                    "quality": "light",
+                })
+            }),
+        ),
         // a new demo arch in the place of the lower one
         (
             "aligners.demo",
@@ -409,6 +423,20 @@ fn plan() -> Vec<(&'static str, Plan)> {
             }),
         ),
         ("aligners.occlusion.bite-correct", Run(|_, _| json!({}))),
+        // the aligner ends one tooth early on the lower right: the final
+        // position keeps the tooth behind it at rest and records the end
+        (
+            "aligners.production.aligner-end",
+            Run(|ws, _| {
+                let mut right: Vec<_> = aligners(ws)
+                    .arch_teeth(ScanRole::Lower)
+                    .into_iter()
+                    .filter(|f| f.quadrant() == 4)
+                    .collect();
+                right.sort_by_key(|f| f.position());
+                json!({ "action": "set", "fdi": right[right.len() - 2].get() })
+            }),
+        ),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
         // the arch line of the lower arch drawn by hand: kept, final position again
         (
