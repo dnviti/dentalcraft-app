@@ -15,7 +15,7 @@ use dc_mesh::TriMesh;
 use dc_scene::{Color, LabelPalette};
 use dca_algo::anatomy::Arch;
 use dca_algo::occlusion::{self, ArchModel};
-use dca_model::{AlignersState, Seed, Stage, ToothFrame};
+use dca_model::{AlignersState, Seed, Stage, TeethChange, ToothFrame};
 use glam::{DVec3, Vec3};
 
 /// Layers drawn over the scans.
@@ -72,17 +72,82 @@ pub(crate) fn outdated_arches(state: &CaseState) -> Vec<ScanRole> {
 /// ([`outdated_arches`]), as the user reads them ("Upper, Lower"), or
 /// `None` when none is.
 pub(crate) fn outdated_arch_names(state: &CaseState) -> Option<String> {
-    let names: Vec<String> = outdated_arches(state)
+    let names: Vec<String> = outdated_arches(state).into_iter().map(role_name).collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// The name of the arch `role` as the user reads it ("Upper").
+fn role_name(role: ScanRole) -> String {
+    crate::t(if role == ScanRole::Upper {
+        "ws-role-upper"
+    } else {
+        "ws-role-lower"
+    })
+}
+
+/// The arches whose built teeth are out of date, each with what changed
+/// since the teeth were built ([`AlignersState::teeth_changes`]), as the
+/// user reads them ("Upper: tooth colours, tooth marks; Lower: missing
+/// teeth"), or `None` when none is.
+pub(crate) fn outdated_reasons(state: &CaseState) -> Option<String> {
+    let a = aligners(state)?;
+    let lines: Vec<String> = [ScanRole::Upper, ScanRole::Lower]
         .into_iter()
-        .map(|role| {
-            crate::t(if role == ScanRole::Upper {
-                "ws-role-upper"
-            } else {
-                "ws-role-lower"
-            })
+        .filter_map(|role| {
+            let why: Vec<String> = a
+                .teeth_changes(role)
+                .into_iter()
+                .map(|c| {
+                    crate::t(match c {
+                        TeethChange::HandCorrected => "ws-teeth-why-hand",
+                        TeethChange::Colours => "ws-teeth-why-colours",
+                        TeethChange::Marks => "ws-teeth-why-marks",
+                        TeethChange::Missing => "ws-teeth-why-missing",
+                    })
+                })
+                .collect();
+            (!why.is_empty()).then(|| format!("{}: {}", role_name(role), why.join(", ")))
         })
         .collect();
-    (!names.is_empty()).then(|| names.join(", "))
+    (!lines.is_empty()).then(|| lines.join("; "))
+}
+
+/// The arches with a scan but without their 3D teeth or gingiva while the
+/// other arch has its 3D teeth, each with the i18n key of the reason: no
+/// tooth colours yet (separate teeth and gum first), or not built.
+pub(crate) fn unbuilt_arches(state: &CaseState) -> Vec<(ScanRole, &'static str)> {
+    let Some(a) = aligners(state) else {
+        return Vec::new();
+    };
+    let built = |role: ScanRole| {
+        a.crowns
+            .keys()
+            .any(|f| f.is_upper() == (role == ScanRole::Upper))
+            && a.gingiva.contains_key(&role)
+    };
+    if !built(ScanRole::Upper) && !built(ScanRole::Lower) {
+        return Vec::new();
+    }
+    [ScanRole::Upper, ScanRole::Lower]
+        .into_iter()
+        .filter(|role| state.case.scan(*role).is_some() && !built(*role))
+        .map(|role| {
+            let key = if a.labels.contains_key(&role) {
+                "ws-teeth-unbuilt-run"
+            } else {
+                "ws-teeth-unbuilt-separate"
+            };
+            (role, key)
+        })
+        .collect()
+}
+
+/// [`unbuilt_arches`] as the user reads them, one per line.
+pub(crate) fn unbuilt_lines(state: &CaseState) -> Vec<String> {
+    unbuilt_arches(state)
+        .into_iter()
+        .map(|(role, key)| dc_i18n::tr_args(key, &[("arch", &role_name(role))]))
+        .collect()
 }
 
 /// The labels mesh of the arch `role`, when it has one label per vertex of
@@ -105,9 +170,18 @@ pub(crate) fn stage(al: &AlignersState, index: u32) -> Option<&Stage> {
     al.stages.iter().find(|s| s.index == index)
 }
 
-/// `scan` with every labelled tooth moved to its pose at `stage` (the pose
-/// is relative to the rest frame of the tooth: world = frame · pose ·
-/// frame⁻¹). `None` when no tooth of the scan moves.
+/// The move (case coordinates) of a tooth with rest frame `frame` and pose
+/// `pose` in a stage: the pose is relative to the rest pose of the tooth
+/// (`dca_algo::teeth::rest_pose`: the frame with its origin at the centre
+/// of resistance), `rest · pose · rest⁻¹`, as the setup, the staging, the
+/// export and the 3D teeth read it.
+pub(crate) fn tooth_move(frame: &ToothFrame, pose: &Pose) -> Pose {
+    let rest = dca_algo::teeth::rest_pose(frame);
+    rest.compose(pose).compose(&rest.inverse())
+}
+
+/// `scan` with every labelled tooth moved to its pose at `stage`
+/// ([`tooth_move`]). `None` when no tooth of the scan moves.
 pub(crate) fn posed_mesh(
     scan: &TriMesh,
     labels: &[u16],
@@ -119,10 +193,7 @@ pub(crate) fn posed_mesh(
         .iter()
         .filter_map(|(f, p)| {
             let fr = frames.get(f)?;
-            Some((
-                u16::from(f.get()),
-                fr.pose.compose(p).compose(&fr.pose.inverse()),
-            ))
+            Some((u16::from(f.get()), tooth_move(fr, p)))
         })
         .collect();
     if moves.is_empty() || labels.len() != scan.vertex_count() {
@@ -353,25 +424,21 @@ pub(crate) mod tests {
             Pose::new(DVec3::new(1.0, 0.0, 0.0), DQuat::from_rotation_z(0.05)),
         );
         let posed = posed_mesh(scan, &labels, &al.tooth_frames, &st).unwrap();
-        let frame = al.tooth_frames[&f31].pose;
+        // the move the plan reads from the pose (about the centre of resistance)
+        let frame = al.tooth_frames[&f31];
+        let moving = tooth_move(&frame, &st.poses[&f31]);
         for (k, l) in labels.iter().enumerate() {
             let d = posed.positions[k].distance(scan.positions[k]);
             if *l == 31 {
-                let want = frame
-                    .compose(&st.poses[&f31])
-                    .compose(&frame.inverse())
-                    .apply_point(scan.positions[k].as_dvec3());
+                let want = moving.apply_point(scan.positions[k].as_dvec3());
                 assert!(posed.positions[k].as_dvec3().distance(want) < 1e-4);
             } else {
                 assert_eq!(d, 0.0, "vertex {k} of {l}");
             }
         }
-        // the crown reference point of 31 moved 1 mm along its own x axis
-        let o = frame.t;
-        let moved = frame
-            .compose(&st.poses[&f31])
-            .compose(&frame.inverse())
-            .apply_point(o);
+        // the centre of resistance of 31 moved 1 mm along the tooth's own x axis
+        let o = dca_algo::teeth::rest_pose(&frame).t;
+        let moved = moving.apply_point(o);
         assert!((moved.distance(o) - 1.0).abs() < 1e-9);
         // a stage without known teeth moves nothing
         assert!(posed_mesh(scan, &labels, &BTreeMap::new(), &st).is_none());

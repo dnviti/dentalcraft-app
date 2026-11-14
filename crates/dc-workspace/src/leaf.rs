@@ -303,7 +303,9 @@ pub(crate) fn warning_toasts(out: &Value) -> Vec<Toast> {
 /// from `arches` (per arch: `rebuilt` the tooth numbers built this time,
 /// else `teeth` their count, and `gingiva`), so a partial rebuild counts the
 /// teeth it rebuilt; the old output (the crowns and gingiva steps) is the
-/// fallback. A field the output lacks counts as nothing.
+/// fallback. A field the output lacks counts as nothing. An arch the build
+/// could not build (`built: false`) makes the toast a warning that names it
+/// with its reason.
 fn teeth_report(out: &Value) -> Reported {
     let (upper, lower, gum) = match out["arches"].as_object() {
         Some(arches) => {
@@ -337,16 +339,36 @@ fn teeth_report(out: &Value) -> Reported {
         (false, true) => "ws-teeth-detail-lower",
         (false, false) => "ws-teeth-detail-none",
     };
+    let mut detail = tr_args(
+        key,
+        &[
+            ("count", &(upper + lower).to_string()),
+            ("upper", &upper.to_string()),
+            ("lower", &lower.to_string()),
+        ],
+    );
+    let not_built: Vec<String> = out["arches"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, a)| a["built"] == false)
+        .map(|(_, a)| {
+            let reason = a["reason"].as_str().unwrap_or_default();
+            tr_args("ws-teeth-arch-not-built", &[("reason", reason)])
+        })
+        .collect();
+    let level = if not_built.is_empty() {
+        ToastLevel::Success
+    } else {
+        for line in &not_built {
+            detail.push('\n');
+            detail.push_str(line);
+        }
+        ToastLevel::Warning
+    };
     Reported {
-        toast: Toast::new(ToastLevel::Success, "ws-toast-teeth-built").with_detail(tr_args(
-            key,
-            &[
-                ("count", &(upper + lower).to_string()),
-                ("upper", &upper.to_string()),
-                ("lower", &lower.to_string()),
-            ],
-        )),
-        sticky: false,
+        toast: Toast::new(level, "ws-toast-teeth-built").with_detail(detail),
+        sticky: !not_built.is_empty(),
     }
 }
 
@@ -542,26 +564,40 @@ impl Workspace {
         }
     }
 
-    /// The status of the 3D teeth when they are out of date: the arches whose
-    /// colours, tooth marks or missing teeth changed by hand since the teeth
-    /// were built, and what to do (run again builds them again; those arches
-    /// show the scan until then). Nothing while the built teeth match the
-    /// case.
+    /// The status of the 3D teeth: the arches with a scan and no 3D teeth
+    /// while the other arch has them, with the reason, and the arches whose
+    /// built teeth are out of date, each with what changed since the teeth
+    /// were built, and what to do (run again builds both arches again; an
+    /// out of date arch shows the scan until then). Nothing while every
+    /// arch has teeth that match the case.
     pub(crate) fn teeth_results(&mut self, ui: &mut Ui) {
-        let Some(arches) = crate::overlay::outdated_arch_names(self.undo.current()) else {
-            return;
-        };
+        let state = self.undo.current();
+        let unbuilt = crate::overlay::unbuilt_lines(state);
+        let outdated = crate::overlay::outdated_reasons(state);
         let c = *colors(ui);
-        widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-outdated"));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(dc_i18n::tr_args(
-                "ws-teeth-outdated-detail",
-                &[("arches", &arches)],
-            ))
-            .font(fonts::ui(12.0))
-            .color(c.text_secondary),
-        );
+        let line = |ui: &mut Ui, text: String| {
+            ui.label(
+                RichText::new(text)
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+        };
+        if !unbuilt.is_empty() {
+            widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-unbuilt"));
+            ui.add_space(4.0);
+            for text in unbuilt {
+                line(ui, text);
+            }
+            ui.add_space(6.0);
+        }
+        if let Some(arches) = outdated {
+            widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-outdated"));
+            ui.add_space(4.0);
+            line(
+                ui,
+                dc_i18n::tr_args("ws-teeth-outdated-detail", &[("arches", &arches)]),
+            );
+        }
     }
 
     /// The results of the case analysis, or the line that says it has not
@@ -821,6 +857,29 @@ mod tests {
             &[("count", "13"), ("upper", "0"), ("lower", "13")],
         );
         assert_eq!(r.toast.detail.unwrap(), none);
+    }
+
+    #[test]
+    fn the_teeth_report_warns_of_an_arch_it_could_not_build() {
+        crate::loader();
+        let out = json!({ "arches": {
+            "lower": { "built": true, "mode": "all", "teeth": 14, "gingiva": true },
+            "upper": { "built": false, "reason": "the upper arch has no tooth colours" },
+        } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.level, ToastLevel::Warning);
+        assert!(r.sticky);
+        let detail = r.toast.detail.unwrap();
+        let line = tr_args(
+            "ws-teeth-arch-not-built",
+            &[("reason", "the upper arch has no tooth colours")],
+        );
+        assert!(detail.ends_with(&format!("\n{line}")), "{detail}");
+        // both arches built: a plain success
+        let out = json!({ "arches": { "lower": { "built": true, "teeth": 14, "gingiva": true } } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.level, ToastLevel::Success);
+        assert!(!r.sticky);
     }
 
     #[test]
