@@ -396,6 +396,11 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.manual.rebuild-tooth",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
         ),
+        // a query of the region and margin line of a tooth: the case is not touched
+        (
+            "aligners.manual.tooth-region",
+            Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
+        ),
         (
             "aligners.planning.movements",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 3), "mesial_mm": 0.3 })),

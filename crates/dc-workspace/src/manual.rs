@@ -1095,6 +1095,8 @@ impl Workspace {
             self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
             return false;
         }
+        // a tool works on the scan with its own colours
+        self.set_region_view(false);
         self.manual.tool = Some(tool);
         self.manual.sequence = None;
         self.manual.seq_base = None;

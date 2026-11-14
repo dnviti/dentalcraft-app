@@ -207,6 +207,16 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     ] {
         assert!(h.query_by_label(label).is_some(), "{label}");
     }
+    // the 3D teeth: the view of the region of a tooth, in Italian
+    h.state_mut().select_item("aligners.teeth.build");
+    h.run();
+    for label in ["Correzioni a mano", "Mostra la zona", "Fine"] {
+        assert!(h.get_all_by_label(label).count() >= 1, "{label}");
+    }
+    assert!(
+        h.query_by_label_contains("Clicca un dente nella vista")
+            .is_some()
+    );
     // the keys of the tools, with the new labels
     h.get_by_label("Guida").click();
     h.run();

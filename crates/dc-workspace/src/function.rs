@@ -9,7 +9,9 @@
 //! 4. "Automatic": the button that runs it ("Run", "Run again" once done, or
 //!    the dialog it needs first), the only way to run it from the window;
 //! 5. "Manual corrections": its tools, the controls of the open one under
-//!    them (the viewport takes the pointer for that tool).
+//!    them (the viewport takes the pointer for that tool). The 3D teeth start
+//!    this section with the view of the region of a tooth (`region`): it only
+//!    changes what the viewport shows.
 //!
 //! [`FUNCTIONS`] says what each function has; one that is not listed has its
 //! title, status and run button only. A new function adds its entry here
@@ -64,6 +66,9 @@ struct Function {
     note: Option<&'static str>,
     /// The section "Manual corrections".
     corrections: Corrections,
+    /// The section "Manual corrections" starts with the controls of the view
+    /// of a tooth region on the scan (`region`).
+    region: bool,
 }
 
 /// A function with nothing more than its run button.
@@ -73,6 +78,7 @@ const PLAIN: Function = Function {
     params: Params::None,
     note: None,
     corrections: Corrections::None,
+    region: false,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -102,11 +108,13 @@ static FUNCTIONS: &[Function] = &[
         params: Params::Own(Workspace::segment_params),
         note: Some("ws-seg-info"),
         corrections: Corrections::Tools(&[Tool::Brush, Tool::Clean]),
+        ..PLAIN
     },
     Function {
         id: leaf::BUILD_TEETH,
         results: Some(Workspace::teeth_results),
         corrections: Corrections::Tools(&[Tool::Rebuild]),
+        region: true,
         ..PLAIN
     },
     Function {
@@ -246,8 +254,14 @@ impl Workspace {
                     .copied()
                     .filter(|tool| self.tool_ready(*tool))
                     .collect();
-                if !tools.is_empty() {
+                if !tools.is_empty() || f.region {
                     section(ui, "ws-fn-manual");
+                }
+                if f.region {
+                    self.region_controls(ui);
+                    ui.add_space(8.0);
+                }
+                if !tools.is_empty() {
                     self.tool_list(ui, &tools);
                 }
             }

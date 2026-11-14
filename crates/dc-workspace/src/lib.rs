@@ -38,6 +38,7 @@ mod manual;
 mod menu;
 mod overlay;
 mod project;
+mod region;
 mod select;
 pub mod timeline;
 mod ui;

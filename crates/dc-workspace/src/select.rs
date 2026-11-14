@@ -477,6 +477,10 @@ impl Workspace {
             self.selection.field = None;
             return true;
         }
+        // the view of a tooth region ends before the selection does
+        if self.region_escape() {
+            return true;
+        }
         if self.selection.component.is_some() {
             self.select_component(None);
             return true;
@@ -503,6 +507,8 @@ impl Workspace {
         {
             self.select_component(None);
         }
+        // the view of a tooth region follows the selection
+        self.region_follow();
         if self.selection.hovered.is_some_and(|c| !c.exists(&state)) {
             self.selection.hovered = None;
         }

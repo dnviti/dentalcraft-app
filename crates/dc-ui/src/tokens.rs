@@ -116,6 +116,8 @@ palette! {
     model_attachment,
     /// IPR planes.
     model_ipr,
+    /// Margin line of a tooth region on the scan.
+    model_margin,
 }
 
 /// Font family of a text style.

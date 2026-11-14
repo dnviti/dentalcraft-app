@@ -259,6 +259,8 @@ pub struct Workspace {
     pub(crate) manual: crate::manual::Manual,
     /// The component selected in the viewport and its gizmo.
     pub(crate) selection: crate::select::Selection,
+    /// The view of the region of the selected tooth on the scan.
+    pub(crate) region: crate::region::RegionView,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
     /// Whether the case needs the bite before "Final position".
@@ -370,6 +372,7 @@ impl Workspace {
             view: ViewState::default(),
             manual: crate::manual::Manual::default(),
             selection: crate::select::Selection::default(),
+            region: crate::region::RegionView::default(),
             segment: leaf::SegmentUi::default(),
             bite_check: leaf::BiteCheck::default(),
             selected: None,
@@ -560,6 +563,10 @@ impl Workspace {
         {
             self.close_tool();
         }
+        // the view of a tooth region belongs to the 3D teeth
+        if command != Some(leaf::BUILD_TEETH) {
+            self.set_region_view(false);
+        }
         self.selected = Some(id);
         self.module.select(id);
         self.menu_view.reveal(&self.menu, id);
@@ -588,6 +595,7 @@ impl Workspace {
     pub(crate) fn clear_selection(&mut self) {
         self.selected = None;
         self.close_tool();
+        self.set_region_view(false);
     }
 
     /// The key of a command of the module ([`CommandDesc::shortcut`]): it

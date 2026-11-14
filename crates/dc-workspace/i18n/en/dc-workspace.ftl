@@ -337,3 +337,15 @@ ws-sel-scale = Size
 ws-sel-reset = Reset
 ws-toast-tooth-resized = The size of the tooth changed.
 ws-toast-tooth-resized-detail = Its final position and its aligners were planned with the old size: compute them again.
+
+## ---- the region of a tooth on the scan ----
+ws-region-show = Show the region
+ws-region-end = End
+ws-region-pick = Click a tooth in the view to see the region of the scan it is built from.
+ws-region-hint = The tooth keeps its colour, the other colours are dimmed and the margin line, where the crown ends, is yellow. The case does not change. End, Esc or a click on empty space go back.
+ws-region-on = Region of tooth { $fdi } on the scan, at the initial position.
+ws-region-stats = { $vertices } points, { $area } mm², { $width } mm wide.
+ws-region-margin = Margin line: { $length } mm.
+ws-region-no-margin = No margin line: nothing on the scan bounds this region (it is a shell of its own, or the whole scan).
+ws-region-no-region = Tooth { $fdi } has no region on the scan.
+ws-region-unavailable = This module has no query of the region of a tooth.

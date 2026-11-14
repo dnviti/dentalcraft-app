@@ -337,3 +337,15 @@ ws-sel-scale = Dimensione
 ws-sel-reset = Ripristina
 ws-toast-tooth-resized = La dimensione del dente è cambiata.
 ws-toast-tooth-resized-detail = La sua posizione finale e i suoi allineatori sono stati pianificati con la dimensione di prima: calcolali di nuovo.
+
+## ---- the region of a tooth on the scan ----
+ws-region-show = Mostra la zona
+ws-region-end = Fine
+ws-region-pick = Clicca un dente nella vista per vedere la zona della scansione da cui nasce.
+ws-region-hint = Il dente tiene il suo colore, gli altri colori sono attenuati e la linea del margine, dove finisce la corona, è gialla. Il caso non cambia. Fine, Esc o un clic nello spazio vuoto tornano indietro.
+ws-region-on = Zona del dente { $fdi } sulla scansione, nella posizione iniziale.
+ws-region-stats = { $vertices } punti, { $area } mm², largo { $width } mm.
+ws-region-margin = Linea del margine: { $length } mm.
+ws-region-no-margin = Nessuna linea del margine: niente sulla scansione delimita questa zona (è un guscio a sé, oppure l'intera scansione).
+ws-region-no-region = Il dente { $fdi } non ha una zona sulla scansione.
+ws-region-unavailable = Questo modulo non ha la richiesta della zona di un dente.

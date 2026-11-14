@@ -110,6 +110,8 @@ struct SceneKey {
     overlay0: bool,
     layers: Layers,
     teeth: bool,
+    /// The tooth whose region is shown on the scan (`region`).
+    region: Option<u8>,
 }
 
 /// Contact map computed for one case state (by pointer).
@@ -246,6 +248,10 @@ pub(crate) struct SceneInput<'a> {
     /// a stage); `false` (the UI thread): draw them at rest meanwhile and
     /// report the scene incomplete.
     pub wait: bool,
+    /// The tooth whose region is shown: the scan of its arch is drawn with
+    /// that tooth in its colour and the rest dimmed, every other labelled
+    /// scan dimmed (`region::region_colors`), whatever the contact map says.
+    pub region: Option<u8>,
 }
 
 /// Most notifications the stack draws, those that stay until closed (failed
@@ -476,6 +482,18 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
                 .unwrap_or(MeshColoring::Uniform(input.enamel)),
             _ => MeshColoring::Uniform(input.enamel),
         };
+        let coloring = match (
+            input.region,
+            labelled.and_then(|m| m.vertex_labels.as_ref()),
+        ) {
+            (Some(f), Some(l)) => {
+                let own = (scan.role != ScanRole::Bite
+                    && labels::upper_tooth(f) == (scan.role == ScanRole::Upper))
+                    .then_some(f);
+                MeshColoring::PerVertex(Arc::new(crate::region::region_colors(l, &palette, own)))
+            }
+            _ => coloring,
+        };
         let posed = match (posed_stage, labelled.and_then(|m| m.vertex_labels.as_ref())) {
             (Some((a, st)), Some(l)) if input.stage > 0 => {
                 overlay::posed_mesh(mesh, l, &a.tooth_frames, st).map(Arc::new)
@@ -634,15 +652,23 @@ impl Workspace {
     /// on an entry (only without `wait`) and the scene is to be rebuilt.
     fn sync_scene_mode(&mut self, enamel: Color, wait: bool) -> bool {
         let contacts = self.contact_map();
+        // the region of a tooth is shown on the scan, at the initial position
+        let region = self.region_tooth();
+        let (stage, overlay0) = if region.is_some() {
+            (0, false)
+        } else {
+            (self.timeline.current, self.timeline.overlay0)
+        };
         let key = SceneKey {
             state: Arc::as_ptr(self.undo.current()) as usize,
             upper: self.view.arches.upper,
             lower: self.view.arches.lower,
             display: self.view.display,
-            stage: self.timeline.current,
-            overlay0: self.timeline.overlay0,
+            stage,
+            overlay0,
             layers: self.view.layers,
             teeth: self.teeth_shown(),
+            region,
         };
         if self.view.synced == Some(key) {
             return true;
@@ -660,11 +686,12 @@ impl Workspace {
             lower: self.view.arches.lower,
             opacity,
             enamel,
-            stage: self.timeline.current,
-            overlay0: self.timeline.overlay0,
+            stage: key.stage,
+            overlay0: key.overlay0,
             layers: self.view.layers,
             contacts: contacts.as_deref(),
             teeth: key.teeth,
+            region: key.region,
             wait,
         });
         // an incomplete scene is built again at the next frame
@@ -694,13 +721,17 @@ impl Workspace {
     /// The viewport draws the built teeth and gingiva instead of the scans
     /// they replace: the user chose [`Model::Teeth`], no tool that works on
     /// the scan is open (the brush, the clean-up and the seeds paint and
-    /// read the scan labels) and the contact map (of the scans) is off.
+    /// read the scan labels), the contact map (of the scans) is off and no
+    /// tooth region is shown ([`Workspace::region_tooth`]).
     pub fn teeth_shown(&self) -> bool {
         let on_scan = matches!(
             self.manual.tool,
             Some(manual::Tool::Brush | manual::Tool::Clean | manual::Tool::Seeds)
         );
-        self.view.model == Model::Teeth && !on_scan && !self.view.layers.contacts
+        self.view.model == Model::Teeth
+            && !on_scan
+            && !self.view.layers.contacts
+            && self.region_tooth().is_none()
     }
 
     /// Anchors of the tooth numbers of the current state (computed once per
@@ -810,6 +841,7 @@ impl Workspace {
         let mut alt_action = Action::None;
         let mut sel_input = crate::select::SelInput::default();
         let anchors = self.tooth_anchors();
+        let region_overlay = self.region_overlay();
         match &mut self.view.viewport {
             Some(vp) => {
                 vp.settings.background = Some(scene_color(c.bg_viewport));
@@ -858,6 +890,17 @@ impl Workspace {
                         gizmo: vr.gizmo,
                         eye: vp.camera().eye(),
                     };
+                }
+                // the margin line of the tooth region, in front of the mesh
+                if let Some((data, xform)) = &region_overlay {
+                    crate::region::paint_margin(
+                        ui,
+                        vp,
+                        vr.response.rect,
+                        data,
+                        *xform,
+                        c.model_margin,
+                    );
                 }
                 // the gizmo over the numbers
                 vp.paint_transform_gizmo(ui.painter(), vr.response.hover_pos());
@@ -2616,6 +2659,253 @@ mod built_teeth_tests {
             "ws-model-forced",
         ] {
             assert_ne!(t(key), key);
+        }
+    }
+
+    // ---- the region of a tooth on the scan ----
+
+    fn region_on(ws: &mut Workspace, fdi: u8) {
+        ws.select_item(crate::leaf::BUILD_TEETH);
+        ws.select_component(Some(crate::select::Component::Tooth(fdi)));
+        ws.set_region_view(true);
+    }
+
+    fn lower_labels(state: &CaseState) -> Vec<u16> {
+        let scan = state.case.scan(ScanRole::Lower).unwrap();
+        let mesh = state.mesh(&scan.mesh).unwrap();
+        overlay::scan_labels(state, ScanRole::Lower, mesh)
+            .and_then(|m| m.vertex_labels.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn the_region_view_shows_the_scan_with_the_tooth_in_colour_and_ends_back_where_it_was() {
+        let mut ws = workspace(built_case());
+        ws.timeline.current = 2;
+        ws.sync_scene_with(Color::TOOTH);
+        let state = Arc::clone(ws.undo.current());
+        let before: Vec<(u64, bool)> = ws.view.meshes.iter().map(|m| (m.id, m.visible)).collect();
+        let scan = scan_id(&ws, ScanRole::Lower);
+        // the 3D tooth, posed at aligner 2, replaces the scan
+        assert!(ws.teeth_shown() && mesh(&ws, scan).is_none());
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_some());
+
+        region_on(&mut ws, 31);
+        assert_eq!(ws.region_tooth(), Some(31));
+        assert!(!ws.teeth_shown());
+        ws.sync_scene_with(Color::TOOTH);
+        // the scan is drawn, at the initial position, and the 3D tooth is gone
+        let vm = mesh(&ws, scan).expect("the scan of the arch");
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_none());
+        let scan_mesh = state
+            .mesh(&state.case.scan(ScanRole::Lower).unwrap().mesh)
+            .unwrap();
+        assert!(Arc::ptr_eq(&vm.mesh, scan_mesh), "not posed");
+        // the tooth in its colour, everything else dimmed
+        let p = overlay::palette();
+        let colors = dc_viewport::resolve_colors(&vm.mesh, &vm.coloring);
+        let labels = lower_labels(&state);
+        assert!(labels.contains(&31) && labels.contains(&0));
+        for (l, c) in labels.iter().zip(&colors) {
+            if *l == 31 {
+                assert_eq!(*c, p.color(31));
+            } else {
+                assert_ne!(*c, p.color(*l), "label {l} is dimmed");
+            }
+        }
+        // the other arch is dimmed as a whole
+        let upper = mesh(&ws, scan_id(&ws, ScanRole::Upper)).unwrap();
+        let up_colors = dc_viewport::resolve_colors(&upper.mesh, &upper.coloring);
+        let up_labels = {
+            let s = ws.undo.current();
+            let m = s.mesh(&s.case.scan(ScanRole::Upper).unwrap().mesh).unwrap();
+            overlay::scan_labels(s, ScanRole::Upper, m)
+                .and_then(|m| m.vertex_labels.clone())
+                .unwrap()
+        };
+        assert!(
+            up_labels
+                .iter()
+                .zip(&up_colors)
+                .all(|(l, c)| *c != p.color(*l))
+        );
+        // it only read the case: nothing was run, nothing to undo
+        assert!(Arc::ptr_eq(&state, ws.undo.current()));
+        assert!(!ws.is_busy());
+        assert!(!ws.undo.can_undo());
+
+        // End: the view of before, the stage included
+        ws.set_region_view(false);
+        assert!(ws.teeth_shown());
+        ws.sync_scene_with(Color::TOOTH);
+        let after: Vec<(u64, bool)> = ws.view.meshes.iter().map(|m| (m.id, m.visible)).collect();
+        assert_eq!(after, before);
+        assert_eq!(ws.timeline.current, 2);
+        assert!(Arc::ptr_eq(&state, ws.undo.current()));
+    }
+
+    #[test]
+    fn the_region_view_gives_back_the_model_and_the_layers_it_overrode() {
+        let mut ws = workspace(built_case());
+        ws.view.model = Model::Scan;
+        ws.view.layers.labels = false;
+        ws.sync_scene_with(Color::TOOTH);
+        let lower = scan_id(&ws, ScanRole::Lower);
+        // the label layer is off: the scan is the enamel colour
+        assert_eq!(
+            mesh(&ws, lower).unwrap().coloring,
+            MeshColoring::Uniform(Color::TOOTH)
+        );
+        region_on(&mut ws, 31);
+        ws.sync_scene_with(Color::TOOTH);
+        // while the view lasts the region colours are drawn
+        let vm = mesh(&ws, lower).unwrap();
+        let state = ws.undo.current();
+        let p = overlay::palette();
+        let colors = dc_viewport::resolve_colors(&vm.mesh, &vm.coloring);
+        let labels = lower_labels(state);
+        assert!(
+            labels
+                .iter()
+                .zip(&colors)
+                .any(|(l, c)| *l == 31 && *c == p.color(31))
+        );
+        // End: the model and the layer are as the user left them
+        ws.set_region_view(false);
+        ws.sync_scene_with(Color::TOOTH);
+        assert_eq!(ws.view.model, Model::Scan);
+        assert!(!ws.view.layers.labels);
+        assert_eq!(
+            mesh(&ws, lower).unwrap().coloring,
+            MeshColoring::Uniform(Color::TOOTH)
+        );
+    }
+
+    #[test]
+    fn the_region_view_ends_with_escape_a_deselection_a_tool_or_another_function() {
+        use crate::select::Component;
+        let mut ws = workspace(built_case());
+        // no tooth selected: nothing to show, and it does not stay on
+        ws.select_item(crate::leaf::BUILD_TEETH);
+        ws.set_region_view(true);
+        assert_eq!(ws.region_tooth(), None);
+        assert!(ws.teeth_shown());
+        ws.region_follow();
+        assert!(!ws.region.on);
+        // Escape ends the view first, the selection next
+        region_on(&mut ws, 31);
+        assert!(ws.selection_escape());
+        assert!(!ws.region.on);
+        assert_eq!(ws.selection.component, Some(Component::Tooth(31)));
+        assert!(ws.selection_escape());
+        assert_eq!(ws.selection.component, None);
+        // a deselection
+        region_on(&mut ws, 31);
+        ws.select_component(None);
+        ws.selection_follow_case();
+        assert!(!ws.region.on);
+        // another tooth moves the view to it
+        region_on(&mut ws, 31);
+        ws.select_component(Some(Component::Tooth(32)));
+        ws.selection_follow_case();
+        assert_eq!(ws.region_tooth(), Some(32));
+        // the same function keeps it, another function or a tool ends it
+        ws.select_item(crate::leaf::BUILD_TEETH);
+        assert!(ws.region.on);
+        ws.select_item(crate::leaf::SETUP);
+        assert!(!ws.region.on);
+        region_on(&mut ws, 31);
+        assert!(ws.open_tool(manual::Tool::Rebuild));
+        assert!(!ws.region.on && ws.manual.tool == Some(manual::Tool::Rebuild));
+        // and the view closes the tool
+        region_on(&mut ws, 31);
+        assert_eq!(ws.manual.tool, None);
+        ws.clear_selection();
+        assert!(!ws.region.on);
+        assert!(!ws.is_busy() && !ws.undo.can_undo());
+    }
+
+    /// The demo with a crown-sized patch of its gum painted as tooth 38: a
+    /// patch of the gum shell has a boundary, the demo teeth (shells of their
+    /// own) have none.
+    fn with_patch() -> (CaseState, usize) {
+        let s = lower_demo();
+        let scan = s.mesh(&s.case.scan(ScanRole::Lower).unwrap().mesh).unwrap();
+        let labels = lower_labels(&s);
+        let gum: Vec<usize> = (0..labels.len()).filter(|&i| labels[i] == 0).collect();
+        let g = scan.positions[gum[gum.len() / 2]];
+        let patch: Vec<usize> = gum
+            .into_iter()
+            .filter(|&i| scan.positions[i].distance(g) < 5.0)
+            .collect();
+        assert!(patch.len() > 30);
+        let n = patch.len();
+        let s = exec(
+            "aligners.preparation.segmentation.manual-brush",
+            &s,
+            json!({ "label": 38, "vertices": patch }),
+        );
+        (s, n)
+    }
+
+    #[test]
+    fn the_margin_line_comes_from_the_query_once_per_state_and_changes_nothing() {
+        use crate::select::Component;
+        let (s, n) = with_patch();
+        let mut ws = workspace(s);
+        // the patch is tooth 38 on the scan; select it as the view does
+        ws.select_component(Some(Component::Tooth(38)));
+        ws.region.on = true;
+        let state = Arc::clone(ws.undo.current());
+        let d = ws.region_data().expect("the answer");
+        assert_eq!((d.fdi, d.vertices as usize), (38, n));
+        assert!(d.error.is_none());
+        // closed loops of the margin, in the coordinates of the scan
+        assert!(!d.lines.is_empty() && d.lines.iter().all(|(p, closed)| *closed && p.len() > 2));
+        assert!(d.length_mm > 8.0);
+        assert!(d.check.is_some());
+        // asked once: the same answer while the case and the tooth stay
+        assert!(Arc::ptr_eq(&d, &ws.region_data().unwrap()));
+        // the transform of the arch's scan mesh, from the scene
+        ws.sync_scene_with(Color::TOOTH);
+        let (data, xform) = ws.region_overlay().expect("the overlay");
+        assert!(Arc::ptr_eq(&data, &d));
+        assert_eq!(
+            xform,
+            mesh(&ws, scan_id(&ws, ScanRole::Lower)).unwrap().xform
+        );
+        // no change of the case
+        assert!(Arc::ptr_eq(&state, ws.undo.current()));
+        assert!(!ws.undo.can_undo() && !ws.is_busy());
+        // a tooth that is a shell of its own has no boundary with the gum: no line
+        ws.select_component(Some(Component::Tooth(36)));
+        let shell = ws.region_data().unwrap();
+        assert!(shell.vertices > 0 && shell.lines.is_empty() && shell.length_mm == 0.0);
+        // a tooth with no region: the answer says so
+        ws.select_component(Some(Component::Tooth(18)));
+        let none = ws.region_data().unwrap();
+        assert_eq!(none.vertices, 0);
+    }
+
+    #[test]
+    fn the_region_view_has_both_languages() {
+        for key in [
+            "ws-region-show",
+            "ws-region-end",
+            "ws-region-pick",
+            "ws-region-hint",
+            "ws-region-no-margin",
+            "ws-region-unavailable",
+        ] {
+            assert_ne!(t(key), key);
+        }
+        for key in [
+            "ws-region-on",
+            "ws-region-no-region",
+            "ws-region-stats",
+            "ws-region-margin",
+        ] {
+            assert_ne!(dc_i18n::tr_args(key, &[("fdi", "36")]), key);
         }
     }
 }
