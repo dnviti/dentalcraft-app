@@ -16,6 +16,7 @@
 //! | number in order: click each tooth, `S` skip the tooth, Backspace back, Enter or Esc done | `aligners.preparation.numbering.sequence` (once, at the end) |
 //! | clear the tooth marks (seed tool panel) | `aligners.preparation.numbering.clear-seeds` |
 //! | Apply in the renumber / missing / rebuild / clean / adjust panels | the command of the tool |
+//! | three points: click 3 points on the lower arch, the same 3 on the bite scan (then, optionally, the upper arch), Backspace back, Enter or Apply | `aligners.occlusion.bite-registration.three-points` (once, at the end) |
 //!
 //! Clicking a tooth with any of the picking tools chooses its number. The
 //! mapping from a pick to the parameters ([`handle`], [`params_for`]) is pure
@@ -72,6 +73,8 @@ pub(crate) enum Tool {
     Rebuild,
     /// Move and turn one tooth.
     Adjust,
+    /// Pick 3 points on an arch and the same 3 on the bite scan.
+    ThreePoints,
 }
 
 impl Tool {
@@ -86,6 +89,7 @@ impl Tool {
             Self::Missing,
             Self::Rebuild,
             Self::Adjust,
+            Self::ThreePoints,
         ]
         .into_iter()
         .find(|t| t.command_id() == id)
@@ -102,6 +106,7 @@ impl Tool {
             Self::Missing => MISSING,
             Self::Rebuild => REBUILD,
             Self::Adjust => ADJUST,
+            Self::ThreePoints => crate::bite::THREE_POINTS,
         }
     }
 
@@ -116,6 +121,7 @@ impl Tool {
             Self::Missing => "ws-manual-missing",
             Self::Rebuild => "ws-manual-rebuild",
             Self::Adjust => "ws-manual-adjust",
+            Self::ThreePoints => "ws-manual-three-points",
         }
     }
 
@@ -124,6 +130,7 @@ impl Tool {
             Self::Brush => "ws-manual-hint-brush",
             Self::Seeds => "ws-manual-hint-seeds",
             Self::Delete => "ws-manual-hint-delete",
+            Self::ThreePoints => "ws-manual-hint-bite-points",
             _ => "ws-manual-hint-pick",
         }
     }
@@ -184,6 +191,8 @@ pub(crate) struct Manual {
     seq_base: Option<Arc<CaseState>>,
     /// Number the third molars too in the next numbering in order.
     pub third_molars: bool,
+    /// The points of "Three points" given so far.
+    pub bite: crate::bite::BitePicks,
     /// Picks of the stroke being drawn.
     stroke: Vec<Pick>,
     /// Their screen positions (for the feedback while drawing).
@@ -217,6 +226,7 @@ impl Default for Manual {
             sequence: None,
             seq_base: None,
             third_molars: false,
+            bite: crate::bite::BitePicks::default(),
             stroke: Vec::new(),
             stroke_screen: Vec::new(),
             sink: Arc::default(),
@@ -592,6 +602,17 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
     if mods.alt {
         return Action::None;
     }
+    // "Three points": the click is a point of the step, on its scan
+    if tool == Tool::ThreePoints {
+        let Event::Click(p, _) = ev else {
+            return Action::None;
+        };
+        let action = m.bite.click(state, p, eye);
+        if matches!(action, Action::Run(..)) {
+            m.tool = None;
+        }
+        return action;
+    }
     // a click on a built tooth (the scan is not drawn) names it
     if let (
         Tool::Clean | Tool::Renumber | Tool::Missing | Tool::Rebuild | Tool::Adjust,
@@ -695,6 +716,7 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
                 _ => Action::Hint("ws-manual-no-tooth"),
             }
         }
+        Tool::ThreePoints => Action::None,
     }
 }
 
@@ -703,6 +725,7 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
 pub(crate) fn params_for(m: &Manual, tool: Tool, stage: u32) -> Result<Value, &'static str> {
     match tool {
         Tool::Brush | Tool::Seeds | Tool::Delete => Err("ws-manual-hint-pick"),
+        Tool::ThreePoints => Err("ws-bite-points-incomplete"),
         Tool::Clean => {
             let mut p = json!({ "rings": m.rings });
             if m.tooth != 0 {
@@ -848,6 +871,7 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
                 "ws-manual-marked-present"
             },
         )),
+        crate::bite::THREE_POINTS | crate::bite::CORRECT => crate::bite::feedback_toast(id, out),
         _ => None,
     }
 }
@@ -1020,6 +1044,25 @@ pub(crate) fn collect(
             );
         }
     }
+    // the points of "Three points" on the scan shown, numbered
+    if tool == Tool::ThreePoints {
+        for (world, n, upper) in m.bite.markers() {
+            let at = vp.screen_pos(rect, world);
+            let color = if upper {
+                c.status_warning
+            } else {
+                c.select_blue
+            };
+            painter.circle_filled(at, 5.0, color);
+            painter.text(
+                at + egui::vec2(7.0, -7.0),
+                egui::Align2::LEFT_BOTTOM,
+                n.to_string(),
+                egui::FontId::proportional(13.0),
+                c.text_primary,
+            );
+        }
+    }
     let mut out = Vec::new();
     if mods.alt {
         // Alt+click chooses the brush tooth: no stroke, no click for the tool
@@ -1100,6 +1143,7 @@ impl Workspace {
         self.manual.tool = Some(tool);
         self.manual.sequence = None;
         self.manual.seq_base = None;
+        self.manual.bite = crate::bite::BitePicks::default();
         // the numbering in order searches the third molars as Find the teeth does
         if tool == Tool::Seeds {
             self.manual.third_molars = overlay::aligners(self.undo.current())
@@ -1113,6 +1157,7 @@ impl Workspace {
         self.manual.tool = None;
         self.manual.sequence = None;
         self.manual.seq_base = None;
+        self.manual.bite = crate::bite::BitePicks::default();
     }
 
     /// Stops the numbering in order when the case is no longer the one it
@@ -1244,6 +1289,15 @@ impl Workspace {
     /// pointer, the tooth, the values of the tool, Apply for the tools that
     /// change a chosen tooth, and Close.
     pub(crate) fn tool_controls(&mut self, ui: &mut Ui, tool: Tool) {
+        // "Three points" has its own steps, Apply and keys (`bite`)
+        if tool == Tool::ThreePoints {
+            self.bite_points_controls(ui);
+            ui.add_space(6.0);
+            if Button::ghost(t("ws-manual-close")).show(ui).clicked() {
+                self.close_tool();
+            }
+            return;
+        }
         let stage = self.timeline.current;
         let has_stages = self.timeline.current > 0;
         let mut apply = false;
@@ -1324,7 +1378,7 @@ impl Workspace {
                     }
                 }
             }
-            Tool::Delete => {}
+            Tool::Delete | Tool::ThreePoints => {}
             Tool::Renumber => number(ui, t("ws-manual-dst"), &mut m.dst, 0..=48, 1.0, ""),
             Tool::Missing => {
                 ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));

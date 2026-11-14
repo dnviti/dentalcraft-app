@@ -218,7 +218,9 @@ impl Running {
 
 /// Answer of a native file dialog (run on its own thread).
 pub(crate) enum DialogAnswer {
-    Import(Vec<PathBuf>),
+    /// The scan files chosen, and the role they are imported with (`None`:
+    /// the role chosen in the import inspector, else auto).
+    Import(Vec<PathBuf>, Option<ScanRole>),
     SaveAs(Option<PathBuf>, Option<Exit>),
     /// The folder or file a menu leaf asked for (`None`: cancelled).
     Leaf(&'static str, Option<PathBuf>),
@@ -641,7 +643,7 @@ impl Workspace {
             if self.command_running() {
                 self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
             } else {
-                self.request_import_dialog();
+                self.request_import_dialog(None);
             }
             return;
         }
@@ -703,6 +705,17 @@ impl Workspace {
                         .with_detail(e.to_string()),
                 );
             }
+        }
+    }
+
+    /// The button "Import the bite scans" of Bite (`oa.import_bite`): the
+    /// file dialog, then the files are imported with the role bite. Nothing
+    /// runs before the answer; refused while a command runs.
+    pub(crate) fn import_bite_scans(&mut self) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+        } else {
+            self.request_import_dialog(Some(ScanRole::Bite));
         }
     }
 
@@ -1208,7 +1221,7 @@ impl Workspace {
 
     // ------------------------------------------------------------ dialogs
 
-    fn request_import_dialog(&mut self) {
+    fn request_import_dialog(&mut self, role: Option<ScanRole>) {
         if !self.native_dialogs {
             self.dialog_requests += 1;
             return;
@@ -1223,7 +1236,7 @@ impl Workspace {
             if let Some(c) = ctx {
                 c.request_repaint();
             }
-            DialogAnswer::Import(files)
+            DialogAnswer::Import(files, role)
         });
     }
 
@@ -1295,7 +1308,12 @@ impl Workspace {
                 Ok(answer) => {
                     self.dialog = None;
                     match answer {
-                        DialogAnswer::Import(files) => self.import_files(files),
+                        DialogAnswer::Import(files, role) => {
+                            if role.is_some() && !files.is_empty() {
+                                self.import_role = role;
+                            }
+                            self.import_files(files);
+                        }
                         DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then, true),
                         DialogAnswer::SaveAs(None, _) => {}
                         DialogAnswer::Leaf(id, path) => self.answer_leaf_input(id, path),

@@ -69,6 +69,9 @@ struct Function {
     /// The section "Manual corrections" starts with the controls of the view
     /// of a tooth region on the scan (`region`).
     region: bool,
+    /// Controls of their own after the tools of the section "Manual
+    /// corrections" (a correction that is a button, not a pointer tool).
+    more: Option<Draw>,
 }
 
 /// A function with nothing more than its run button.
@@ -79,6 +82,7 @@ const PLAIN: Function = Function {
     note: None,
     corrections: Corrections::None,
     region: false,
+    more: None,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -132,6 +136,14 @@ static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
+        ..PLAIN
+    },
+    Function {
+        id: leaf::BITE,
+        results: Some(Workspace::bite_results),
+        params: Params::Own(Workspace::bite_params),
+        corrections: Corrections::Tools(&[Tool::ThreePoints]),
+        more: Some(Workspace::bite_corrections),
         ..PLAIN
     },
 ];
@@ -255,7 +267,7 @@ impl Workspace {
                     .copied()
                     .filter(|tool| self.tool_ready(*tool))
                     .collect();
-                if !tools.is_empty() || f.region {
+                if !tools.is_empty() || f.region || f.more.is_some() {
                     section(ui, "ws-fn-manual");
                 }
                 if f.region {
@@ -264,6 +276,10 @@ impl Workspace {
                 }
                 if !tools.is_empty() {
                     self.tool_list(ui, &tools);
+                }
+                if let Some(more) = f.more {
+                    ui.add_space(8.0);
+                    more(self, ui);
                 }
             }
             Corrections::Own(draw) => {
@@ -327,6 +343,7 @@ mod tests {
             Tool::Missing,
             Tool::Rebuild,
             Tool::Adjust,
+            Tool::ThreePoints,
         ] {
             let owners = FUNCTIONS
                 .iter()
@@ -339,12 +356,13 @@ mod tests {
         assert_eq!(owner(Tool::Delete), Some(leaf::FIND_TEETH));
         assert_eq!(owner(Tool::Rebuild), Some(leaf::BUILD_TEETH));
         assert_eq!(owner(Tool::Adjust), Some(leaf::SETUP));
+        assert_eq!(owner(Tool::ThreePoints), Some(leaf::BITE));
     }
 
     #[test]
     fn a_function_not_listed_has_only_its_run_button() {
-        let f = of("aligners.occlusion.align");
-        assert!(f.results.is_none() && f.note.is_none());
+        let f = of("aligners.planning.aligners");
+        assert!(f.results.is_none() && f.note.is_none() && f.more.is_none());
         assert!(matches!(f.params, Params::None));
         assert!(matches!(f.corrections, Corrections::None));
         // the import of any module has its role and its scans
@@ -355,5 +373,14 @@ mod tests {
         for (i, f) in FUNCTIONS.iter().enumerate() {
             assert!(FUNCTIONS[..i].iter().all(|o| o.id != f.id), "{}", f.id);
         }
+    }
+
+    #[test]
+    fn the_bite_shows_its_report_its_scans_and_its_corrections() {
+        let f = of(leaf::BITE);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        assert!(matches!(f.corrections, Corrections::Tools(t) if t == [Tool::ThreePoints]));
+        assert!(f.more.is_some());
     }
 }

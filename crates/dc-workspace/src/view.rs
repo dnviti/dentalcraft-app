@@ -112,6 +112,8 @@ struct SceneKey {
     teeth: bool,
     /// The tooth whose region is shown on the scan (`region`).
     region: Option<u8>,
+    /// The only scan shown ("Three points": the one the next point goes on).
+    focus: Option<uuid::Uuid>,
 }
 
 /// Contact map computed for one case state (by pointer).
@@ -146,6 +148,8 @@ pub(crate) struct ViewState {
     anchors: AnchorCache,
     /// Scans of the last scene (a new set is framed).
     scan_ids: Vec<uuid::Uuid>,
+    /// The scan shown alone in the last scene (a change is framed).
+    focus: Option<uuid::Uuid>,
     /// The meshes of the last scene (also without a viewport).
     pub meshes: Vec<ViewMesh>,
     /// Counts the scenes built: the selection decorates the scene of this
@@ -252,6 +256,9 @@ pub(crate) struct SceneInput<'a> {
     /// that tooth in its colour and the rest dimmed, every other labelled
     /// scan dimmed (`region::region_colors`), whatever the contact map says.
     pub region: Option<u8>,
+    /// The only scan shown, alone (no other scan, mark or module entry):
+    /// the scan "Three points" takes the next point on.
+    pub focus: Option<uuid::Uuid>,
 }
 
 /// Most notifications the stack draws, those that stay until closed (failed
@@ -466,7 +473,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     };
     let mut out = Vec::new();
     for scan in &state.case.scans {
-        if replacing.contains(&scan.role) && shown(scan.role) {
+        if replacing.contains(&scan.role) && shown(scan.role) && input.focus.is_none() {
             continue;
         }
         let Some(mesh) = state.mesh(&scan.mesh) else {
@@ -513,7 +520,10 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             .with_xform(xform)
             .with_coloring(coloring)
             .with_opacity(input.opacity);
-        vm.visible = shown(scan.role);
+        vm.visible = match input.focus {
+            Some(f) => f == scan.id,
+            None => shown(scan.role),
+        };
         out.push(vm);
     }
     if input.layers.seeds
@@ -527,7 +537,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             } else {
                 ScanRole::Lower
             };
-            shown(role) && !replacing.contains(&role)
+            shown(role) && !replacing.contains(&role) && input.focus.is_none()
         });
         if let Some(m) = overlay::seed_markers(seeds, SEED_RADIUS) {
             let mut vm = ViewMesh::new(1 << 61, Arc::new(m))
@@ -566,7 +576,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             .with_xform(world * xform.to_mat4().as_mat4())
             .with_coloring(coloring)
             .with_opacity(input.opacity);
-        vm.visible = e.arch.is_none_or(shown);
+        vm.visible = e.arch.is_none_or(shown) && input.focus.is_none();
         vm.pickable = *pickable && vm.visible;
         Some(vm)
     };
@@ -652,9 +662,11 @@ impl Workspace {
     /// on an entry (only without `wait`) and the scene is to be rebuilt.
     fn sync_scene_mode(&mut self, enamel: Color, wait: bool) -> bool {
         let contacts = self.contact_map();
-        // the region of a tooth is shown on the scan, at the initial position
+        // the region of a tooth is shown on the scan, at the initial position,
+        // and so are the points of "Three points" (they go on the scans at rest)
         let region = self.region_tooth();
-        let (stage, overlay0) = if region.is_some() {
+        let focus = self.bite_points_focus();
+        let (stage, overlay0) = if region.is_some() || focus.is_some() {
             (0, false)
         } else {
             (self.timeline.current, self.timeline.overlay0)
@@ -669,6 +681,7 @@ impl Workspace {
             layers: self.view.layers,
             teeth: self.teeth_shown(),
             region,
+            focus,
         };
         if self.view.synced == Some(key) {
             return true;
@@ -692,6 +705,7 @@ impl Workspace {
             contacts: contacts.as_deref(),
             teeth: key.teeth,
             region: key.region,
+            focus: key.focus,
             wait,
         });
         // an incomplete scene is built again at the next frame
@@ -700,13 +714,16 @@ impl Workspace {
         // a new set of scans (import, demo, a command through the bridge) is framed
         let ids: Vec<uuid::Uuid> = state.case.scans.iter().map(|s| s.id).collect();
         let new_scans = ids != self.view.scan_ids && !ids.is_empty();
+        // the scan of the next point of "Three points" (and back) is framed
+        let refocus = self.view.focus != key.focus;
+        self.view.focus = key.focus;
         self.view.scan_ids = ids;
         self.view.meshes = meshes.clone();
         self.view.generation += 1;
         if let Some(vp) = &mut self.view.viewport {
             vp.settings.wireframe = self.view.display == Display::Wireframe;
             vp.set_meshes(meshes);
-            if new_scans {
+            if new_scans || refocus {
                 vp.fit();
             }
         }
@@ -726,7 +743,12 @@ impl Workspace {
     pub fn teeth_shown(&self) -> bool {
         let on_scan = matches!(
             self.manual.tool,
-            Some(manual::Tool::Brush | manual::Tool::Clean | manual::Tool::Seeds)
+            Some(
+                manual::Tool::Brush
+                    | manual::Tool::Clean
+                    | manual::Tool::Seeds
+                    | manual::Tool::ThreePoints
+            )
         );
         self.view.model == Model::Teeth
             && !on_scan

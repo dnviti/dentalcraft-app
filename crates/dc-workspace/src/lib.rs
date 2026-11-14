@@ -28,6 +28,7 @@
 //! native file dialogs).
 
 pub mod autosave;
+mod bite;
 mod function;
 mod icons;
 pub mod import;

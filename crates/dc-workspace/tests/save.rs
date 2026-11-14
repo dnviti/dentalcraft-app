@@ -302,6 +302,18 @@ const FILES: &str = "writes files only; the case it returns is the one it got";
 /// same data the other steps change and the round trip compares.
 const BITE_SCANS: &str = "needs the bite scans of a patient";
 
+/// A move of `mm` of the upper arch towards the lower one (from the centre
+/// of the upper scan to the centre of the lower one).
+fn towards_lower(ws: &Workspace, mm: f32) -> [f32; 3] {
+    let centre = |role: ScanRole| {
+        let s = ws.state();
+        let m = s.mesh(&s.case.scan(role).unwrap().mesh).unwrap();
+        m.positions.iter().copied().sum::<glam::Vec3>() / m.positions.len() as f32
+    };
+    let d = (centre(ScanRole::Lower) - centre(ScanRole::Upper)).normalize() * mm;
+    d.to_array()
+}
+
 fn null(_: &Workspace, _: &Path) -> Value {
     Value::Null
 }
@@ -373,6 +385,16 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ),
         // with both arches the bite comes before the final position
         ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
+        // the upper arch pushed into the lower one, then the interpenetration
+        // corrected: the arch moved and the report of the bite with it
+        (
+            "aligners.components.transform",
+            Run(|ws, _| {
+                let t = towards_lower(ws, 0.4);
+                json!({ "component": "scan", "arch": "upper", "move": { "t": t, "q": [0.0, 0.0, 0.0, 1.0] } })
+            }),
+        ),
+        ("aligners.occlusion.bite-correct", Run(|_, _| json!({}))),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (

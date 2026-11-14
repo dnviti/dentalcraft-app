@@ -300,7 +300,7 @@ fn menu_search_filters() {
 type ToolRow = (&'static str, &'static str, &'static str);
 
 /// The functions with manual corrections and their tools.
-const TOOLS: [(&str, &[ToolRow]); 4] = [
+const TOOLS: [(&str, &[ToolRow]); 5] = [
     (
         "aligners.teeth.find",
         &[
@@ -353,6 +353,14 @@ const TOOLS: [(&str, &[ToolRow]); 4] = [
         "aligners.planning.setup.automatic",
         &[("Move a tooth", "aligners.planning.movements", "Mesial")],
     ),
+    (
+        "aligners.occlusion.align",
+        &[(
+            "Three points",
+            "aligners.occlusion.bite-registration.three-points",
+            "Take the last point back",
+        )],
+    ),
 ];
 
 #[test]
@@ -390,7 +398,7 @@ fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
         assert_eq!(h.state().ws.active_tool(), None, "{last}");
     }
     // a function without tools has no such section
-    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.state_mut().ws.select_item("aligners.planning.aligners");
     h.run();
     assert!(h.query_by_label("Manual corrections").is_none());
     let ws = &h.state().ws;
@@ -1882,4 +1890,93 @@ fn the_numbering_in_order_stops_when_the_case_changes_and_follows_the_third_mola
             .iter()
             .any(|k| k == "ws-manual-seq-stopped")
     );
+}
+
+/// Bite, the plugin's MORSO page: the report of the last bite under the
+/// status, the bite scans with the button that imports them, Three points
+/// and the correction of the interpenetration. Selecting it runs nothing.
+#[test]
+fn the_bite_inspector_shows_the_report_the_scans_and_the_corrections() {
+    let mut project = demo_project(&["lower", "upper"]);
+    let state = &mut project.case_state;
+    // a bite scan and the report of a registration on it
+    let blob = state.blobs.insert(tetra(12.0));
+    let scan: Scan = serde_json::from_value(json!({
+        "id": "b1700000-0000-4000-8000-000000000009",
+        "role": "bite",
+        "source_name": "right-bite.stl",
+        "source_units": "mm",
+        "import_xform": { "t": [0.0, 0.0, 0.0], "q": [0.0, 0.0, 0.0, 1.0] },
+        "mesh": blob,
+    }))
+    .unwrap();
+    state.case.scans.push(scan);
+    let mut data = state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    let fit = |rms: f64, n: usize, area: f64| dca_model::BiteFit {
+        rms_mm: rms,
+        n_teeth: n,
+        area_mm2: area,
+        ..dca_model::BiteFit::default()
+    };
+    data.bite_registered = true;
+    data.bite_report = Some(dca_model::BiteReport {
+        method: dca_model::BiteMethod::Registration,
+        registration: Some(dca_model::BiteRegistration {
+            scans: vec![dca_model::BiteScanFit {
+                scan: "right-bite.stl".into(),
+                side: Some("right".into()),
+                lower: fit(0.021, 4, 212.0),
+                upper: fit(0.034, 3, 187.0),
+            }],
+            penetration_mm: 0.18,
+            reasons: vec!["one_side_only".into(), "interpenetration".into()],
+            verdict: dca_model::BiteVerdict::ToReview,
+            ..dca_model::BiteRegistration::default()
+        }),
+        correction_mm: 0.0,
+    });
+    state.set_module(dca_model::MODULE_ID, ModuleState::new(data));
+    let mut h = harness(Workspace::new_headless(module(), Some(project), None));
+    h.run();
+    let before = Arc::clone(h.state().ws.state());
+    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.run();
+    for label in [
+        // the report
+        "Bite registered, to check",
+        "Bite registered from 1 buccal scan(s) (right): largest RMS deviation 0.034 mm, \
+         interpenetration 0.18 mm.",
+        "To check: Bite of one side only",
+        "To check: Interpenetration of the arches 0.18 mm",
+        "right-bite.stl (right): RMS 0.021 / 0.034 mm, teeth 4 + 3, 212 + 187 mm²",
+        // the bite scans and the button that imports them
+        "Side 1: right-bite.stl",
+        "Import the bite scans…",
+        "Run registers the arches on the bite scans",
+        // the manual corrections
+        "Manual corrections",
+        "Three points",
+        "Correct the interpenetration (0.18 mm)",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    let ws = &h.state().ws;
+    assert!(!ws.is_busy());
+    assert_eq!(ws.dialog_requests(), 0);
+    assert_eq!(ws.active_tool(), None);
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(
+        Arc::ptr_eq(&before, ws.state()),
+        "the selection changed the case"
+    );
+    // the button of the bite scans asks for the files, and only that
+    click_in_view(&mut h, "Import the bite scans…");
+    h.run();
+    let ws = &h.state().ws;
+    assert_eq!(ws.dialog_requests(), 1);
+    assert!(!ws.is_busy());
+    assert!(Arc::ptr_eq(&before, ws.state()));
 }
