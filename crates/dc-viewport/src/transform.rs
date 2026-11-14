@@ -442,23 +442,27 @@ impl Drag {
             Handle::Ring(i) => {
                 let a = AXES[i];
                 let angle = if self.edge_on {
-                    (pos - self.start).dot(self.tangent.0) / self.tangent.1
+                    Some((pos - self.start).dot(self.tangent.0) / self.tangent.1)
                 } else {
-                    match on_plane(&ray, c, a) {
-                        Some(h) => {
-                            let (v0, v1) = (self.anchor, h - c);
-                            v0.cross(v1).dot(a).atan2(v0.dot(v1))
-                        }
-                        None => self.last.rotation.to_axis_angle().1,
+                    on_plane(&ray, c, a).map(|h| {
+                        let (v0, v1) = (self.anchor, h - c);
+                        v0.cross(v1).dot(a).atan2(v0.dot(v1))
+                    })
+                };
+                // a line of sight along the plane of the ring keeps the last turn as it
+                // was (its angle read back from the quaternion would lose its sign)
+                match angle {
+                    Some(angle) => {
+                        let angle = if snap {
+                            let step = 5f32.to_radians();
+                            (angle / step).round() * step
+                        } else {
+                            angle
+                        };
+                        d.rotation = Quat::from_axis_angle(a, angle);
                     }
-                };
-                let angle = if snap {
-                    let step = 5f32.to_radians();
-                    (angle / step).round() * step
-                } else {
-                    angle
-                };
-                d.rotation = Quat::from_axis_angle(a, angle);
+                    None => d = self.last,
+                }
             }
             Handle::Scale => {
                 let center = proj.screen(c);
@@ -742,6 +746,30 @@ mod tests {
         assert!(small.rotation.to_axis_angle().1.abs() < 1e-4);
         let moved = d.update(&p, start + EVec2::new(-20.0, 0.0), false);
         assert!(moved.rotation.to_axis_angle().1.abs() > 0.05);
+    }
+
+    #[test]
+    fn a_ring_keeps_its_turn_when_the_pointer_leaves_its_plane() {
+        let p = front();
+        let g = gizmo(GizmoMode::Rotate);
+        let c = p.screen(Vec3::ZERO);
+        // the ring about Y faces the viewer; from its right point going up turns X to
+        // Z: a negative angle about +Y
+        let start = c + EVec2::new(80.0, 0.0);
+        let mut d = Drag::start(Handle::Ring(1), &g, &p, start);
+        let turned = d.update(&p, c + EVec2::new(0.0, -80.0), false);
+        assert!(((turned.rotation * Vec3::X) - Vec3::Z).length() < 0.06);
+        // seen from the side, the line of sight through the centre runs along the
+        // plane of the ring: no point on it, the turn stays as it was
+        let mut side = front();
+        side.camera.set_view(StdView::Right);
+        let kept = d.update(&side, side.screen(Vec3::ZERO), false);
+        assert!(
+            kept.rotation.abs_diff_eq(turned.rotation, 1e-6),
+            "{:?} {:?}",
+            kept.rotation,
+            turned.rotation
+        );
     }
 
     #[test]
