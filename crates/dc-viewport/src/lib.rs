@@ -526,12 +526,16 @@ impl Viewport {
         )
     }
 
+    /// The ray from the camera through a screen position inside the
+    /// viewport `rect` (world coordinates).
+    pub fn ray_at(&self, rect: Rect, pos: Pos2) -> Ray {
+        self.camera
+            .ray(ndc_of(rect, pos), aspect_of(rect), self.bounding_sphere())
+    }
+
     /// Picks under a screen position inside the viewport `rect`.
     pub fn pick_at(&self, rect: Rect, pos: Pos2) -> Option<Pick> {
-        let ray = self
-            .camera
-            .ray(ndc_of(rect, pos), aspect_of(rect), self.bounding_sphere());
-        self.pick_ray(&ray)
+        self.pick_ray(&self.ray_at(rect, pos))
     }
 
     /// Draws the selection outline around the meshes `selected` and tints

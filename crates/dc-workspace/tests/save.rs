@@ -336,6 +336,13 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.settings.study-models",
             Run(|_, _| json!({ "style": "abo", "total_height_mm": 80.0 })),
         ),
+        // the parameters of the final position and the steps of Move a tooth
+        (
+            "aligners.settings.setup",
+            Run(
+                |_, _| json!({ "ipr_zone": "anterior", "advance_max_mm": 1.5, "midline": "balance", "adjust_step_mm": 0.2 }),
+            ),
+        ),
         // a new demo arch in the place of the lower one
         (
             "aligners.demo",
@@ -396,6 +403,17 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ),
         ("aligners.occlusion.bite-correct", Run(|_, _| json!({}))),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
+        // the arch line of the lower arch drawn by hand: kept, final position again
+        (
+            "aligners.planning.setup.line",
+            Run(|ws, _| {
+                let points: Vec<[f64; 3]> = aligners(ws).setup.lines[&ScanRole::Lower]
+                    .iter()
+                    .map(|p| [p.x, p.y - 0.5, p.z])
+                    .collect();
+                json!({ "arch": "lower", "points": points })
+            }),
+        ),
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (
             "aligners.planning.schedule",
@@ -414,6 +432,12 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Skip(BITE_SCANS),
         ),
         ("aligners.occlusion.align", Skip(BITE_SCANS)),
+        // the final position of the upper arch back to the initial one; the
+        // pipeline computes it again
+        (
+            "aligners.planning.setup.reset",
+            Run(|_, _| json!({ "arch": "upper" })),
+        ),
         // the whole pipeline as one step
         ("aligners.auto", Run(null)),
         // corrections of the built teeth and of the plan
@@ -433,6 +457,13 @@ fn plan() -> Vec<(&'static str, Plan)> {
         (
             "aligners.planning.movements",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 3), "mesial_mm": 0.3 })),
+        ),
+        // the exact values of a tooth, locked
+        (
+            "aligners.planning.movements",
+            Run(
+                |ws, _| json!({ "fdi": lower_crown(ws, 4), "exact": true, "rotation_deg": 4.0, "mesial_mm": -0.2, "lock": true }),
+            ),
         ),
         // the gizmo of the viewport: a tooth scaled, the lower arch moved
         (

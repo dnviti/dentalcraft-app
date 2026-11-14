@@ -264,8 +264,12 @@ pub struct Workspace {
     pub(crate) selection: crate::select::Selection,
     /// The view of the region of the selected tooth on the scan.
     pub(crate) region: crate::region::RegionView,
+    /// The arch line of the final position: shown, its points moved.
+    pub(crate) archline: crate::archline::ArchLine,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
+    /// The final position parameter being dragged.
+    pub(crate) setup_ui: crate::setup::SetupUi,
     /// The value of "Manual corrections" of the case analysis being typed
     /// or dragged.
     pub(crate) diagnosis_ui: leaf::DiagnosisUi,
@@ -382,7 +386,9 @@ impl Workspace {
             manual: crate::manual::Manual::default(),
             selection: crate::select::Selection::default(),
             region: crate::region::RegionView::default(),
+            archline: crate::archline::ArchLine::default(),
             segment: leaf::SegmentUi::default(),
+            setup_ui: crate::setup::SetupUi::default(),
             diagnosis_ui: leaf::DiagnosisUi::default(),
             bite_check: leaf::BiteCheck::default(),
             selected: None,

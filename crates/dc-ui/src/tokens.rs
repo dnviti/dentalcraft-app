@@ -118,6 +118,10 @@ palette! {
     model_ipr,
     /// Margin line of a tooth region on the scan.
     model_margin,
+    /// Arch line of the final position and its points.
+    model_arch_line,
+    /// Ghost of the teeth at their final position.
+    model_target,
 }
 
 /// Font family of a text style.

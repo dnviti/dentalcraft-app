@@ -29,7 +29,7 @@ use dc_case::{CaseState, Fdi, ScanRole};
 use dc_command::{Command, CommandError, JobCtx};
 use dc_module_api::{CommandSpec, NOT_AVAILABLE_KEY, Toast, ToastLevel};
 use dc_ui::theme::colors;
-use dc_ui::widgets::Button;
+use dc_ui::widgets::{BadgeKind, Button, ButtonSize};
 use dc_viewport::{Pick, Viewport, ViewportResponse};
 use dca_algo::anatomy::{Arch, numbering_sequence};
 use egui::{Color32, PointerButton, Pos2, Stroke, Ui};
@@ -75,6 +75,8 @@ pub(crate) enum Tool {
     Adjust,
     /// Pick 3 points on an arch and the same 3 on the bite scan.
     ThreePoints,
+    /// Show the arch line of the final position and move its points.
+    ArchLine,
 }
 
 impl Tool {
@@ -90,6 +92,7 @@ impl Tool {
             Self::Rebuild,
             Self::Adjust,
             Self::ThreePoints,
+            Self::ArchLine,
         ]
         .into_iter()
         .find(|t| t.command_id() == id)
@@ -107,6 +110,7 @@ impl Tool {
             Self::Rebuild => REBUILD,
             Self::Adjust => ADJUST,
             Self::ThreePoints => crate::bite::THREE_POINTS,
+            Self::ArchLine => crate::archline::LINE,
         }
     }
 
@@ -122,6 +126,7 @@ impl Tool {
             Self::Rebuild => "ws-manual-rebuild",
             Self::Adjust => "ws-manual-adjust",
             Self::ThreePoints => "ws-manual-three-points",
+            Self::ArchLine => "ws-manual-arch-line",
         }
     }
 
@@ -141,22 +146,23 @@ impl Tool {
     }
 }
 
-/// Movement fields of the adjust panel.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct Fields {
-    pub mesial_mm: f64,
-    pub buccal_mm: f64,
-    pub extrusion_mm: f64,
-    pub torque_deg: f64,
-    pub tip_deg: f64,
-    pub rotation_deg: f64,
-}
+/// The clinical components of a movement, in the order of
+/// `staging::describe_q`: the parameter of `aligners.planning.movements`,
+/// the key of its label, its unit and the range of its exact value (the
+/// plugin's `oa.setup_tooth_edit`).
+const COMPONENTS: [(&str, &str, &str, f64); 6] = [
+    ("mesial_mm", "ws-manual-mesial", " mm", 5.0),
+    ("buccal_mm", "ws-manual-buccal", " mm", 5.0),
+    ("extrusion_mm", "ws-manual-extrusion", " mm", 5.0),
+    ("torque_deg", "ws-manual-torque", "°", 30.0),
+    ("tip_deg", "ws-manual-tip", "°", 30.0),
+    ("rotation_deg", "ws-manual-rotation", "°", 60.0),
+];
 
-impl Fields {
-    fn is_zero(&self) -> bool {
-        *self == Self::default()
-    }
-}
+/// The exact values of the movement of the adjusted tooth, in the order of
+/// [`COMPONENTS`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Fields(pub [f64; 6]);
 
 /// State of the manual tools of a workspace.
 pub(crate) struct Manual {
@@ -176,12 +182,15 @@ pub(crate) struct Manual {
     pub resegment: bool,
     /// Rings of smoothing of the clean-up.
     pub rings: u32,
-    /// The movement to apply.
+    /// The exact values of the movement of the adjusted tooth: its movement
+    /// now, until they are changed by hand.
     pub fields: Fields,
+    /// `fields` were changed by hand since they were read from the case.
+    pub fields_edited: bool,
+    /// The tooth `fields` belong to.
+    fields_tooth: u8,
     /// Adjust the stage shown on the timeline instead of the setup.
     pub at_stage: bool,
-    /// Keep the adjusted tooth where it is put when the setup is computed again.
-    pub lock: bool,
     /// Refuse a move that makes the tooth collide.
     pub refuse_on_collision: bool,
     /// The numbering in order that is going on, if any (seed tool).
@@ -220,8 +229,9 @@ impl Default for Manual {
             resegment: false,
             rings: 1,
             fields: Fields::default(),
+            fields_edited: false,
+            fields_tooth: 0,
             at_stage: false,
-            lock: false,
             refuse_on_collision: false,
             sequence: None,
             seq_base: None,
@@ -602,6 +612,10 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
     if mods.alt {
         return Action::None;
     }
+    // "Arch line": the pointer drags its points (`archline::viewport`)
+    if tool == Tool::ArchLine {
+        return Action::None;
+    }
     // "Three points": the click is a point of the step, on its scan
     if tool == Tool::ThreePoints {
         let Event::Click(p, _) = ev else {
@@ -716,7 +730,7 @@ pub(crate) fn handle(m: &mut Manual, state: &CaseState, ev: &Event, eye: Vec3) -
                 _ => Action::Hint("ws-manual-no-tooth"),
             }
         }
-        Tool::ThreePoints => Action::None,
+        Tool::ThreePoints | Tool::ArchLine => Action::None,
     }
 }
 
@@ -726,6 +740,7 @@ pub(crate) fn params_for(m: &Manual, tool: Tool, stage: u32) -> Result<Value, &'
     match tool {
         Tool::Brush | Tool::Seeds | Tool::Delete => Err("ws-manual-hint-pick"),
         Tool::ThreePoints => Err("ws-bite-points-incomplete"),
+        Tool::ArchLine => Err("ws-archline-hint"),
         Tool::Clean => {
             let mut p = json!({ "rings": m.rings });
             if m.tooth != 0 {
@@ -755,35 +770,59 @@ pub(crate) fn params_for(m: &Manual, tool: Tool, stage: u32) -> Result<Value, &'
             if m.tooth == 0 {
                 return Err("ws-manual-no-tooth");
             }
-            if m.fields.is_zero() {
+            if !m.fields_edited {
                 return Err("ws-manual-no-movement");
             }
-            let f = &m.fields;
-            let mut p = Map::new();
-            p.insert("fdi".into(), json!(m.tooth));
-            for (k, v) in [
-                ("mesial_mm", f.mesial_mm),
-                ("buccal_mm", f.buccal_mm),
-                ("extrusion_mm", f.extrusion_mm),
-                ("torque_deg", f.torque_deg),
-                ("tip_deg", f.tip_deg),
-                ("rotation_deg", f.rotation_deg),
-            ] {
-                if v != 0.0 {
-                    p.insert(k.into(), json!(v));
-                }
-            }
-            if m.at_stage && stage > 0 {
-                p.insert("stage".into(), json!(stage));
-            } else if m.lock {
-                p.insert("lock".into(), json!(true));
-            }
-            if m.refuse_on_collision {
-                p.insert("refuse_on_collision".into(), json!(true));
+            // "Write the exact values": the whole movement, not an increment
+            let mut p = adjust_base(m, stage);
+            p.insert("exact".into(), json!(true));
+            for ((k, ..), v) in COMPONENTS.iter().zip(m.fields.0) {
+                p.insert((*k).into(), json!(v));
             }
             Ok(Value::Object(p))
         }
     }
+}
+
+/// What every command of "Move a tooth" takes: the tooth, the stage shown
+/// when asked (stage 0 is the initial situation: the setup is adjusted) and
+/// the refusal of a collision.
+fn adjust_base(m: &Manual, stage: u32) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("fdi".into(), json!(m.tooth));
+    if m.at_stage && stage > 0 {
+        p.insert("stage".into(), json!(stage));
+    }
+    if m.refuse_on_collision {
+        p.insert("refuse_on_collision".into(), json!(true));
+    }
+    p
+}
+
+/// The parameters of a − (`sign` −1) or + (`sign` +1) button of "Move a
+/// tooth" on component `i` of [`COMPONENTS`] (the plugin's `oa.adjust_tooth`):
+/// one step, `step_mm` for a translation, `step_deg` for a rotation.
+pub(crate) fn step_params(
+    m: &Manual,
+    i: usize,
+    sign: f64,
+    step_mm: f64,
+    step_deg: f64,
+    stage: u32,
+) -> Value {
+    let (key, ..) = COMPONENTS[i];
+    let step = if i < 3 { step_mm } else { step_deg };
+    let mut p = adjust_base(m, stage);
+    p.insert(key.into(), json!(sign * step));
+    Value::Object(p)
+}
+
+/// The parameters of "Reset the tooth" (the plugin's `oa.reset_tooth`): the
+/// tooth back at its initial position, in the setup or at the stage shown.
+pub(crate) fn reset_params(m: &Manual, stage: u32) -> Value {
+    let mut p = adjust_base(m, stage);
+    p.insert("reset".into(), json!(true));
+    Value::Object(p)
 }
 
 /// The toast for the report of a command, if it has something to say.
@@ -796,6 +835,10 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
     };
     match id {
         ADJUST => {
+            // a lock alone moves nothing: its box says it
+            if out["after"]["pose"].is_object() && out["before"]["pose"] == out["after"]["pose"] {
+                return None;
+            }
             let hits = list("collisions", &|c| {
                 (c["collides"] == true).then(|| {
                     format!(
@@ -872,6 +915,10 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
             },
         )),
         crate::bite::THREE_POINTS | crate::bite::CORRECT => crate::bite::feedback_toast(id, out),
+        crate::archline::LINE => Some(Toast::new(
+            ToastLevel::Success,
+            crate::archline::feedback_key(out),
+        )),
         _ => None,
     }
 }
@@ -1289,7 +1336,17 @@ impl Workspace {
     /// pointer, the tooth, the values of the tool, Apply for the tools that
     /// change a chosen tooth, and Close.
     pub(crate) fn tool_controls(&mut self, ui: &mut Ui, tool: Tool) {
-        // "Three points" has its own steps, Apply and keys (`bite`)
+        // "Three points" has its own steps, Apply and keys (`bite`), "Arch
+        // line" its own arch, Apply, back and Hide (`archline`), and "Move a
+        // tooth" its − and + buttons, lock, reset and exact values
+        if tool == Tool::ArchLine {
+            self.arch_line_controls(ui);
+            return;
+        }
+        if tool == Tool::Adjust {
+            self.adjust_controls(ui);
+            return;
+        }
         if tool == Tool::ThreePoints {
             self.bite_points_controls(ui);
             ui.add_space(6.0);
@@ -1299,7 +1356,6 @@ impl Workspace {
             return;
         }
         let stage = self.timeline.current;
-        let has_stages = self.timeline.current > 0;
         let mut apply = false;
         let mut close = false;
         let mut seq_key = None;
@@ -1378,7 +1434,7 @@ impl Workspace {
                     }
                 }
             }
-            Tool::Delete | Tool::ThreePoints => {}
+            Tool::Delete | Tool::ThreePoints | Tool::ArchLine => {}
             Tool::Renumber => number(ui, t("ws-manual-dst"), &mut m.dst, 0..=48, 1.0, ""),
             Tool::Missing => {
                 ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));
@@ -1386,25 +1442,7 @@ impl Workspace {
             Tool::Rebuild => {
                 ui.checkbox(&mut m.resegment, t("ws-manual-resegment"));
             }
-            Tool::Adjust => {
-                let f = &mut m.fields;
-                for (key, v, unit) in [
-                    ("ws-manual-mesial", &mut f.mesial_mm, " mm"),
-                    ("ws-manual-buccal", &mut f.buccal_mm, " mm"),
-                    ("ws-manual-extrusion", &mut f.extrusion_mm, " mm"),
-                    ("ws-manual-torque", &mut f.torque_deg, "°"),
-                    ("ws-manual-tip", &mut f.tip_deg, "°"),
-                    ("ws-manual-rotation", &mut f.rotation_deg, "°"),
-                ] {
-                    number(ui, t(key), v, -30.0..=30.0, 0.05, unit);
-                }
-                ui.add_enabled(
-                    has_stages,
-                    egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
-                );
-                ui.checkbox(&mut m.lock, t("ws-manual-lock"));
-                ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
-            }
+            Tool::Adjust => {}
         }
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -1439,14 +1477,164 @@ impl Workspace {
         }
         if apply {
             match params_for(&self.manual, tool, stage) {
-                Ok(params) => {
-                    self.run_manual(tool.command_id(), params);
-                    if tool == Tool::Adjust {
-                        self.manual.fields = Fields::default();
+                Ok(params) => self.run_manual(tool.command_id(), params),
+                Err(key) => self.toast(Toast::new(ToastLevel::Info, key)),
+            }
+        }
+    }
+
+    /// The controls of "Move a tooth" (the plugin's "A mano: sposta un
+    /// dente"): the tooth; for a measured tooth, its movement in each
+    /// clinical component between a − and a + button (one step each,
+    /// `oa.adjust_tooth`) and the steps; lock and "Reset the tooth"; the notes
+    /// on how predictable its movement is (`movement_flags`); the exact
+    /// values of its movement and "Write the exact values"
+    /// (`oa.setup_tooth_edit`); the stage shown and the refusal of a
+    /// collision; Close. Each button is one command, one undo step.
+    fn adjust_controls(&mut self, ui: &mut Ui) {
+        let state = Arc::clone(self.undo.current());
+        let stage = self.timeline.current;
+        let has_stages = stage > 0;
+        let c = *colors(ui);
+        let data = overlay::aligners(&state);
+        let mut run: Option<Value> = None;
+        let mut write = false;
+        let mut close = false;
+
+        let m = &mut self.manual;
+        ui.label(
+            egui::RichText::new(t(Tool::Adjust.hint_key()))
+                .color(c.text_secondary)
+                .small(),
+        );
+        number(ui, t("ws-manual-tooth"), &mut m.tooth, 0..=48, 1.0, "");
+        if m.tooth != m.fields_tooth {
+            m.fields_tooth = m.tooth;
+            m.fields_edited = false;
+        }
+        let at = (m.at_stage && has_stages).then_some(stage);
+        let tooth = Fdi::new(m.tooth)
+            .ok()
+            .zip(data)
+            .filter(|(f, d)| d.tooth_frames.contains_key(f));
+        let Some((f, d)) = tooth else {
+            crate::function::caption(ui, t("ws-manual-adjust-choose"));
+            ui.add_space(6.0);
+            if Button::ghost(t("ws-manual-close")).show(ui).clicked() {
+                self.close_tool();
+            }
+            return;
+        };
+        let mv = crate::setup::movement(d, f, at);
+        if !m.fields_edited {
+            m.fields = Fields(mv);
+        }
+        let (step_mm, step_deg) = (
+            d.settings.setup.adjust_step_mm,
+            d.settings.setup.adjust_step_deg,
+        );
+        ui.add_space(4.0);
+        crate::function::caption(ui, t("ws-manual-steps-hint"));
+        for (i, (_, key, unit, _)) in COMPONENTS.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(t(key));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if Button::secondary("+")
+                        .size(ButtonSize::Compact)
+                        .show(ui)
+                        .clicked()
+                    {
+                        run = Some(step_params(m, i, 1.0, step_mm, step_deg, stage));
                     }
+                    ui.label(
+                        egui::RichText::new(format!("{}{unit}", crate::setup::signed(mv[i], 2)))
+                            .monospace(),
+                    );
+                    if Button::secondary("−")
+                        .size(ButtonSize::Compact)
+                        .show(ui)
+                        .clicked()
+                    {
+                        run = Some(step_params(m, i, -1.0, step_mm, step_deg, stage));
+                    }
+                });
+            });
+        }
+        self.adjust_steps(ui);
+
+        let m = &mut self.manual;
+        ui.horizontal_wrapped(|ui| {
+            // the lock of the setup (`OA_Tooth.locked`): not at a stage
+            let mut locked = d.setup.locked.contains(&f);
+            if ui
+                .add_enabled(
+                    at.is_none(),
+                    egui::Checkbox::new(&mut locked, t("ws-manual-lock")),
+                )
+                .changed()
+            {
+                run = Some(json!({ "fdi": f.get(), "lock": locked }));
+            }
+            if Button::secondary(t("ws-manual-reset-tooth"))
+                .show(ui)
+                .clicked()
+            {
+                run = Some(reset_params(m, stage));
+            }
+        });
+        for flag in crate::setup::flags(f, &mv) {
+            let kind = if flag.severity >= 2 {
+                BadgeKind::Danger
+            } else {
+                BadgeKind::Warning
+            };
+            ui.label(
+                egui::RichText::new(t(&crate::setup::flag_key(&flag)))
+                    .font(dc_ui::fonts::ui(12.0))
+                    .color(kind.color(&c)),
+            );
+        }
+        ui.add_space(6.0);
+        crate::function::caption(ui, t("ws-manual-exact-hint"));
+        let before = m.fields;
+        for (v, (_, key, unit, max)) in m.fields.0.iter_mut().zip(COMPONENTS) {
+            number(ui, t(key), v, -max..=max, 0.05, unit);
+        }
+        if m.fields != before {
+            m.fields_edited = true;
+        }
+        if Button::secondary(t("ws-manual-write-exact"))
+            .show(ui)
+            .clicked()
+        {
+            write = true;
+        }
+        ui.add_space(4.0);
+        ui.add_enabled(
+            has_stages,
+            egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
+        );
+        ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
+        ui.add_space(6.0);
+        if Button::ghost(t("ws-manual-close")).show(ui).clicked() {
+            close = true;
+        }
+
+        if let Some(params) = run {
+            self.manual.fields_edited = false;
+            self.run_manual(ADJUST, params);
+        }
+        if write {
+            match params_for(&self.manual, Tool::Adjust, stage) {
+                Ok(params) => {
+                    self.manual.fields_edited = false;
+                    self.run_manual(ADJUST, params);
                 }
                 Err(key) => self.toast(Toast::new(ToastLevel::Info, key)),
             }
+        }
+        if close {
+            self.close_tool();
         }
     }
 }
@@ -1797,17 +1985,22 @@ mod tests {
         );
         m.tooth = 0;
         assert_eq!(params_for(&m, Tool::Clean, 0), Ok(json!({ "rings": 1 })));
-        // adjust: only the non-zero components, the stage shown when asked
+        // adjust: the exact values once changed by hand, the stage shown when asked
         let mut m = manual(Tool::Adjust, 33);
         assert_eq!(
             params_for(&m, Tool::Adjust, 0),
             Err("ws-manual-no-movement")
         );
-        m.fields.mesial_mm = 0.5;
-        m.fields.rotation_deg = -3.0;
+        m.fields.0[0] = 0.5;
+        m.fields.0[5] = -3.0;
+        m.fields_edited = true;
         assert_eq!(
             params_for(&m, Tool::Adjust, 2),
-            Ok(json!({ "fdi": 33, "mesial_mm": 0.5, "rotation_deg": -3.0 }))
+            Ok(
+                json!({ "fdi": 33, "exact": true, "mesial_mm": 0.5, "buccal_mm": 0.0,
+                       "extrusion_mm": 0.0, "torque_deg": 0.0, "tip_deg": 0.0,
+                       "rotation_deg": -3.0 })
+            )
         );
         m.at_stage = true;
         m.refuse_on_collision = true;
@@ -1823,13 +2016,61 @@ mod tests {
                 .get("stage")
                 .is_none()
         );
+        // − and +: one step of the component, in mm or degrees
+        assert_eq!(
+            step_params(&m, 0, -1.0, 0.1, 1.0, 2),
+            json!({ "fdi": 33, "stage": 2, "refuse_on_collision": true, "mesial_mm": -0.1 })
+        );
+        m.at_stage = false;
+        m.refuse_on_collision = false;
+        assert_eq!(
+            step_params(&m, 5, 1.0, 0.1, 2.5, 2),
+            json!({ "fdi": 33, "rotation_deg": 2.5 })
+        );
+        assert_eq!(reset_params(&m, 2), json!({ "fdi": 33, "reset": true }));
+    }
+
+    #[test]
+    fn the_steps_and_the_exact_values_move_the_tooth_and_a_lock_is_quiet() {
+        let state = exec("aligners.teeth.frames", &lower_demo(), Value::Null);
+        let f = Fdi::new(33).unwrap();
+        let m = manual(Tool::Adjust, 33);
+        let run = |s: &CaseState, p: Value| {
+            dca_module::commands::find(ADJUST)
+                .unwrap()
+                .execute(s, &p, &JobCtx::detached())
+                .unwrap()
+        };
+        // two + steps of 0.25 mm mesial: the inspector reads 0.5 mm
+        let (one, _) = run(&state, step_params(&m, 0, 1.0, 0.25, 1.0, 0));
+        let (two, _) = run(&one, step_params(&m, 0, 1.0, 0.25, 1.0, 0));
+        let mv = crate::setup::movement(data(&two), f, None);
+        assert!((mv[0] - 0.5).abs() < 1e-9, "{mv:?}");
+        // the exact values replace the movement
+        let mut m2 = manual(Tool::Adjust, 33);
+        m2.fields = Fields([0.0, 0.0, 0.0, 0.0, 0.0, 20.0]);
+        m2.fields_edited = true;
+        let (exact, _) = run(&two, params_for(&m2, Tool::Adjust, 0).unwrap());
+        let mv = crate::setup::movement(data(&exact), f, None);
+        assert!(mv[0].abs() < 1e-9 && (mv[5] - 20.0).abs() < 1e-9, "{mv:?}");
+        // a canine turned by 20 degrees: the plugin's notes
+        let ids: Vec<&str> = crate::setup::flags(f, &mv).iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["round-rotation", "canine-rotation"]);
+        // the lock alone moves nothing and says nothing; reset takes it back to rest
+        let (locked, out) = run(&exact, json!({ "fdi": 33, "lock": true }));
+        assert!(data(&locked).setup.locked.contains(&f));
+        assert!(feedback_toast(ADJUST, &out).is_none());
+        let (rest, _) = run(&locked, reset_params(&m, 0));
+        assert!(!data(&rest).setup.poses.contains_key(&f));
+        assert!(data(&rest).setup.locked.contains(&f));
     }
 
     #[test]
     fn the_adjust_panel_runs_the_command_and_the_collision_is_reported() {
         let state = exec("aligners.teeth.frames", &lower_demo(), Value::Null);
         let mut m = manual(Tool::Adjust, 32);
-        m.fields.mesial_mm = 3.0;
+        m.fields.0[0] = 3.0;
+        m.fields_edited = true;
         let params = params_for(&m, Tool::Adjust, 0).unwrap();
         let (after, out) = dca_module::commands::find(ADJUST)
             .unwrap()
@@ -1847,7 +2088,8 @@ mod tests {
         assert!(toast.detail.unwrap().contains("31"));
         // a move without collision is just reported
         let mut m = manual(Tool::Adjust, 32);
-        m.fields.extrusion_mm = 0.2;
+        m.fields.0[2] = 0.2;
+        m.fields_edited = true;
         let params = params_for(&m, Tool::Adjust, 0).unwrap();
         let (_, out) = dca_module::commands::find(ADJUST)
             .unwrap()
@@ -2255,22 +2497,39 @@ mod tests {
         harness.state_mut().ws.select_item(crate::leaf::SETUP);
         harness.run();
         assert_eq!(harness.state().ws.active_tool(), None);
+        // the parameters come first: the tool may be below the window
+        harness.get_by_label("Move a tooth").scroll_to_me();
+        harness.run();
         harness.get_by_label("Move a tooth").click();
         harness.run();
         assert_eq!(harness.state().ws.active_tool(), Some(ADJUST));
-        // the controls of the tool are in the inspector, on the right
-        let mesial = harness.get_by_label("Mesial").rect();
+        // the controls of the tool are in the inspector, on the right; they
+        // ask for a measured tooth first
+        assert!(
+            harness
+                .query_by_label_contains("Choose a tooth with 3D teeth built")
+                .is_some()
+        );
+        harness.state_mut().ws.manual.tooth = 32;
+        harness.run();
+        // the − and + row of the component (its exact value follows)
+        let mesial = harness
+            .get_all_by_label("Mesial / distal")
+            .next()
+            .unwrap()
+            .rect();
         assert!(mesial.min.x > 1600.0 - 360.0, "{mesial:?}");
         {
             let ws = &mut harness.state_mut().ws;
-            ws.manual.tooth = 32;
-            ws.manual.fields.mesial_mm = 3.0;
+            ws.manual.fields.0[0] = 3.0;
+            ws.manual.fields_edited = true;
         }
-        harness.run();
         // the inspector of a function can be longer than the window
-        harness.get_by_label("Apply").scroll_to_me();
+        harness
+            .get_by_label("Write the exact values")
+            .scroll_to_me();
         harness.run();
-        harness.get_by_label("Apply").click();
+        harness.get_by_label("Write the exact values").click();
         // the click starts a job and the app keeps repainting while it runs:
         // take one frame, wait for the job, then let the UI settle
         harness.step();

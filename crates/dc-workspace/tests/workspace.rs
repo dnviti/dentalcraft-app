@@ -351,7 +351,19 @@ const TOOLS: [(&str, &[ToolRow]); 5] = [
     ),
     (
         "aligners.planning.setup.automatic",
-        &[("Move a tooth", "aligners.planning.movements", "Mesial")],
+        &[
+            // no tooth chosen yet: the panel asks for one
+            (
+                "Move a tooth",
+                "aligners.planning.movements",
+                "Choose a tooth with 3D teeth built: click it in the view or enter its number.",
+            ),
+            (
+                "Arch line",
+                "aligners.planning.setup.line",
+                "There is no arch line yet: compute the final position first.",
+            ),
+        ],
     ),
     (
         "aligners.occlusion.align",

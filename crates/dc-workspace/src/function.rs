@@ -130,7 +130,9 @@ static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::SETUP,
         results: Some(Workspace::setup_results),
-        corrections: Corrections::Tools(&[Tool::Adjust]),
+        params: Params::Own(Workspace::setup_params),
+        corrections: Corrections::Tools(&[Tool::Adjust, Tool::ArchLine]),
+        more: Some(Workspace::setup_corrections),
         ..PLAIN
     },
     Function {
@@ -344,6 +346,7 @@ mod tests {
             Tool::Rebuild,
             Tool::Adjust,
             Tool::ThreePoints,
+            Tool::ArchLine,
         ] {
             let owners = FUNCTIONS
                 .iter()
@@ -357,6 +360,7 @@ mod tests {
         assert_eq!(owner(Tool::Rebuild), Some(leaf::BUILD_TEETH));
         assert_eq!(owner(Tool::Adjust), Some(leaf::SETUP));
         assert_eq!(owner(Tool::ThreePoints), Some(leaf::BITE));
+        assert_eq!(owner(Tool::ArchLine), Some(leaf::SETUP));
     }
 
     #[test]
@@ -381,6 +385,18 @@ mod tests {
         assert!(f.results.is_some());
         assert!(matches!(f.params, Params::Own(_)));
         assert!(matches!(f.corrections, Corrections::Tools(t) if t == [Tool::ThreePoints]));
+        assert!(f.more.is_some());
+    }
+
+    #[test]
+    fn the_final_position_shows_its_result_parameters_and_corrections() {
+        let f = of(leaf::SETUP);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        assert!(
+            matches!(f.corrections, Corrections::Tools(t) if t == [Tool::Adjust, Tool::ArchLine])
+        );
+        // "Back to the initial position" is a button after the tools
         assert!(f.more.is_some());
     }
 }

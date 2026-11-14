@@ -29,6 +29,9 @@ pub(crate) struct Layers {
     pub numbers: bool,
     /// Occlusal contact map instead of the label colours.
     pub contacts: bool,
+    /// Ghost of the teeth at their final position (the setup), at any
+    /// stage (the plugin's `ghost_final`).
+    pub target: bool,
 }
 
 impl Default for Layers {
@@ -38,8 +41,22 @@ impl Default for Layers {
             seeds: true,
             numbers: true,
             contacts: false,
+            target: false,
         }
     }
+}
+
+/// The final position of the teeth (the setup) as a stage: the pose of
+/// every tooth it moves, relative to its rest pose as a stage stores it
+/// (read with [`tooth_move`] and [`posed_mesh`]). `None` when the case has
+/// no final position.
+pub(crate) fn final_stage(al: &AlignersState) -> Option<Stage> {
+    if al.setup.poses.is_empty() {
+        return None;
+    }
+    let mut s = Stage::new(u32::MAX);
+    s.poses = al.setup.poses.clone();
+    Some(s)
 }
 
 /// Palette of the tooth labels: the one of `dc-raster`, so renders match.

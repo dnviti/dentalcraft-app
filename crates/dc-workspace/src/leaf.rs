@@ -831,24 +831,26 @@ impl Workspace {
         }
     }
 
-    /// The notice of "Final position" while the case needs the bite first
-    /// (both arches separated and not related,
-    /// [`dca_algo::occlusion::bite_needed`]): it points to Bite. The run
-    /// button stays; a run is refused with the reason (an error toast), and
-    /// the bite is never run from here (menu law).
+    /// Under the status of "Final position": the notice while the case
+    /// needs the bite first (both arches separated and not related,
+    /// [`dca_algo::occlusion::bite_needed`]), which points to Bite (the run
+    /// button stays; a run is refused with the reason, an error toast, and
+    /// the bite is never run from here: menu law), then the result of the
+    /// last computation of each arch (`setup::result_lines`).
     pub(crate) fn setup_results(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();
-        if !self.bite_check.needed(&state) {
-            return;
+        if self.bite_check.needed(&state) {
+            let c = *colors(ui);
+            widgets::badge(ui, BadgeKind::Warning, t("ws-setup-bite-first"));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(t("ws-setup-bite-first-detail"))
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+            ui.add_space(6.0);
         }
-        let c = *colors(ui);
-        widgets::badge(ui, BadgeKind::Warning, t("ws-setup-bite-first"));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(t("ws-setup-bite-first-detail"))
-                .font(fonts::ui(12.0))
-                .color(c.text_secondary),
-        );
+        self.setup_result_lines(ui);
     }
 }
 
