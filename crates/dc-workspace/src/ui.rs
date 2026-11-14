@@ -2,8 +2,9 @@
 //! bar, dialogs and keyboard shortcuts.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use dc_case::{RoleSource, ScanRole};
+use dc_case::{CaseState, RoleSource, ScanRole};
 use dc_module_api::MenuItem;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
@@ -16,6 +17,7 @@ use egui::{
 };
 
 use crate::function::caption;
+use crate::leaf;
 use crate::menu::{self, MenuCtx, MenuEvent};
 use crate::t;
 use crate::timeline::{self, TimelineModel};
@@ -439,14 +441,18 @@ impl Workspace {
     }
 
     /// The manual corrections of "Import scans": the scans of the case, each
-    /// with how its role was decided and a control to change it.
+    /// with how its role was decided and a control to change it, the
+    /// occlusal side of an arch scan to turn over, and the base that closes
+    /// an open arch scan.
     pub(crate) fn import_scan_list(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
         sub_heading(ui, "ws-import-scans-title");
         ui.add_space(6.0);
-        let scans: Vec<_> = self
-            .undo
-            .current()
+        let state = Arc::clone(self.undo.current());
+        let flipped = crate::overlay::aligners(&state)
+            .map(|d| d.occlusal_flipped.clone())
+            .unwrap_or_default();
+        let scans: Vec<_> = state
             .case
             .scans
             .iter()
@@ -457,7 +463,9 @@ impl Workspace {
             return;
         }
         let busy = self.is_busy();
+        let can_flip = self.module_spec(leaf::SET_ARCH).is_some();
         let mut change = None;
+        let mut flip = None;
         for (id, name, role, source) in scans {
             Frame::new()
                 .fill(c.bg_raised)
@@ -541,11 +549,78 @@ impl Workspace {
                             change = Some((id, role, roles[idx]));
                         }
                     });
+                    // the side of the teeth recognised the wrong way round
+                    if can_flip && role != ScanRole::Bite {
+                        ui.horizontal(|ui| {
+                            if Button::ghost(t("ws-import-flip"))
+                                .enabled(!busy)
+                                .show(ui)
+                                .on_hover_text(t("ws-import-flip-tip"))
+                                .clicked()
+                            {
+                                flip = Some(role);
+                            }
+                            if flipped.contains(&role) {
+                                widgets::badge(
+                                    ui,
+                                    widgets::BadgeKind::Warning,
+                                    t("ws-import-flipped"),
+                                );
+                            }
+                        });
+                    }
                 });
             ui.add_space(6.0);
         }
         if let Some((id, from, to)) = change {
             self.set_scan_role(id, from, to);
+        } else if let Some(role) = flip {
+            self.flip_occlusal(role);
+        }
+        self.import_base(ui, &state);
+    }
+
+    /// "Close with a base": the thickness of the base and a button per arch
+    /// scan (the plugin's fold "Scansione aperta: chiudi con una base").
+    fn import_base(&mut self, ui: &mut Ui, state: &CaseState) {
+        let arches: Vec<ScanRole> = [ScanRole::Upper, ScanRole::Lower]
+            .into_iter()
+            .filter(|r| state.case.scan(*r).is_some())
+            .collect();
+        if arches.is_empty() || self.module_spec(leaf::MAKE_BASE).is_none() {
+            return;
+        }
+        ui.add_space(8.0);
+        sub_heading(ui, "ws-import-base-title");
+        caption(ui, t("ws-import-base-hint"));
+        ui.add_space(6.0);
+        let busy = self.is_busy();
+        let (lo, hi) = (
+            dca_algo::scan_base::HEIGHT_MIN_MM as f32,
+            dca_algo::scan_base::HEIGHT_MAX_MM as f32,
+        );
+        let default = dca_algo::scan_base::HEIGHT_DEFAULT_MM as f32;
+        let mut close = None;
+        ui.add_enabled_ui(!busy, |ui| {
+            widgets::labeled_slider_mm(
+                ui,
+                &t("ws-import-base-height"),
+                &mut self.base_height_mm,
+                lo..=hi,
+                default,
+            );
+            ui.add_space(4.0);
+            for role in arches {
+                let label = format!("{} \u{b7} {}", t("ws-import-base"), role_label(role));
+                if Button::secondary(label).full_width(true).show(ui).clicked() {
+                    close = Some(role);
+                }
+                ui.add_space(4.0);
+            }
+        });
+        if let Some(role) = close {
+            let h = f64::from(self.base_height_mm.clamp(lo, hi));
+            self.close_with_base(role, h);
         }
     }
 

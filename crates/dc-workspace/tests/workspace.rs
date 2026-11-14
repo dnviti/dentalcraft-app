@@ -1091,21 +1091,26 @@ fn changing_a_role_in_the_inspector_is_undoable() {
 }
 
 #[test]
-fn setting_a_role_reports_what_the_module_cleared() {
+fn moving_an_arch_scan_renumbers_it_and_a_bite_role_clears_it() {
     let mut ws = Workspace::new_headless(module(), Some(project_with_results()), None);
     let upper = ws.state().case.scans[0].id;
+    // upper to lower: the module's set-arch renumbers the marks (the plugin's
+    // arch_set) and says what is gone (the aligners of the arch)
     ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
     assert!(ws.wait_for_jobs(WAIT));
     assert_eq!(ws.state().case.scans[0].role, ScanRole::Lower);
-    assert!(aligners(&ws).seeds.is_empty());
-    // a role change is not a replacement: the notice says what happened
-    assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
+    assert_eq!(ws.state().case.scans[0].role_source, RoleSource::Explicit);
+    let fdis: Vec<u8> = aligners(&ws).seeds.iter().map(|s| s.fdi.get()).collect();
+    assert_eq!(fdis, [41]);
+    assert_eq!(
+        ws.toast_keys(),
+        ["ws-toast-role-changed", "ws-toast-arch-set"]
+    );
     let text = ws.toast_details()[0].1.clone().unwrap();
-    assert!(text.contains("tooth marks"), "{text}");
+    assert!(text.contains("aligner sequence"), "{text}");
     assert!(text.contains("Ctrl+Z brings the previous roles"), "{text}");
-    for word in ["replaced", "reset"] {
-        assert!(!text.to_lowercase().contains(word), "{text}");
-    }
+    let text = ws.toast_details()[1].1.clone().unwrap();
+    assert!(text.contains("renumbered for the lower arch"), "{text}");
     assert!(ws.sticky_toast_keys().is_empty());
     // there is no scan on that role any more: the command fails with a toast
     ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
@@ -1116,7 +1121,75 @@ fn setting_a_role_reports_what_the_module_cleared() {
     );
     assert!(ws.undo());
     assert_eq!(ws.state().case.scans[0].role, ScanRole::Upper);
-    assert!(!aligners(&ws).seeds.is_empty());
+    let fdis: Vec<u8> = aligners(&ws).seeds.iter().map(|s| s.fdi.get()).collect();
+    assert_eq!(fdis, [11]);
+
+    // an arch scan that becomes the bite: the shell's set-role, the arch cleared
+    ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Bite);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans[0].role, ScanRole::Bite);
+    assert!(aligners(&ws).seeds.is_empty());
+    assert!(
+        ws.toast_keys()
+            .contains(&"ws-toast-role-changed".to_owned())
+    );
+}
+
+#[test]
+fn the_import_inspector_holds_the_flip_and_the_base_and_selecting_it_runs_nothing() {
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(demo_project(&["lower"])),
+        None,
+    ));
+    let before = Arc::clone(h.state().ws.state());
+    // the menu law: selecting the function runs nothing
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    assert!(!h.state().ws.is_busy());
+    assert!(
+        Arc::ptr_eq(&before, h.state().ws.state()),
+        "the selection changed the case"
+    );
+    // its manual corrections: the flip of the arch scan and the base
+    for label in [
+        "Flip the occlusal side",
+        "Open scan: close with a base",
+        "Base height",
+        "Close with a base \u{b7} Lower",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    assert!(h.query_by_label("Flipped by hand").is_none());
+    // the flip: one undoable change, shown on the scan
+    click_in_view(&mut h, "Flip the occlusal side");
+    settle(&mut h);
+    assert!(
+        aligners(&h.state().ws)
+            .occlusal_flipped
+            .contains(&ScanRole::Lower)
+    );
+    assert!(h.query_by_label("Flipped by hand").is_some());
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-flipped".to_owned())
+    );
+    // the base: the demo scan is closed, the case stays as it is
+    let flipped = Arc::clone(h.state().ws.state());
+    click_in_view(&mut h, "Close with a base \u{b7} Lower");
+    settle(&mut h);
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-base-closed".to_owned())
+    );
+    assert_eq!(h.state().ws.state().case, flipped.case);
+    assert!(h.state_mut().ws.undo());
+    assert!(h.state_mut().ws.undo());
+    assert!(aligners(&h.state().ws).occlusal_flipped.is_empty());
 }
 
 #[test]

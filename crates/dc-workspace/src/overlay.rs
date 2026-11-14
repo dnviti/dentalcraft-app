@@ -103,6 +103,7 @@ pub(crate) fn outdated_reasons(state: &CaseState) -> Option<String> {
                         TeethChange::Colours => "ws-teeth-why-colours",
                         TeethChange::Marks => "ws-teeth-why-marks",
                         TeethChange::Missing => "ws-teeth-why-missing",
+                        TeethChange::Orientation => "ws-teeth-why-orientation",
                     })
                 })
                 .collect();
@@ -310,7 +311,8 @@ fn arch_model(state: &CaseState, al: &AlignersState, arch: Arch) -> Result<ArchM
         .and_then(|m| m.vertex_labels.as_ref())
         .ok_or_else(|| format!("the {role:?} scan is not segmented").to_lowercase())?;
     let v: Vec<DVec3> = scan.positions.iter().map(|p| p.as_dvec3()).collect();
-    ArchModel::new(arch, &v, &scan.tris, labels, &al.seeds).map_err(|e| e.to_string())
+    let flipped = al.occlusal_flipped.contains(&role);
+    ArchModel::new(arch, &v, &scan.tris, labels, &al.seeds, flipped).map_err(|e| e.to_string())
 }
 
 /// Contact map of the case (both arches segmented with their seeds).

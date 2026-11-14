@@ -270,6 +270,9 @@ pub struct Workspace {
     /// Role the user chose for the next import (`None` = auto): it applies
     /// to the next file dialog or drop and goes back to auto.
     pub(crate) import_role: Option<ScanRole>,
+    /// Thickness of the base of "Close with a base" in the Import scans
+    /// inspector (mm; the plugin's `base_height`, default 3).
+    pub(crate) base_height_mm: f32,
     import_spec: Option<CommandSpec>,
     set_role_spec: Option<CommandSpec>,
     pub(crate) timeline: TimelineState,
@@ -377,6 +380,7 @@ impl Workspace {
             bite_check: leaf::BiteCheck::default(),
             selected: None,
             import_role: None,
+            base_height_mm: dca_algo::scan_base::HEIGHT_DEFAULT_MM as f32,
             import_spec,
             set_role_spec,
             timeline: TimelineState::default(),
@@ -797,10 +801,27 @@ impl Workspace {
     /// Gives scan `scan_id`, now `from`, the role `to` (`case.set-role`: a
     /// scan already there takes `from`). One undoable change; the scan is
     /// marked as chosen by the user, and what the module cleared is reported.
-    /// Refused while an import or command runs.
+    /// An arch scan moved to the other arch goes through the module's
+    /// `aligners.case.set-arch` when it has it: its tooth marks, colours and
+    /// teeth are renumbered instead of cleared. Refused while an import or
+    /// command runs.
     pub fn set_scan_role(&mut self, scan_id: Uuid, from: ScanRole, to: ScanRole) {
         if self.command_running() {
             self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        let arches = from != ScanRole::Bite && to != ScanRole::Bite;
+        if from != to
+            && arches
+            && let Some(spec) = self.module_spec(leaf::SET_ARCH)
+        {
+            let params = json!({ "scan": import::role_id(from), "arch": import::role_id(to) });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::SET_ARCH),
+                "ws-job-command",
+            );
             return;
         }
         let Some(spec) = self.set_role_spec else {
@@ -812,6 +833,49 @@ impl Workspace {
             "scan_id": scan_id.to_string(),
         });
         self.run_spec(spec, params, SpecKind::SetRole, "ws-job-command");
+    }
+
+    /// Turns the occlusal side of the arch scan `role` over, or back
+    /// (`aligners.case.set-arch` with `flip_occlusal`). One undoable change.
+    /// Refused while an import or command runs.
+    pub fn flip_occlusal(&mut self, role: ScanRole) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::SET_ARCH) {
+            let params = json!({ "scan": import::role_id(role), "flip_occlusal": true });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::SET_ARCH),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// Closes the arch scan `role` with a flat base `height_mm` thick
+    /// (`aligners.case.make-base`). One undoable change. Refused while an
+    /// import or command runs.
+    pub fn close_with_base(&mut self, role: ScanRole, height_mm: f64) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::MAKE_BASE) {
+            let params = json!({ "arch": import::role_id(role), "height_mm": height_mm });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::MAKE_BASE),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// The module's command `id`, when it has one.
+    pub(crate) fn module_spec(&self, id: &str) -> Option<CommandSpec> {
+        self.specs.iter().copied().find(|s| s.id == id)
     }
 
     /// Runs `spec` with `params` on a snapshot of the current state in the
@@ -1328,6 +1392,10 @@ impl Workspace {
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        // an arch chosen by hand: what it cleared, as a role change says it
+        if id == leaf::SET_ARCH {
+            self.show_role_report(out);
+        }
         // new tooth marks: what they dropped, and the arches not numbered
         if id == leaf::FIND_TEETH {
             for toast in crate::manual::marks_toasts(out) {

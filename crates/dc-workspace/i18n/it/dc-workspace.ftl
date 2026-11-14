@@ -61,6 +61,25 @@ ws-import-no-scans = Nessuna scansione importata finora.
 ws-import-provisional-hint = L'arcata è un'ipotesi. Controllala oppure confermala.
 ws-import-unsure-hint = L'arcata è stata riconosciuta da un indizio debole. Controllala oppure confermala.
 ws-import-confirm-role = Conferma
+ws-import-flip = Capovolgi il lato occlusale
+ws-import-flip-tip = Il lato dei denti è stato riconosciuto al contrario: capovolgi l'arcata. Poi rifai la separazione di denti e gengiva; premuto di nuovo, la rimette com'era.
+ws-import-flipped = Capovolto a mano
+ws-import-base-title = Scansione aperta: chiudi con una base
+ws-import-base-hint = Solo se la scansione è aperta sotto. Non serve per stampare: l'esportazione chiude già da sola i modelli. L'arcata deve avere i suoi punti dente.
+ws-import-base-height = Altezza della base
+ws-import-base = Chiudi con una base
+ws-toast-arch-set = Arcata cambiata
+ws-arch-set-detail = Punti dente, colori e denti mancanti rinumerati per l'arcata { $arch ->
+    [upper] superiore
+   *[lower] inferiore
+}.
+ws-arch-rebuilt-detail = { $count } denti 3D ricostruiti: posizione finale e allineatori dell'arcata sono da rifare.
+ws-toast-flipped = Lato occlusale capovolto
+ws-flipped-detail = Il lato occlusale dell'arcata è capovolto: rifai la separazione di denti e gengiva, i passi successivi sono da rifare.
+ws-unflipped-detail = Il lato occlusale dell'arcata è tornato come era stato riconosciuto: rifai la separazione di denti e gengiva, i passi successivi sono da rifare.
+ws-toast-base-done = Base creata
+ws-base-detail = { $edges } spigoli di bordo chiusi con una base piana.
+ws-toast-base-closed = La scansione era già chiusa
 ws-role-auto = Automatico
 ws-role-upper = Superiore
 ws-role-lower = Inferiore
@@ -294,6 +313,7 @@ ws-teeth-why-hand = denti corretti a mano
 ws-teeth-why-colours = colori dei denti
 ws-teeth-why-marks = segni dei denti
 ws-teeth-why-missing = denti mancanti
+ws-teeth-why-orientation = lato occlusale capovolto
 ws-setup-bite-first = Prima il morso
 ws-setup-bite-first-detail = Con le due arcate serve prima il morso: le arcate non sono ancora in relazione (nessun morso registrato, e le scansioni non sono in occlusione). Apri Morso ed eseguilo, poi esegui qui la posizione finale. Eseguirla ora viene rifiutato.
 ws-teeth-unbuilt = Arcata senza denti 3D

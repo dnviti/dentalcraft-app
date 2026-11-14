@@ -61,6 +61,25 @@ ws-import-no-scans = No scan has been imported yet.
 ws-import-provisional-hint = The arch is a guess. Check it, or confirm it.
 ws-import-unsure-hint = The arch was recognised from a weak cue. Check it, or confirm it.
 ws-import-confirm-role = Confirm
+ws-import-flip = Flip the occlusal side
+ws-import-flip-tip = The side of the teeth was recognised the wrong way round: turn the arch over. Then separate teeth and gum again; pressed again, it turns back.
+ws-import-flipped = Flipped by hand
+ws-import-base-title = Open scan: close with a base
+ws-import-base-hint = Only when the scan is open underneath. Not needed for printing: the export closes the models by itself. The arch needs its tooth marks.
+ws-import-base-height = Base height
+ws-import-base = Close with a base
+ws-toast-arch-set = Arch changed
+ws-arch-set-detail = Tooth marks, colours and missing teeth renumbered for the { $arch ->
+    [upper] upper
+   *[lower] lower
+} arch.
+ws-arch-rebuilt-detail = { $count } 3D teeth built again: the final position and the aligners of the arch are to be done again.
+ws-toast-flipped = Occlusal side flipped
+ws-flipped-detail = The occlusal side of the arch is turned over: separate teeth and gum again, the steps after it are out of date.
+ws-unflipped-detail = The occlusal side of the arch is back as it was recognised: separate teeth and gum again, the steps after it are out of date.
+ws-toast-base-done = Base created
+ws-base-detail = { $edges } open edges closed with a flat base.
+ws-toast-base-closed = The scan was already closed
 ws-role-auto = Auto
 ws-role-upper = Upper
 ws-role-lower = Lower
@@ -294,6 +313,7 @@ ws-teeth-why-hand = teeth corrected by hand
 ws-teeth-why-colours = tooth colours
 ws-teeth-why-marks = tooth marks
 ws-teeth-why-missing = missing teeth
+ws-teeth-why-orientation = occlusal side flipped
 ws-teeth-unbuilt = Arch without 3D teeth
 ws-teeth-unbuilt-separate = { $arch }: no 3D teeth, its teeth and gum are not separated. Run Separate teeth and gum, then Run again here.
 ws-teeth-unbuilt-run = { $arch }: no 3D teeth or gingiva. Run again to build both arches.

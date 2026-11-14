@@ -507,8 +507,48 @@ fn a_stale_bite_registration_is_reported_by_case_set_role_and_case_import() {
     let out = s.execute("aligners.case.import-scans", params).unwrap();
     assert!(cleared(&out).contains(&"bite_registered"), "{out}");
 
+    // the arch chosen by hand renumbers instead of clearing, and says so too
+    let mut s = registered_session();
+    let out = s
+        .execute(
+            "aligners.case.set-arch",
+            json!({ "scan": "lower", "arch": "upper" }),
+        )
+        .unwrap();
+    assert!(cleared(&out).contains(&"bite_registered"), "{out}");
+    assert!(!aligners(s.state()).seeds.is_empty());
+
     // the id is a key the module translates, as the workspace reads it
     assert!(dc_i18n::has("aligners-cleared-bite-registered"));
+}
+
+/// The scan corrections of "Import scans" are commands of the CLI and the MCP
+/// server, described and undoable like the others.
+#[test]
+fn the_scan_corrections_are_reachable_from_the_session() {
+    let mut s = session();
+    for id in ["aligners.case.set-arch", "aligners.case.make-base"] {
+        let d = s.describe(id).unwrap();
+        assert!(!d.doc.is_empty(), "{id}");
+    }
+    s.execute("aligners.demo", json!({ "arch": "lower" }))
+        .unwrap();
+    let out = s
+        .execute("aligners.case.set-arch", json!({ "flip_occlusal": true }))
+        .unwrap();
+    assert_eq!(out["occlusal_flipped"], true, "{out}");
+    assert!(
+        aligners(s.state())
+            .occlusal_flipped
+            .contains(&ScanRole::Lower)
+    );
+    // the demo scan is closed: the base leaves it as it is
+    let out = s
+        .execute("aligners.case.make-base", json!({ "height_mm": 3.0 }))
+        .unwrap();
+    assert_eq!(out["already_closed"], true, "{out}");
+    assert!(s.undo() && s.undo());
+    assert!(aligners(s.state()).occlusal_flipped.is_empty());
 }
 
 #[test]

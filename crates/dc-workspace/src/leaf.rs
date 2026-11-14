@@ -46,6 +46,11 @@ pub(crate) const SEGMENT_CHECK: &str = "aligners.preparation.segmentation.check"
 pub(crate) const SETUP: &str = "aligners.planning.setup.automatic";
 /// "Study models".
 pub(crate) const STUDY_MODELS: &str = "aligners.output.study-models";
+/// The arch of a scan chosen by hand, and its occlusal side turned over
+/// (the manual corrections of "Import scans").
+pub(crate) const SET_ARCH: &str = "aligners.case.set-arch";
+/// "Close with a base" (the manual corrections of "Import scans").
+pub(crate) const MAKE_BASE: &str = "aligners.case.make-base";
 /// The separation parameters stored in the case.
 const SEGMENT_SETTINGS: &str = "aligners.settings.segmentation";
 
@@ -166,7 +171,56 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
                 .with_detail(segment_lines(out).join("\n")),
             sticky: false,
         }),
+        SET_ARCH => arch_report(out),
+        MAKE_BASE => Some(base_report(out)),
         _ => None,
+    }
+}
+
+/// What "Choose the arch" and "Flip the occlusal side" did: the arch the
+/// scan took (its marks and colours renumbered, its 3D teeth built again),
+/// the occlusal side turned over (the separation to redo). Nothing for a
+/// role only confirmed.
+fn arch_report(out: &Value) -> Option<Reported> {
+    let mut lines = Vec::new();
+    let mut title = None;
+    if out["renumbered"] == true {
+        let arch = out["to"].as_str().unwrap_or_default();
+        lines.push(tr_args("ws-arch-set-detail", &[("arch", arch)]));
+        let rebuilt = out["rebuilt"].as_u64().unwrap_or(0);
+        if rebuilt > 0 {
+            let count = rebuilt.to_string();
+            lines.push(tr_args("ws-arch-rebuilt-detail", &[("count", &count)]));
+        }
+        title = Some("ws-toast-arch-set");
+    }
+    if out["flipped"] == true {
+        lines.push(t(if out["occlusal_flipped"] == true {
+            "ws-flipped-detail"
+        } else {
+            "ws-unflipped-detail"
+        }));
+        title = title.or(Some("ws-toast-flipped"));
+    }
+    let title = title?;
+    Some(Reported {
+        toast: Toast::new(ToastLevel::Success, title).with_detail(lines.join("\n")),
+        sticky: false,
+    })
+}
+
+/// What "Close with a base" did, or that the scan was already closed.
+fn base_report(out: &Value) -> Reported {
+    let toast = if out["already_closed"] == true {
+        Toast::new(ToastLevel::Info, "ws-toast-base-closed")
+    } else {
+        let edges = out["closed_edges"].as_u64().unwrap_or(0).to_string();
+        Toast::new(ToastLevel::Success, "ws-toast-base-done")
+            .with_detail(tr_args("ws-base-detail", &[("edges", &edges)]))
+    };
+    Reported {
+        toast,
+        sticky: false,
     }
 }
 

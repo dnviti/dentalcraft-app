@@ -518,6 +518,28 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.followup.tracking",
             Run(|_, _| json!({ "arch": "lower" })),
         ),
+        // the arch of a scan by hand: the occlusal side turned over and back,
+        // then the two arches swapped (renumbered, their 3D teeth built again)
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "flip_occlusal": true })),
+        ),
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "flip_occlusal": true })),
+        ),
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "arch": "upper" })),
+        ),
+        // the demo scans are closed: the case stays as it is (an open scan
+        // closed and saved: `a_scan_closed_with_a_base_comes_back_after_save`)
+        (
+            "aligners.case.make-base",
+            // the upper scan now: the old lower one, with all its tooth marks
+            // (the swapped upper had its marks cleared: no arch frame)
+            Run(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
+        ),
         // the scans
         (
             "case.import",
@@ -611,6 +633,61 @@ fn every_change_comes_back_after_save_and_reopen() {
             save_and_compare(&mut ws, &path, "redo");
         }
     }
+}
+
+#[test]
+fn a_scan_closed_with_a_base_comes_back_after_save() {
+    // the lower demo arch opened under the gum (the demo scan is closed): the
+    // faces of its lowest 4 mm along the occlusal axis removed
+    let mut state = demo_state(&["lower"]);
+    let role = ScanRole::Lower;
+    let mesh = state
+        .mesh(&state.case.scan(role).unwrap().mesh)
+        .unwrap()
+        .as_ref()
+        .clone();
+    let z = mesh
+        .positions
+        .iter()
+        .map(|p| p.z)
+        .fold(f32::INFINITY, f32::min);
+    let mut open = mesh;
+    open.tris
+        .retain(|t| !t.iter().all(|&i| open_low(open.positions[i as usize].z, z)));
+    let r = state.blobs.insert(open);
+    state.case.scans[0].mesh = r;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("base.dcprj");
+    let mut ws = saved(state, &path);
+    run(
+        &mut ws,
+        "aligners.case.make-base",
+        json!({ "height_mm": 2.5 }),
+    );
+    let closed = ws.state().mesh(&ws.state().case.scans[0].mesh).unwrap();
+    assert!(closed.validate().is_watertight());
+    let labels = ws.state().mesh(&aligners(&ws).labels[&role]).unwrap();
+    assert_eq!(
+        labels.vertex_labels.as_ref().unwrap().len(),
+        closed.positions.len()
+    );
+    save_and_compare(&mut ws, &path, "make-base");
+    // undo: the open scan, saved again
+    assert!(ws.undo());
+    assert!(
+        !ws.state()
+            .mesh(&ws.state().case.scans[0].mesh)
+            .unwrap()
+            .validate()
+            .is_watertight()
+    );
+    save_and_compare(&mut ws, &path, "make-base undone");
+}
+
+/// A point in the lowest 4 mm of the demo arch (its occlusal axis is +Z).
+fn open_low(z: f32, lowest: f32) -> bool {
+    z < lowest + 4.0
 }
 
 /// A command that renames the patient at once: a change of the case.
