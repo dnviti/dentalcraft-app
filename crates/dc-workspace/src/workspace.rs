@@ -273,6 +273,8 @@ pub struct Workspace {
     /// The parameter of "Aligners" being dragged or typed, and the speed
     /// chosen for the selected tooth.
     pub(crate) staging_ui: crate::staging::StagingUi,
+    /// The filter and the record chosen in "Clinical review".
+    pub(crate) review_ui: crate::review::ReviewUi,
     /// The value of "Manual corrections" of the case analysis being typed
     /// or dragged.
     pub(crate) diagnosis_ui: leaf::DiagnosisUi,
@@ -393,6 +395,7 @@ impl Workspace {
             segment: leaf::SegmentUi::default(),
             setup_ui: crate::setup::SetupUi::default(),
             staging_ui: crate::staging::StagingUi::default(),
+            review_ui: crate::review::ReviewUi::default(),
             diagnosis_ui: leaf::DiagnosisUi::default(),
             bite_check: leaf::BiteCheck::default(),
             selected: None,

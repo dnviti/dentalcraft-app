@@ -28,6 +28,8 @@ use crate::{import, t};
 pub(crate) const AUTO: &str = "aligners.auto";
 /// "Aligners".
 pub(crate) const ALIGNERS: &str = "aligners.planning.aligners";
+/// "Clinical review".
+pub(crate) const REVIEW: &str = "aligners.review.classify";
 /// "Bite".
 pub(crate) const BITE: &str = "aligners.occlusion.align";
 /// "Case analysis".
@@ -181,6 +183,19 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
         MAKE_BASE => Some(base_report(out)),
         CASE_ANALYSIS => diagnosis_reset_report(out),
         DIAGNOSIS_EDIT => Some(diagnosis_edit_report(out)),
+        // `oa.classify`: "N classificazioni preimpostate da rivedere", and the
+        // aligners made again with the pattern of the review
+        REVIEW => {
+            let pending = out["counts"]["pending"].as_u64().unwrap_or_default();
+            let mut detail = tr_args("ws-rev-done-detail", &[("n", &pending.to_string())]);
+            if out["restaged"].as_array().is_some_and(|a| !a.is_empty()) {
+                detail = format!("{detail} {}", t("ws-rev-done-restaged"));
+            }
+            Some(Reported {
+                toast: Toast::new(ToastLevel::Success, "ws-toast-review-done").with_detail(detail),
+                sticky: false,
+            })
+        }
         _ => None,
     }
 }

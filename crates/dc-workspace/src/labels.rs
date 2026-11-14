@@ -33,6 +33,11 @@ pub(crate) const GEM_SLACK_PX: f32 = 4.0;
 /// A point is hidden when the scan is this much nearer to the viewer than
 /// it along the line of sight (mm).
 pub(crate) const OCCLUSION_TOLERANCE_MM: f32 = 1.0;
+/// An IPR mark sits between two crowns, below their cusps: it is hidden
+/// only behind more than this much of the scan (mm).
+pub(crate) const IPR_OCCLUSION_MM: f32 = 3.0;
+/// Size of the chip with the amount of an IPR (points).
+pub(crate) const IPR_CHIP_SIZE: Vec2 = vec2(36.0, 17.0);
 
 /// Where the number of a tooth is anchored, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -216,6 +221,72 @@ pub(crate) fn posed_point(state: &CaseState, stage: &Stage, fdi: u8, p: Vec3) ->
     world.apply_point(moved.apply_point(case_p)).as_vec3()
 }
 
+/// An IPR planned by the final position on the contact between two teeth,
+/// for the IPR layer: the facing contact points of the two teeth (world
+/// coordinates, teeth at rest) and the enamel to remove, in total over both
+/// surfaces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct IprMark {
+    pub a: u8,
+    pub b: u8,
+    /// The teeth are in the upper arch.
+    pub upper: bool,
+    /// The contact point of `a` that faces `b`.
+    pub at_a: Vec3,
+    /// The contact point of `b` that faces `a`.
+    pub at_b: Vec3,
+    pub mm: f64,
+}
+
+impl IprMark {
+    /// Where the mark goes at `stage` (`None`: the initial position): the
+    /// point half way between the two contact points, each moved with its
+    /// tooth.
+    pub(crate) fn point(&self, state: &CaseState, stage: Option<&Stage>) -> Vec3 {
+        let (pa, pb) = match stage {
+            Some(s) => (
+                posed_point(state, s, self.a, self.at_a),
+                posed_point(state, s, self.b, self.at_b),
+            ),
+            None => (self.at_a, self.at_b),
+        };
+        (pa + pb) * 0.5
+    }
+}
+
+/// The IPR of the final position (`Setup::ipr`), one mark per contact whose
+/// two teeth are measured: of the mesial and distal contact points of each
+/// tooth, the one nearer to the other tooth.
+pub(crate) fn ipr_marks(state: &CaseState) -> Vec<IprMark> {
+    let Some(al) = overlay::aligners(state) else {
+        return Vec::new();
+    };
+    let world = state.case.world_frame.from_case;
+    al.setup
+        .ipr
+        .iter()
+        .filter_map(|step| {
+            let [a, b] = step.between;
+            let (ga, gb) = (al.tooth_geometry.get(&a)?, al.tooth_geometry.get(&b)?);
+            let facing = |g: &dca_model::ToothMeasures, other: DVec3| {
+                if g.contact_m.distance(other) <= g.contact_d.distance(other) {
+                    g.contact_m
+                } else {
+                    g.contact_d
+                }
+            };
+            Some(IprMark {
+                a: a.get(),
+                b: b.get(),
+                upper: a.is_upper(),
+                at_a: world.apply_point(facing(ga, gb.centroid)).as_vec3(),
+                at_b: world.apply_point(facing(gb, ga.centroid)).as_vec3(),
+                mm: step.amount_mm,
+            })
+        })
+        .collect()
+}
+
 /// The scan hit at `hit` (the first thing the line of sight from the camera
 /// meets, looking along `fwd`) covers `anchor`: it is nearer to the viewer
 /// by more than `tolerance` mm. Without a hit nothing covers it.
@@ -371,6 +442,48 @@ pub(crate) fn paint(
             fdi.to_string(),
             dc_ui::fonts::mono(TEXT_SIZE),
             text_color(fill),
+        );
+    }
+}
+
+/// Draws the IPR marks: at each contact (`anchors`, by index into `marks`)
+/// a short line across it in the IPR colour of the legend, and above it the
+/// chip with the amount in mm (`chips`).
+pub(crate) fn paint_ipr(
+    ui: &Ui,
+    clip: Rect,
+    anchors: &[(u8, Pos2)],
+    chips: &[(u8, Rect)],
+    marks: &[IprMark],
+) {
+    let c = *dc_ui::theme::colors(ui);
+    let painter = ui.painter_at(clip);
+    for (i, at) in anchors {
+        if chips.iter().any(|(k, _)| k == i) {
+            painter.line_segment(
+                [*at - vec2(0.0, 7.0), *at + vec2(0.0, 7.0)],
+                Stroke::new(2.0, c.model_ipr),
+            );
+        }
+    }
+    for (i, rect) in chips {
+        let Some(m) = marks.get(usize::from(*i)) else {
+            continue;
+        };
+        let radius = CornerRadius::same(CHIP_RADIUS);
+        painter.rect_filled(*rect, radius, c.bg_panel);
+        painter.rect_stroke(
+            *rect,
+            radius,
+            Stroke::new(1.5, c.model_ipr),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            crate::setup::num(m.mm, 2),
+            dc_ui::fonts::mono(TEXT_SIZE),
+            c.text_primary,
         );
     }
 }
@@ -599,5 +712,51 @@ mod tests {
         // the gingiva is the brush "0"
         assert_eq!(alt_click_action(Hit::Surface(0)), Action::SelectBrush(0));
         assert_eq!(alt_click_action(Hit::Nothing), Action::None);
+    }
+
+    #[test]
+    fn an_ipr_mark_sits_between_the_two_teeth_and_follows_them() {
+        use crate::overlay::tests::{exec, lower_demo};
+        use dc_case::{ModuleState, Pose};
+        use dca_model::{AlignersState, IprStep, MODULE_ID};
+        use serde_json::Value;
+
+        let s = exec("aligners.teeth.frames", &lower_demo(), Value::Null);
+        assert!(ipr_marks(&s).is_empty(), "no IPR planned");
+        let mut data = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+        let (a, b) = (Fdi::new(41).unwrap(), Fdi::new(31).unwrap());
+        data.setup.ipr = vec![IprStep {
+            between: [a, b],
+            amount_mm: 0.3,
+        }];
+        let mut s = s;
+        s.set_module(MODULE_ID, ModuleState::new(data.clone()));
+        let marks = ipr_marks(&s);
+        assert_eq!(marks.len(), 1);
+        let m = marks[0];
+        assert_eq!((m.a, m.b, m.upper, m.mm), (41, 31, false, 0.3));
+        // half way between the facing contacts, nearer to each other than the
+        // centres of the two teeth
+        let world = s.case.world_frame.from_case;
+        let centre = |f: Fdi| {
+            world
+                .apply_point(data.tooth_geometry[&f].centroid)
+                .as_vec3()
+        };
+        let p = m.point(&s, None);
+        let span = centre(a).distance(centre(b));
+        assert!(p.distance(centre(a)) < span && p.distance(centre(b)) < span);
+        assert!(m.at_a.distance(m.at_b) < 0.5 * span, "{m:?}");
+        // a stage that moves 41 moves the mark half as much
+        let mut stage = Stage::new(1);
+        stage
+            .poses
+            .insert(a, Pose::new(DVec3::new(1.0, 0.0, 0.0), Default::default()));
+        let moved = m.point(&s, Some(&stage));
+        assert!(
+            (moved.distance(p) - 0.5).abs() < 1e-3,
+            "{}",
+            moved.distance(p)
+        );
     }
 }

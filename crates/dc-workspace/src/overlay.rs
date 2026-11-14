@@ -32,6 +32,9 @@ pub(crate) struct Layers {
     /// Ghost of the teeth at their final position (the setup), at any
     /// stage (the plugin's `ghost_final`).
     pub target: bool,
+    /// The IPR planned by the final position: a mark at each contact with
+    /// its amount, moved with the teeth at the stage shown.
+    pub ipr: bool,
 }
 
 impl Default for Layers {
@@ -42,6 +45,7 @@ impl Default for Layers {
             numbers: true,
             contacts: false,
             target: false,
+            ipr: false,
         }
     }
 }

@@ -68,7 +68,7 @@ fn module() -> Box<dyn Module> {
 /// shortcuts, the exports and the corrections.
 fn leaf_count() -> usize {
     let steps = module().menu().step_ids().len();
-    assert_eq!(steps, 8);
+    assert_eq!(steps, 9);
     steps
 }
 
@@ -447,7 +447,7 @@ fn selecting_any_function_runs_nothing_done_or_not() {
         let mut ws = Workspace::new_headless(module(), project, None);
         let before = Arc::clone(ws.state());
         let leaves = ws.module().menu().command_ids();
-        assert_eq!(leaves.len(), 13);
+        assert_eq!(leaves.len(), 14);
         let mut done = 0;
         for id in leaves {
             assert!(dca_module::commands::is_registered(id), "{id}");
@@ -474,7 +474,7 @@ fn a_click_on_any_row_only_selects_it() {
     let mut h = harness(ws);
     h.run();
     let n = h.get_all_by_role(Role::TreeItem).count();
-    assert_eq!(n, 13 + 6, "the functions and their groups, nothing else");
+    assert_eq!(n, 14 + 6, "the functions and their groups, nothing else");
     // bottom-up: collapsing a group only removes rows below it
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
@@ -1354,12 +1354,12 @@ fn demo_project(arches: &[&str]) -> Project {
 }
 
 fn footer(h: &Harness<'static, App>, done: usize) -> bool {
-    h.query_by_label(&format!("Treatment workflow {done}/8"))
+    h.query_by_label(&format!("Treatment workflow {done}/9"))
         .is_some()
 }
 
 #[test]
-fn the_footer_counts_the_eight_steps_that_have_their_result() {
+fn the_footer_counts_the_nine_steps_that_have_their_result() {
     // a new case: nothing done; the demo arch has its scans, tooth marks and colours
     let mut h = harness(Workspace::new_headless(module(), None, None));
     h.run();
@@ -1387,8 +1387,8 @@ fn the_shortcuts_and_the_exports_do_not_count() {
     assert_eq!(count("aligners.diagnosis"), 1);
     assert_eq!(
         count("aligners.planning"),
-        3,
-        "moving a tooth is not a step"
+        4,
+        "bite, final position, aligners, clinical review; moving a tooth is not a step"
     );
     assert_eq!(
         count("aligners.production"),
@@ -1434,7 +1434,7 @@ fn run_everything_fills_the_steps_stops_on_a_guess_and_leads_to_the_analysis() {
     assert_eq!(ws.selected(), Some("aligners.diagnosis.space-analysis"));
     let mut h = harness(ws);
     h.run();
-    assert!(footer(&h, 8), "all the steps have their result");
+    assert!(footer(&h, 9), "all the steps have their result");
     assert_eq!(
         h.get_all_by_label("Space available").count(),
         2,

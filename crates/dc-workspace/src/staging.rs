@@ -140,14 +140,15 @@ fn option_key(c: &Choice, name: &str) -> String {
 }
 
 /// The calendar of arch `arch` from the stored aligners and the calendar
-/// settings of the case (no start date: `today`), as the plugin's page
-/// builds it (`schedule.build` of the arch alone).
+/// settings of the case (no start date: `today`), with the attachments of
+/// the clinical review bonded before the first aligner, as the plugin's
+/// page builds it (`schedule.build` of the arch alone).
 pub(crate) fn calendar(
     data: &AlignersState,
     arch: Arch,
     today: Date,
 ) -> Option<schedule::Calendar> {
-    let input = schedule::input_from_stages(arch, &data.stages, Vec::new());
+    let input = schedule::input_from_stages(arch, &data.stages, data.attachment_teeth(arch.role()));
     if input.n_stages == 0 {
         return None;
     }
@@ -406,7 +407,7 @@ impl Workspace {
     }
 
     /// Runs the registered command `id` with `params`.
-    fn run_module_command(&mut self, id: &str, params: Value) {
+    pub(crate) fn run_module_command(&mut self, id: &str, params: Value) {
         if let Some(spec) = self.specs.iter().find(|s| s.id == id) {
             let cmd = spec.command(params);
             self.run_command(Box::new(cmd));

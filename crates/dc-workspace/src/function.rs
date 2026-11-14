@@ -143,6 +143,13 @@ static FUNCTIONS: &[Function] = &[
         ..PLAIN
     },
     Function {
+        id: leaf::REVIEW,
+        results: Some(Workspace::review_results),
+        note: Some("ws-rev-info"),
+        corrections: Corrections::Own(Workspace::review_corrections),
+        ..PLAIN
+    },
+    Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
         ..PLAIN
@@ -415,5 +422,14 @@ mod tests {
         // "Slow a tooth" works on the tooth selected in the view: not a pointer tool
         assert!(matches!(f.corrections, Corrections::Own(_)));
         assert!(f.note.is_none() && f.more.is_none());
+    }
+
+    #[test]
+    fn the_clinical_review_shows_its_counts_and_its_decisions() {
+        let f = of(leaf::REVIEW);
+        assert!(f.results.is_some() && f.note.is_some());
+        // a run takes no parameter: the filter and the decisions are corrections
+        assert!(matches!(f.params, Params::None));
+        assert!(matches!(f.corrections, Corrections::Own(_)));
     }
 }

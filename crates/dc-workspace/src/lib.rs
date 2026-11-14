@@ -41,6 +41,7 @@ mod menu;
 mod overlay;
 mod project;
 mod region;
+mod review;
 mod select;
 mod setup;
 mod staging;

@@ -31,6 +31,7 @@ const STEPS: &[&str] = &[
     "aligners.occlusion.virtual-bite",
     "aligners.planning.setup.automatic",
     "aligners.planning.staging.automatic",
+    "aligners.review.classify",
     "aligners.planning.schedule",
     "aligners.occlusion.contact-map",
     "aligners.output.report",
@@ -101,6 +102,12 @@ fn run_and_check(s: &mut Session, dir: &Path, numbering: usize) -> Value {
     assert!(data.diagnosis.bolton_overall.is_some());
     assert!(!data.setup.poses.is_empty());
     assert!(!data.stages.is_empty());
+    for role in [ScanRole::Upper, ScanRole::Lower] {
+        assert!(
+            data.review.iter().any(|r| r.arch == role),
+            "{role:?} clinical review"
+        );
+    }
     assert!(state.case.world_frame.from_case != dc_case::Pose::IDENTITY);
     for blob in data.crowns.values().chain(data.gingiva.values()) {
         assert!(state.referenced_blobs().contains(blob));

@@ -432,6 +432,25 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.planning.tooth-speed",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 1), "speed": 0.5 })),
         ),
+        // the clinical review: classified, one item decided, one value
+        // chosen, the rest confirmed together
+        ("aligners.review.classify", Run(|_, _| json!({}))),
+        (
+            "aligners.review.decide",
+            Run(|ws, _| json!({ "key": aligners(ws).review[0].key() })),
+        ),
+        (
+            "aligners.review.set-value",
+            Run(|ws, _| {
+                let r = aligners(ws)
+                    .review
+                    .into_iter()
+                    .find(|r| r.kind == dca_model::ReviewKind::Attachment)
+                    .unwrap();
+                json!({ "key": r.key(), "value": "rotation" })
+            }),
+        ),
+        ("aligners.review.bulk", Run(|_, _| json!({}))),
         ("aligners.occlusion.contact-map", Run(null)),
         (
             "aligners.occlusion.bite-with-aligners",

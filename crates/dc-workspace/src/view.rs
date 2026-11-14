@@ -350,6 +350,25 @@ fn tooth_labels(
         let spots: Vec<(u8, Pos2)> = spots.into_iter().map(|(_, f, p)| (f, p)).collect();
         drawn.chips = labels::place_chips(&spots, labels::CHIP_SIZE, labels::LIFT, rect);
     }
+    if s.layers.ipr {
+        let marks = labels::ipr_marks(s.state);
+        let mut spots: Vec<(f32, u8, Pos2)> = Vec::new();
+        for (i, m) in marks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| arch_shown(m.upper))
+        {
+            let p = m.point(s.state, s.stage);
+            if visible(p, labels::IPR_OCCLUSION_MM) {
+                let i = u8::try_from(i).unwrap_or(u8::MAX);
+                spots.push((fwd.dot(p - eye), i, vp.screen_pos(rect, p)));
+            }
+        }
+        spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let spots: Vec<(u8, Pos2)> = spots.into_iter().map(|(_, i, p)| (i, p)).collect();
+        let chips = labels::place_chips(&spots, labels::IPR_CHIP_SIZE, labels::LIFT, rect);
+        labels::paint_ipr(ui, rect, &spots, &chips, &marks);
+    }
     if s.layers.seeds
         && let Some(al) = overlay::aligners(s.state)
     {
@@ -1229,13 +1248,13 @@ impl Workspace {
                 }
             }
             ToolbarGroup::Marks => {
-                for (icon, key) in [
-                    (ic::SQUARE, "ws-layer-attachments"),
-                    (ic::DIAMOND, "ws-layer-ipr"),
-                ] {
-                    if icon_toggle(ui, icon, &t(key), false).clicked() {
-                        self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
-                    }
+                // the attachment shapes are not modelled yet (ANO-001)
+                if icon_toggle(ui, ic::SQUARE, &t("ws-layer-attachments"), false).clicked() {
+                    self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
+                }
+                let on = self.view.layers.ipr;
+                if icon_toggle(ui, ic::DIAMOND, &t("ws-layer-ipr"), on).clicked() {
+                    self.toggle_ipr_layer();
                 }
                 let on = self.view.layers.target;
                 if icon_toggle(ui, ic::CIRCLE_DASHED, &t("ws-layer-target"), on).clicked() {
@@ -1264,6 +1283,23 @@ impl Workspace {
             self.view.layers.target = true;
         } else {
             self.toast(Toast::new(ToastLevel::Info, "ws-toast-target-none"));
+        }
+    }
+
+    /// The IPR layer on or off: a mark at each contact where the final
+    /// position plans IPR. A case without IPR keeps it off and says so.
+    pub(crate) fn toggle_ipr_layer(&mut self) {
+        let layers = &mut self.view.layers;
+        if layers.ipr {
+            layers.ipr = false;
+            return;
+        }
+        let planned =
+            overlay::aligners(self.undo.current()).is_some_and(|a| !a.setup.ipr.is_empty());
+        if planned {
+            self.view.layers.ipr = true;
+        } else {
+            self.toast(Toast::new(ToastLevel::Info, "ws-toast-ipr-none"));
         }
     }
 
@@ -2861,6 +2897,32 @@ mod built_teeth_tests {
                 .iter()
                 .all(|m| m.id & FINAL_GHOST != FINAL_GHOST)
         );
+    }
+
+    #[test]
+    fn the_ipr_layer_needs_a_planned_ipr_and_is_no_longer_unavailable() {
+        let mut ws = workspace(built_case());
+        ws.toggle_ipr_layer();
+        assert!(!ws.view.layers.ipr);
+        let keys = ws.toast_keys();
+        assert!(keys.iter().any(|k| k == "ws-toast-ipr-none"), "{keys:?}");
+        assert!(!keys.iter().any(|k| k == NOT_AVAILABLE_KEY));
+        let mut s = built_case();
+        let mut al = s
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        al.setup.ipr.push(dca_model::IprStep {
+            between: [Fdi::new(41).unwrap(), Fdi::new(31).unwrap()],
+            amount_mm: 0.2,
+        });
+        s.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        let mut ws = workspace(s);
+        ws.toggle_ipr_layer();
+        assert!(ws.view.layers.ipr);
+        assert_eq!(crate::labels::ipr_marks(ws.undo.current()).len(), 1);
+        ws.toggle_ipr_layer();
+        assert!(!ws.view.layers.ipr);
     }
 
     #[test]
