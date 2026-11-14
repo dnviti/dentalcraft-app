@@ -7,6 +7,8 @@
 //! The commands run through the same registered specs as the CLI and the MCP
 //! server; the workspace only reads their JSON output.
 
+use std::sync::{Arc, Weak};
+
 use dc_case::{CaseState, ScanRole};
 use dc_i18n::Lang;
 use dc_module_api::{LeafInput, Toast, ToastLevel};
@@ -505,6 +507,28 @@ pub(crate) struct SegmentUi {
     drag: Option<(usize, f32)>,
 }
 
+/// Whether the case needs the bite before the final position
+/// ([`dca_algo::occlusion::bite_needed`]), worked out once per state of the
+/// case: it reads the arch frames from the scans.
+#[derive(Debug, Default)]
+pub(crate) struct BiteCheck {
+    /// The state the answer is for (kept weak: the allocation stays, so a
+    /// new state never takes its address).
+    state: Weak<CaseState>,
+    needed: bool,
+}
+
+impl BiteCheck {
+    /// `true` when `state` needs the bite before the final position.
+    pub(crate) fn needed(&mut self, state: &Arc<CaseState>) -> bool {
+        if !std::ptr::eq(self.state.as_ptr(), Arc::as_ptr(state)) {
+            self.state = Arc::downgrade(state);
+            self.needed = dca_algo::occlusion::bite_needed(state);
+        }
+        self.needed
+    }
+}
+
 impl Workspace {
     /// The separation parameters, read from the case settings: a change is
     /// sent when the slider is let go, one undo step each.
@@ -605,6 +629,26 @@ impl Workspace {
     pub(crate) fn case_analysis_results(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();
         case_analysis(ui, &state);
+    }
+
+    /// The notice of "Final position" while the case needs the bite first
+    /// (both arches separated and not related,
+    /// [`dca_algo::occlusion::bite_needed`]): it points to Bite. The run
+    /// button stays; a run is refused with the reason (an error toast), and
+    /// the bite is never run from here (menu law).
+    pub(crate) fn setup_results(&mut self, ui: &mut Ui) {
+        let state = self.undo.current().clone();
+        if !self.bite_check.needed(&state) {
+            return;
+        }
+        let c = *colors(ui);
+        widgets::badge(ui, BadgeKind::Warning, t("ws-setup-bite-first"));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(t("ws-setup-bite-first-detail"))
+                .font(fonts::ui(12.0))
+                .color(c.text_secondary),
+        );
     }
 }
 

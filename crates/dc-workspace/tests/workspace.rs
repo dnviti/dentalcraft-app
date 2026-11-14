@@ -1379,6 +1379,44 @@ fn run_everything_stops_with_a_clear_message_on_a_guessed_arch() {
 }
 
 #[test]
+fn the_final_position_asks_for_the_bite_first_with_two_arches_not_related() {
+    const SETUP: &str = "aligners.planning.setup.automatic";
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower", "upper"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    // the notice points to Bite; the run button stays
+    assert!(h.query_by_label("Bite first").is_some());
+    click_in_view(&mut h, "Run");
+    settle(&mut h);
+    let details = h.state().ws.toast_details();
+    let (key, detail) = details.last().unwrap();
+    assert_eq!(key, "ws-toast-command-failed");
+    let detail = detail.as_deref().unwrap();
+    assert!(detail.contains("the bite comes first"), "{detail}");
+    assert!(!h.state().ws.is_dirty(), "the refusal changes nothing");
+    // the bite is never run from here: the selection stays on the function
+    assert_eq!(h.state().ws.selected(), Some(SETUP));
+
+    // after the bite the notice goes and the final position runs
+    h.state_mut().ws.run_leaf("aligners.occlusion.align");
+    settle(&mut h);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    assert!(h.query_by_label("Bite first").is_none());
+    click_in_view(&mut h, "Run");
+    settle(&mut h);
+    assert!(!aligners_of(h.state().ws.state()).setup.poses.is_empty());
+
+    // a single arch has nothing to relate
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    assert!(h.query_by_label("Bite first").is_none());
+}
+
+#[test]
 fn the_case_analysis_is_in_the_inspector_with_its_figures() {
     let mut project = demo_project(&["lower"]);
     let mut al = aligners_of(&project.case_state);

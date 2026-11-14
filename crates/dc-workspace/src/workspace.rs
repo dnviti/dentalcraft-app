@@ -261,6 +261,8 @@ pub struct Workspace {
     pub(crate) selection: crate::select::Selection,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
+    /// Whether the case needs the bite before "Final position".
+    pub(crate) bite_check: leaf::BiteCheck,
     pub(crate) menu_view: MenuView,
     pub(crate) selected: Option<&'static str>,
     /// Role the user chose for the next import (`None` = auto): it applies
@@ -369,6 +371,7 @@ impl Workspace {
             manual: crate::manual::Manual::default(),
             selection: crate::select::Selection::default(),
             segment: leaf::SegmentUi::default(),
+            bite_check: leaf::BiteCheck::default(),
             selected: None,
             import_role: None,
             import_spec,

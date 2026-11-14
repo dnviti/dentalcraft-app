@@ -364,6 +364,8 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.diagnosis.little-index", Run(|_, _| json!({}))),
         ("aligners.diagnosis.bolton", Run(|_, _| json!({}))),
         ("aligners.diagnosis.complexity", Run(|_, _| json!({}))),
+        // with both arches the bite comes before the final position
+        ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (
@@ -371,7 +373,6 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Run(|_, _| json!({ "start_date": "2026-11-16" })),
         ),
         ("aligners.planning.aligners", Run(|_, _| json!({}))),
-        ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
         ("aligners.occlusion.contact-map", Run(null)),
         (
             "aligners.occlusion.bite-with-aligners",

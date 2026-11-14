@@ -116,6 +116,7 @@ static FUNCTIONS: &[Function] = &[
     },
     Function {
         id: leaf::SETUP,
+        results: Some(Workspace::setup_results),
         corrections: Corrections::Tools(&[Tool::Adjust]),
         ..PLAIN
     },

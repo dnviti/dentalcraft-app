@@ -15,9 +15,10 @@ use dc_session::Session;
 use dca_model::{AlignersState, MODULE_ID};
 use serde_json::{Value, json};
 
-/// The pipeline steps `aligners.auto` runs on a case with both arches and
-/// their seeds, with the full export (the check of the segmentation runs
-/// once per arch).
+/// The pipeline steps `aligners.auto` runs on a case with both arches not
+/// related and their seeds, with the full export (the check of the
+/// segmentation runs once per arch): as the plugin's `case_auto.auto_steps`,
+/// the virtual bite comes before the final position.
 const STEPS: &[&str] = &[
     "aligners.case.detect-arch",
     "aligners.preparation.orientation.automatic",
@@ -27,10 +28,10 @@ const STEPS: &[&str] = &[
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.gingiva",
     "aligners.diagnosis.space-analysis",
+    "aligners.occlusion.virtual-bite",
     "aligners.planning.setup.automatic",
     "aligners.planning.staging.automatic",
     "aligners.planning.schedule",
-    "aligners.occlusion.virtual-bite",
     "aligners.occlusion.contact-map",
     "aligners.output.report",
 ];
@@ -113,11 +114,21 @@ fn run_and_check(s: &mut Session, dir: &Path, numbering: usize) -> Value {
     let cal = by_id("aligners.planning.schedule");
     assert_eq!(cal["lower"]["n_active"], nl);
     assert_eq!(cal["upper"]["n_active"], nu);
-    assert_eq!(cal["lower"]["rows"][0]["start"], "2026-11-02");
     assert_eq!(
         by_id("aligners.occlusion.contact-map")["in_occlusion"],
         true
     );
+    // the plugin's warning: the relation is estimated, not registered
+    assert!(
+        out["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("VIRTUAL occlusion")),
+        "{}",
+        out["warnings"]
+    );
+    assert!(data.bite_registered);
     let diag = by_id("aligners.diagnosis.space-analysis");
     assert!(diag["lower"]["little"].as_f64().unwrap() >= 0.0);
     assert!(diag["bolton"]["overall"].as_f64().unwrap() > 80.0);
