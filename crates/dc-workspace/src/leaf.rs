@@ -26,6 +26,8 @@ use crate::{import, t};
 
 /// "Run everything automatically".
 pub(crate) const AUTO: &str = "aligners.auto";
+/// "Aligners".
+pub(crate) const ALIGNERS: &str = "aligners.planning.aligners";
 /// "Bite".
 pub(crate) const BITE: &str = "aligners.occlusion.align";
 /// "Case analysis".

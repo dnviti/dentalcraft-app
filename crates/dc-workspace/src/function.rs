@@ -136,6 +136,13 @@ static FUNCTIONS: &[Function] = &[
         ..PLAIN
     },
     Function {
+        id: leaf::ALIGNERS,
+        results: Some(Workspace::staging_results),
+        params: Params::Own(Workspace::staging_params),
+        corrections: Corrections::Own(Workspace::staging_corrections),
+        ..PLAIN
+    },
+    Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
         ..PLAIN
@@ -365,7 +372,7 @@ mod tests {
 
     #[test]
     fn a_function_not_listed_has_only_its_run_button() {
-        let f = of("aligners.planning.aligners");
+        let f = of(leaf::EXPORT_ALL);
         assert!(f.results.is_none() && f.note.is_none() && f.more.is_none());
         assert!(matches!(f.params, Params::None));
         assert!(matches!(f.corrections, Corrections::None));
@@ -398,5 +405,15 @@ mod tests {
         );
         // "Back to the initial position" is a button after the tools
         assert!(f.more.is_some());
+    }
+
+    #[test]
+    fn the_aligners_show_their_result_parameters_and_slow_a_tooth() {
+        let f = of(leaf::ALIGNERS);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        // "Slow a tooth" works on the tooth selected in the view: not a pointer tool
+        assert!(matches!(f.corrections, Corrections::Own(_)));
+        assert!(f.note.is_none() && f.more.is_none());
     }
 }

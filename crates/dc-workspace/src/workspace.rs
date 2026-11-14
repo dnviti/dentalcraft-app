@@ -270,6 +270,9 @@ pub struct Workspace {
     pub(crate) segment: leaf::SegmentUi,
     /// The final position parameter being dragged.
     pub(crate) setup_ui: crate::setup::SetupUi,
+    /// The parameter of "Aligners" being dragged or typed, and the speed
+    /// chosen for the selected tooth.
+    pub(crate) staging_ui: crate::staging::StagingUi,
     /// The value of "Manual corrections" of the case analysis being typed
     /// or dragged.
     pub(crate) diagnosis_ui: leaf::DiagnosisUi,
@@ -389,6 +392,7 @@ impl Workspace {
             archline: crate::archline::ArchLine::default(),
             segment: leaf::SegmentUi::default(),
             setup_ui: crate::setup::SetupUi::default(),
+            staging_ui: crate::staging::StagingUi::default(),
             diagnosis_ui: leaf::DiagnosisUi::default(),
             bite_check: leaf::BiteCheck::default(),
             selected: None,

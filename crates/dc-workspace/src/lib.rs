@@ -43,6 +43,7 @@ mod project;
 mod region;
 mod select;
 mod setup;
+mod staging;
 pub mod timeline;
 mod ui;
 mod view;

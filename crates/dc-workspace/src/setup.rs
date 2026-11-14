@@ -38,16 +38,16 @@ pub(crate) const RESET: &str = "aligners.planning.setup.reset";
 
 /// A numeric parameter: its field, the key of its label, the step of its
 /// slider, the decimals shown and its unit (its range and default are the
-/// case settings', [`SetupSettings::NUMBERS`]).
-struct Number {
-    field: &'static str,
-    key: &'static str,
-    step: f32,
-    decimals: usize,
-    unit: &'static str,
+/// case settings', [`SetupSettings::NUMBERS`] here).
+pub(crate) struct Number {
+    pub field: &'static str,
+    pub key: &'static str,
+    pub step: f32,
+    pub decimals: usize,
+    pub unit: &'static str,
 }
 
-const fn number(
+pub(crate) const fn number(
     field: &'static str,
     key: &'static str,
     step: f32,
@@ -65,10 +65,10 @@ const fn number(
 
 /// A parameter chosen among a few: its field, the key of its label and its
 /// values (the name the case stores, the key of its label).
-struct Choice {
-    field: &'static str,
-    key: &'static str,
-    options: &'static [(&'static str, &'static str)],
+pub(crate) struct Choice {
+    pub field: &'static str,
+    pub key: &'static str,
+    pub options: &'static [(&'static str, &'static str)],
 }
 
 /// One parameter of a group.
@@ -272,13 +272,17 @@ pub(crate) struct SetupUi {
     drag: Option<(&'static str, f32)>,
 }
 
-/// The parameters of `aligners.settings.setup` that set the numeric
-/// setting `field` to `v`, rounded to the decimals shown; `None` when that
-/// is its value already.
-fn number_patch(s: &SetupSettings, field: &'static str, v: f32, decimals: usize) -> Option<Value> {
+/// The parameters of a settings command that set the numeric setting
+/// `field` (now `now`) to `v`, rounded to the decimals shown; `None` when
+/// that is its value already.
+pub(crate) fn number_patch(
+    now: f64,
+    field: &'static str,
+    v: f32,
+    decimals: usize,
+) -> Option<Value> {
     let scale = 10f64.powi(decimals as i32);
     let v = (f64::from(v) * scale).round() / scale;
-    let now = s.number(field)?;
     ((v - now).abs() >= 0.5 / scale).then(|| json!({ field: v }))
 }
 
@@ -293,19 +297,19 @@ fn range_of(field: &str) -> (f32, f32, f32) {
     (lo as f32, hi as f32, default as f32)
 }
 
-/// A slider of a numeric setting; a change is kept in `commit` when it is
-/// let go.
-fn slider(
+/// A slider of a numeric setting now at `now`, with its range and default
+/// (`(lo, hi, default)`); a change is kept in `commit` when it is let go.
+pub(crate) fn slider(
     ui: &mut Ui,
-    s: &SetupSettings,
+    now: f64,
+    (lo, hi, default): (f32, f32, f32),
     n: &Number,
     drag: &mut Option<(&'static str, f32)>,
     commit: &mut Option<Value>,
 ) {
-    let (lo, hi, default) = range_of(n.field);
     let mut v = match *drag {
         Some((f, v)) if f == n.field => v,
-        _ => s.number(n.field).unwrap_or(f64::from(default)) as f32,
+        _ => now as f32,
     };
     let r = widgets::labeled_slider(
         ui,
@@ -321,15 +325,28 @@ fn slider(
         *drag = Some((n.field, v));
     } else if r.drag_stopped() || r.changed() {
         *drag = None;
-        if let Some(p) = number_patch(s, n.field, v, n.decimals) {
+        if let Some(p) = number_patch(now, n.field, v, n.decimals) {
             *commit = Some(p);
         }
     }
     ui.add_space(4.0);
 }
 
+/// A slider of a numeric setting of the final position.
+fn setup_slider(
+    ui: &mut Ui,
+    s: &SetupSettings,
+    n: &Number,
+    drag: &mut Option<(&'static str, f32)>,
+    commit: &mut Option<Value>,
+) {
+    let range = range_of(n.field);
+    let now = s.number(n.field).unwrap_or(f64::from(range.2));
+    slider(ui, now, range, n, drag, commit);
+}
+
 /// A choice among a few values, one row each.
-fn choice(ui: &mut Ui, values: &Value, c: &Choice, commit: &mut Option<Value>) {
+pub(crate) fn choice(ui: &mut Ui, values: &Value, c: &Choice, commit: &mut Option<Value>) {
     let col = *colors(ui);
     ui.label(
         RichText::new(t(c.key))
@@ -361,7 +378,13 @@ fn choice(ui: &mut Ui, values: &Value, c: &Choice, commit: &mut Option<Value>) {
 }
 
 /// A setting that is on or off.
-fn flag(ui: &mut Ui, values: &Value, field: &'static str, key: &str, commit: &mut Option<Value>) {
+pub(crate) fn flag(
+    ui: &mut Ui,
+    values: &Value,
+    field: &'static str,
+    key: &str,
+    commit: &mut Option<Value>,
+) {
     let mut on = values[field].as_bool().unwrap_or_default();
     if widgets::checkbox(ui, &mut on, t(key)).changed() {
         *commit = Some(json!({ field: on }));
@@ -370,7 +393,7 @@ fn flag(ui: &mut Ui, values: &Value, field: &'static str, key: &str, commit: &mu
 }
 
 /// A number with `decimals` decimals and the decimal mark of the language.
-fn num(v: f64, decimals: usize) -> String {
+pub(crate) fn num(v: f64, decimals: usize) -> String {
     let text = format!("{v:.decimals$}");
     match dc_i18n::current() {
         Lang::It => text.replace('.', ","),
@@ -388,7 +411,7 @@ pub(crate) fn signed(v: f64, decimals: usize) -> String {
     }
 }
 
-fn tr(key: &str, args: &[(&str, &str)]) -> String {
+pub(crate) fn tr(key: &str, args: &[(&str, &str)]) -> String {
     crate::loader();
     dc_i18n::tr_args(key, args)
 }
@@ -632,6 +655,30 @@ pub(crate) fn flag_key(flag: &MovementFlag) -> String {
     format!("ws-flag-{}", flag.id)
 }
 
+/// Draws result lines under the status of a function: the arch headings,
+/// the warnings as badges, the rest as secondary text.
+pub(crate) fn show_result_lines(ui: &mut Ui, lines: Vec<ResultLine>) {
+    let c = *colors(ui);
+    for l in lines {
+        if l.heading {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(l.text)
+                    .font(fonts::semibold(12.0))
+                    .color(c.text_primary),
+            );
+        } else if l.warning {
+            widgets::badge(ui, BadgeKind::Warning, l.text);
+        } else {
+            ui.label(
+                RichText::new(l.text)
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+        }
+    }
+}
+
 impl Workspace {
     /// The result of the last final position, under the status.
     pub(crate) fn setup_result_lines(&mut self, ui: &mut Ui) {
@@ -639,25 +686,7 @@ impl Workspace {
         let Some(data) = crate::overlay::aligners(&state) else {
             return;
         };
-        let c = *colors(ui);
-        for l in result_lines(data) {
-            if l.heading {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(l.text)
-                        .font(fonts::semibold(12.0))
-                        .color(c.text_primary),
-                );
-            } else if l.warning {
-                widgets::badge(ui, BadgeKind::Warning, l.text);
-            } else {
-                ui.label(
-                    RichText::new(l.text)
-                        .font(fonts::ui(12.0))
-                        .color(c.text_secondary),
-                );
-            }
-        }
+        show_result_lines(ui, result_lines(data));
     }
 
     /// The parameters of the final position, read from the case settings:
@@ -686,18 +715,18 @@ impl Workspace {
                     .show(ui, |ui| {
                         for item in *items {
                             match item {
-                                Item::Number(n) => slider(ui, &s, n, drag, &mut commit),
+                                Item::Number(n) => setup_slider(ui, &s, n, drag, &mut commit),
                                 Item::Flag(field, key) => {
                                     flag(ui, &values, field, key, &mut commit)
                                 }
                                 Item::Choice(c) => choice(ui, &values, c, &mut commit),
                                 Item::Expansion => {
                                     if upper || !lower {
-                                        slider(ui, &s, &EXPANSION_UPPER, drag, &mut commit);
+                                        setup_slider(ui, &s, &EXPANSION_UPPER, drag, &mut commit);
                                     }
                                     if lower || !upper {
                                         for n in &EXPANSION_LOWER {
-                                            slider(ui, &s, n, drag, &mut commit);
+                                            setup_slider(ui, &s, n, drag, &mut commit);
                                         }
                                     }
                                 }
@@ -730,8 +759,8 @@ impl Workspace {
             .unwrap_or_default();
         let mut commit = None;
         let drag = &mut self.setup_ui.drag;
-        slider(ui, &s, &STEP_MM, drag, &mut commit);
-        slider(ui, &s, &STEP_DEG, drag, &mut commit);
+        setup_slider(ui, &s, &STEP_MM, drag, &mut commit);
+        setup_slider(ui, &s, &STEP_DEG, drag, &mut commit);
         if let Some(p) = commit {
             self.run_setup_settings(p);
         }
@@ -805,16 +834,19 @@ mod tests {
     #[test]
     fn a_slider_value_is_sent_rounded_and_only_when_it_changes() {
         let s = SetupSettings::default();
-        assert_eq!(number_patch(&s, "advance_max_mm", 1.0, 1), None);
+        let now = |f| s.number(f).unwrap();
         assert_eq!(
-            number_patch(&s, "advance_max_mm", 1.5004, 1),
+            number_patch(now("advance_max_mm"), "advance_max_mm", 1.0, 1),
+            None
+        );
+        assert_eq!(
+            number_patch(now("advance_max_mm"), "advance_max_mm", 1.5004, 1),
             Some(json!({ "advance_max_mm": 1.5 }))
         );
         assert_eq!(
-            number_patch(&s, "contact_tol_mm", 0.104, 2),
+            number_patch(now("contact_tol_mm"), "contact_tol_mm", 0.104, 2),
             Some(json!({ "contact_tol_mm": 0.1 }))
         );
-        assert_eq!(number_patch(&s, "nothing", 1.0, 1), None);
         let (lo, hi, default) = range_of("enamel_fraction");
         assert_eq!((lo, hi, default), (0.1, 0.5, 0.5));
     }

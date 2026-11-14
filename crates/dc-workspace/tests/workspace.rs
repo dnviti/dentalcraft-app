@@ -410,7 +410,7 @@ fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
         assert_eq!(h.state().ws.active_tool(), None, "{last}");
     }
     // a function without tools has no such section
-    h.state_mut().ws.select_item("aligners.planning.aligners");
+    h.state_mut().ws.select_item("aligners.output.study-models");
     h.run();
     assert!(h.query_by_label("Manual corrections").is_none());
     let ws = &h.state().ws;
@@ -1507,6 +1507,83 @@ fn the_final_position_asks_for_the_bite_first_with_two_arches_not_related() {
     h.state_mut().ws.select_item(SETUP);
     h.run();
     assert!(h.query_by_label("Bite first").is_none());
+}
+
+/// The inspector of Aligners: its result, its parameters (one change, one
+/// undo step, nothing computed) and "Slow a tooth"; selecting it runs
+/// nothing.
+#[test]
+fn the_aligners_inspector_holds_its_result_parameters_and_slow_a_tooth() {
+    const ALIGNERS: &str = "aligners.planning.aligners";
+    let mut project = demo_project(&["lower"]);
+    let mut al = aligners_of(&project.case_state);
+    let f = dc_case::Fdi::new(31).unwrap();
+    al.staging_results.insert(
+        ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 12,
+            pattern: dca_model::StagingPattern::Structured,
+            level: "easy".to_owned(),
+            slowed: [(f, 0.5)].into(),
+            collisions_left: 1,
+            overcorrection: false,
+        },
+    );
+    al.tooth_speed.insert(f, 0.5);
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    let mut ws = Workspace::new_headless(module(), Some(project), None);
+    let before = Arc::clone(ws.state());
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    for label in [
+        "12 aligners",
+        "Pattern: Structured; complexity: easy",
+        "Slowed teeth: 31 (0.50)",
+        "Collisions left: 1 (see the report)",
+        "Parameters",
+        "Periodontium",
+        "Healthy",
+        "Calendar",
+        "Fixed interval",
+        "Start of treatment",
+        "Largest movement per aligner",
+        "Manual corrections",
+        "Slow a tooth",
+        "Select a tooth in the view to slow it down.",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(!h.state().ws.is_busy(), "selecting Aligners ran something");
+    assert!(
+        Arc::ptr_eq(h.state().ws.state(), &before),
+        "the case changed"
+    );
+    // a parameter: one change of the settings, nothing computed
+    click_in_view(&mut h, "Simultaneous, proportional");
+    settle(&mut h);
+    let after = aligners_of(h.state().ws.state());
+    assert_eq!(
+        after.settings.staging.pattern,
+        dca_model::StagingPattern::Proportional
+    );
+    assert_eq!(after.stages, aligners_of(&before).stages);
+    assert_eq!(after.staging_results, aligners_of(&before).staging_results);
+    // the adaptive calendar hides the days
+    click_in_view(&mut h, "Adaptive (7/14 days)");
+    settle(&mut h);
+    assert_eq!(
+        aligners_of(h.state().ws.state()).settings.interval_policy,
+        dca_model::IntervalPolicy::Adaptive
+    );
+    h.run();
+    assert!(h.query_by_label("Days per aligner").is_none());
+    // each change is one undo step
+    assert!(h.state_mut().ws.undo());
+    assert!(h.state_mut().ws.undo());
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
 }
 
 #[test]

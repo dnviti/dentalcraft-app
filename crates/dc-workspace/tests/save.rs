@@ -343,6 +343,13 @@ fn plan() -> Vec<(&'static str, Plan)> {
                 |_, _| json!({ "ipr_zone": "anterior", "advance_max_mm": 1.5, "midline": "balance", "adjust_step_mm": 0.2 }),
             ),
         ),
+        // the parameters of the aligners and of their calendar
+        (
+            "aligners.settings.staging",
+            Run(
+                |_, _| json!({ "pattern": "proportional", "step_linear_mm": 0.2, "overcorrection": true, "interval_policy": "adaptive", "interval_days": 10, "start_date": "2026-11-16" }),
+            ),
+        ),
         // a new demo arch in the place of the lower one
         (
             "aligners.demo",
@@ -420,6 +427,11 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Run(|_, _| json!({ "start_date": "2026-11-16" })),
         ),
         ("aligners.planning.aligners", Run(|_, _| json!({}))),
+        // a tooth slowed: the aligners of its arch computed again with it
+        (
+            "aligners.planning.tooth-speed",
+            Run(|ws, _| json!({ "fdi": lower_crown(ws, 1), "speed": 0.5 })),
+        ),
         ("aligners.occlusion.contact-map", Run(null)),
         (
             "aligners.occlusion.bite-with-aligners",
