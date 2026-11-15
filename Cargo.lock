@@ -1371,8 +1371,8 @@ dependencies = [
 
 [[package]]
 name = "dca-algo"
-version = "0.2.0-alpha.4"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.4#dd7ee67a984b71031eff0614f0d833ee37de8464"
+version = "0.2.0-alpha.5"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.5#f498ea2bcc18e38fa930e4a27b412f2dc7799726"
 dependencies = [
  "dc-case",
  "dc-geom",
@@ -1391,11 +1391,12 @@ dependencies = [
 
 [[package]]
 name = "dca-model"
-version = "0.2.0-alpha.4"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.4#dd7ee67a984b71031eff0614f0d833ee37de8464"
+version = "0.2.0-alpha.5"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.5#f498ea2bcc18e38fa930e4a27b412f2dc7799726"
 dependencies = [
  "dc-case",
  "glam 0.34.1",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1403,8 +1404,8 @@ dependencies = [
 
 [[package]]
 name = "dca-module"
-version = "0.2.0-alpha.4"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.4#dd7ee67a984b71031eff0614f0d833ee37de8464"
+version = "0.2.0-alpha.5"
+source = "git+https://github.com/dnviti-personal-org/dentalcraft-aligners.git?tag=v0.2.0-alpha.5#f498ea2bcc18e38fa930e4a27b412f2dc7799726"
 dependencies = [
  "dc-case",
  "dc-command",
