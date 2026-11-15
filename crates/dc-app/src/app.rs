@@ -31,6 +31,7 @@ use crate::paint;
 use crate::screens::new_project::NewProjectState;
 use crate::screens::sign_in::SignInState;
 use crate::screens::support::SupportState;
+use crate::update::{Updater, Updates};
 
 /// i18n keys of the weekdays, Monday first.
 pub const WEEKDAY_KEYS: [&str; 7] = [
@@ -74,6 +75,9 @@ pub struct AppDeps {
     pub render_state: Option<egui_wgpu::RenderState>,
     /// Use native file dialogs (off in tests).
     pub native_dialogs: bool,
+    /// Updates: where to look for a newer version; `None` turns them off
+    /// (tests).
+    pub updates: Option<Updates>,
 }
 
 impl AppDeps {
@@ -92,6 +96,7 @@ impl AppDeps {
             auth,
             render_state: None,
             native_dialogs: false,
+            updates: None,
         }
     }
 }
@@ -131,6 +136,8 @@ pub struct DentalCraftApp {
     pub(crate) about: Option<AboutView>,
     pub(crate) toasts: Vec<Toast>,
     pub(crate) dialog: Option<PendingDialog>,
+    /// The newer version: check, dialog, download, install at close.
+    pub(crate) updater: Updater,
     pub(crate) create_job: Option<CreateJob>,
     workspace: Option<Workspace>,
     open_job: Option<OpenJob>,
@@ -183,6 +190,7 @@ impl DentalCraftApp {
             about: None,
             toasts: Vec::new(),
             dialog: None,
+            updater: Updater::new(deps.updates),
             create_job: None,
             workspace: None,
             open_job: None,
@@ -244,6 +252,7 @@ impl DentalCraftApp {
                 a.on_change(move || c.request_repaint());
             }
             self.ctx = Some(ctx.clone());
+            self.start_updates();
         }
         self.poll_background(&ctx);
         self.guard_close(&ctx);
@@ -285,15 +294,24 @@ impl DentalCraftApp {
                 });
         }
         self.about_dialog(&ctx);
+        self.update_dialog(&ctx);
         self.overlays(&ctx);
     }
 
     /// The window is asked to close (its close button, the keys of the
     /// system): see [`DentalCraftApp::close_requested`]. A close the app
     /// cannot allow yet is cancelled; the window closes once the workspace
-    /// says it may.
+    /// says it may. Then a downloaded update is installed
+    /// ([`DentalCraftApp::finish_update_on_close`]).
     fn guard_close(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.close_requested() {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if !self.close_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        } else if !self.finish_update_on_close() {
+            // the restart into the new version failed: the dialog says why
+            self.closing = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
     }
@@ -321,6 +339,22 @@ impl DentalCraftApp {
     /// user chose not to save it.
     pub fn may_close(&self) -> bool {
         self.closing
+    }
+
+    /// "Restart now" of the update dialog: the window closes as soon as the
+    /// open project is saved (the save on close: a project never saved asks
+    /// first), then the downloaded update takes the place of this version
+    /// and starts. When the user cancels leaving, the update dialog comes
+    /// back.
+    pub(crate) fn restart_into_update(&mut self) {
+        self.updater.restart = true;
+        self.updater.open = false;
+        if self.close_requested() {
+            self.closing = true;
+            if let Some(ctx) = &self.ctx {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
     // ------------------------------------------------------------ state helpers
@@ -574,6 +608,16 @@ impl DentalCraftApp {
             }
         }
         self.poll_support();
+        self.poll_update();
+        // "Restart now" waits while the project is saved or its user is
+        // asked; when the user stays, the update dialog comes back
+        if self.updater.restart
+            && !self.closing
+            && !self.workspace.as_ref().is_some_and(Workspace::is_leaving)
+        {
+            self.updater.restart = false;
+            self.updater.open = true;
+        }
         let now = ctx.input(|i| i.time);
         self.toasts.retain(|t| t.until > now);
     }
@@ -628,7 +672,9 @@ impl DentalCraftApp {
             self.show_shortcuts = !self.show_shortcuts;
         }
         if esc {
-            if self.about.is_some() {
+            if self.updater.open {
+                // the update dialog closes itself on Esc
+            } else if self.about.is_some() {
                 self.about = None;
             } else if self.show_shortcuts {
                 self.show_shortcuts = false;
@@ -746,6 +792,24 @@ impl DentalCraftApp {
         {
             self.open_about();
             ui.close();
+        }
+        if ui
+            .button(format!(
+                "{}  {}",
+                icons::ARROWS_CLOCKWISE,
+                t!("update-menu-check")
+            ))
+            .clicked()
+        {
+            self.check_for_updates();
+            ui.close();
+        }
+        let mut at_startup = self.settings.check_updates;
+        if ui
+            .checkbox(&mut at_startup, t!("update-setting-startup"))
+            .changed()
+        {
+            self.set_check_updates(at_startup);
         }
         ui.separator();
         if signed_in {

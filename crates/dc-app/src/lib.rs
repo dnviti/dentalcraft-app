@@ -27,9 +27,11 @@ pub mod modules;
 mod paint;
 mod screens;
 pub mod support_client;
+mod update;
 
 pub use about::AboutView;
 pub use app::{AppDeps, DentalCraftApp, Screen};
+pub use update::Updates;
 
 dc_i18n::bundle!(pub fn loader);
 
@@ -40,6 +42,7 @@ pub fn register_bundles() {
     dc_i18n::loader();
     dc_ui::loader();
     dca_module::loader();
+    dc_update::loader();
 }
 
 /// Runtime i18n keys (looked up with `dc_i18n::tr`), listed so a test can

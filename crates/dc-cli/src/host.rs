@@ -1,5 +1,6 @@
 //! [`CliHost`]: the headless [`Session`] with the Aligners module, plus a
-//! CPU render (dc-raster) of the case.
+//! CPU render (dc-raster) of the case and the app's update commands
+//! (`app.update.check`, `app.update.apply`, run on this installation).
 
 use std::collections::BTreeMap;
 
@@ -7,7 +8,8 @@ use dc_case::{BlobRef, CaseState, ScanRole};
 use dc_mcp::{Host, HostError, HostResult};
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
-use dc_session::Session;
+use dc_session::{CommandDescription, CommandInfo, Session};
+use dc_update::commands::{self as update, is_update_command};
 use dca_model::AlignersState;
 use serde_json::{Map, Value};
 
@@ -35,6 +37,50 @@ impl CliHost {
             .register_module(Box::new(dca_module::AlignersModule::new()))
             .map_err(|e| HostError::new(e.to_string()))?;
         Ok(Self { session })
+    }
+
+    /// Every command: the session's and the module's, then the app's
+    /// update commands.
+    pub fn list_commands(&self) -> Vec<CommandInfo> {
+        let mut list = self.session.list_commands();
+        list.extend(update::specs().into_iter().map(|s| CommandInfo {
+            id: s.id.to_owned(),
+            source: update::SOURCE.to_owned(),
+            label: dc_i18n::tr(s.label_key),
+        }));
+        list
+    }
+
+    /// Schema and documentation of command `id`.
+    pub fn describe_command(&self, id: &str) -> Result<CommandDescription, String> {
+        let Some(s) = update::specs().into_iter().find(|s| s.id == id) else {
+            return self.session.describe(id).map_err(|e| e.to_string());
+        };
+        Ok(CommandDescription {
+            id: s.id.to_owned(),
+            source: update::SOURCE.to_owned(),
+            label_key: s.label_key.to_owned(),
+            label: dc_i18n::tr(s.label_key),
+            doc_key: s.doc_key.to_owned(),
+            doc: dc_i18n::tr(s.doc_key),
+            params_schema: s.schema(),
+        })
+    }
+
+    /// `app.update.check` / `app.update.apply` on the installation of this
+    /// program (`apply` installs at once: `restart` is for the app).
+    fn run_update(&self, id: &str, params: &Value) -> HostResult {
+        let source = dc_update::Source::standard();
+        let r = if id == update::CHECK {
+            if !params.as_object().is_none_or(Map::is_empty) {
+                return Err(HostError::new(format!("{id}: takes no parameters")));
+            }
+            update::run_check(&source)
+        } else {
+            update::restart_param(params).map_err(|e| HostError::new(format!("{id}: {e}")))?;
+            update::run_apply(&source, &dc_update::work_dir(), &|_, _| {})
+        };
+        r.map_err(|e| HostError::new(format!("{id}: {e}")))
     }
 
     /// PNG of the case: the `view.set` defaults overridden by `params` (see
@@ -133,16 +179,31 @@ fn render_entries(
 
 impl Host for CliHost {
     fn execute(&mut self, id: &str, params: Value) -> HostResult {
+        if is_update_command(id) {
+            return self.run_update(id, &params);
+        }
         Host::execute(&mut self.session, id, params)
     }
     fn batch(&mut self, commands: Vec<(String, Value)>) -> HostResult {
-        Host::batch(&mut self.session, commands)
+        if !commands.iter().any(|(id, _)| is_update_command(id)) {
+            return Host::batch(&mut self.session, commands);
+        }
+        // one at a time, as the session does: the first failure stops it
+        let mut out = Vec::with_capacity(commands.len());
+        for (index, (id, params)) in commands.into_iter().enumerate() {
+            let v = self
+                .execute(&id, params)
+                .map_err(|e| HostError::new(format!("command {index} ({id}) failed: {}", e.0)))?;
+            out.push(v);
+        }
+        Ok(Value::Array(out))
     }
     fn list(&mut self) -> HostResult {
-        Host::list(&mut self.session)
+        serde_json::to_value(self.list_commands()).map_err(|e| HostError::new(e.to_string()))
     }
     fn describe(&mut self, id: &str) -> HostResult {
-        Host::describe(&mut self.session, id)
+        let d = self.describe_command(id).map_err(HostError)?;
+        serde_json::to_value(d).map_err(|e| HostError::new(e.to_string()))
     }
     fn inspect(&mut self, path: Option<&str>) -> HostResult {
         Host::inspect(&mut self.session, path)

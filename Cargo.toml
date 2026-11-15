@@ -76,6 +76,13 @@ zip = { version = "9.2.0", default-features = false, features = ["deflate-flate2
 # dc-cli (dentalcraft-cli: headless engine, MCP server, bridge to the app)
 clap = { version = "4.6.7", features = ["derive"] }
 
+# dc-update (update check, verification and install; app and dentalcraft-cli)
+dc-update = { path = "crates/dc-update" }
+minisign-verify = "0.3.0" # signature of the update manifest (pure Rust, no dependencies)
+semver = "1.0.28"
+tar = { version = "0.4.46", default-features = false } # no xattr
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] } # the backend zip already uses
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

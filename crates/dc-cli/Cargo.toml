@@ -23,6 +23,7 @@ dc-module-api.workspace = true
 dc-raster.workspace = true
 dc-scene.workspace = true
 dc-session.workspace = true
+dc-update.workspace = true
 dca-model.workspace = true
 dca-module.workspace = true
 serde_json.workspace = true

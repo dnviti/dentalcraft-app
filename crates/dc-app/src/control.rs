@@ -32,6 +32,13 @@
 //! invalid requests `-32600`, unknown methods `-32601`, bad parameters
 //! `-32602`.
 //!
+//! `list` also has the app's commands `app.update.check` and
+//! `app.update.apply` (source `app`, see `dc_update::commands`): they act
+//! on the installation, through the update dialog, not on the case. A check
+//! asked by an agent does not open the dialog; an apply shows the download
+//! in it, and with `restart: true` the app then saves the project, closes
+//! and opens the new version (the connection ends).
+//!
 //! Requests travel through a channel to the UI thread, which runs them in
 //! [`ControlServer::pump`] at the start of a frame against the open
 //! workspace: case commands go through the workspace's command path
@@ -374,7 +381,8 @@ impl Bridge {
     }
 
     /// The commands: the session built-ins, then the workspace module's (or
-    /// the installed Aligners module's when no workspace is open).
+    /// the installed Aligners module's when no workspace is open), then the
+    /// app's update commands (`app.update.check`, `app.update.apply`).
     fn specs(&self) -> Vec<(&'static str, CommandSpec)> {
         let mut out: Vec<(&'static str, CommandSpec)> = builtins::specs()
             .into_iter()
@@ -387,6 +395,11 @@ impl Bridge {
         if let Some(m) = module {
             out.extend(m.command_specs().into_iter().map(|s| (m.id(), s)));
         }
+        out.extend(
+            dc_update::commands::specs()
+                .into_iter()
+                .map(|s| (dc_update::commands::SOURCE, s)),
+        );
         out
     }
 
@@ -612,6 +625,31 @@ impl Bridge {
                 }
                 _ => Err(invalid("parameters: expected an object".into())),
             },
+            // the installation, not the case: through the update dialog
+            dc_update::commands::CHECK => {
+                if let Err(e) = self.app.agent_update_check() {
+                    return Step::Done(Err(RpcError::host(e)));
+                }
+                return Step::Wait(Box::new(|b: &mut Bridge| {
+                    b.app
+                        .agent_update_check_poll()
+                        .map(|r| r.map_err(RpcError::host))
+                }));
+            }
+            dc_update::commands::APPLY => {
+                let restart = match dc_update::commands::restart_param(params) {
+                    Ok(r) => r,
+                    Err(e) => return Step::Done(Err(invalid(e))),
+                };
+                if let Err(e) = self.app.agent_update_apply(restart) {
+                    return Step::Done(Err(RpcError::host(e)));
+                }
+                return Step::Wait(Box::new(|b: &mut Bridge| {
+                    b.app
+                        .agent_update_apply_poll()
+                        .map(|r| r.map_err(RpcError::host))
+                }));
+            }
             // case commands (case.import, module commands): the
             // workspace's command path, so they land on its undo stack
             _ => {

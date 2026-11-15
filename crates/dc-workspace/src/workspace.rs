@@ -1147,6 +1147,20 @@ impl Workspace {
         self.confirm_exit.is_some() || self.show_help || self.dialog.is_some()
     }
 
+    /// `true` while a request to leave ([`Workspace::request_quit`]) may
+    /// still end in its action: a save runs or waits, a dialog asks the
+    /// user (unsaved changes, where to save), or an action waits for the
+    /// shell. `false` once that is over without leaving (the user chose to
+    /// stay).
+    pub fn is_leaving(&self) -> bool {
+        self.is_saving()
+            || self.queued_save.is_some()
+            || self.leave_after_save.is_some()
+            || self.confirm_exit.is_some()
+            || self.dialog.is_some()
+            || !self.actions.is_empty()
+    }
+
     /// Leaves towards `exit` once nothing is left to save: a project that
     /// has a file is saved first (as the automatic save would), one never
     /// saved or opened read-only asks the user; a save that runs ends first.

@@ -87,7 +87,7 @@ impl ThemePref {
 }
 
 /// User settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Theme.
@@ -96,6 +96,23 @@ pub struct Settings {
     pub language: Option<String>,
     /// Sign-in server; [`ISSUER_ENV`] wins, then this, then the build default.
     pub auth_issuer: Option<String>,
+    /// Look for a newer version at startup (on by default).
+    pub check_updates: bool,
+    /// A version the user chose to skip: the check at startup does not
+    /// offer it again.
+    pub skipped_update: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemePref::default(),
+            language: None,
+            auth_issuer: None,
+            check_updates: true,
+            skipped_update: None,
+        }
+    }
 }
 
 impl Settings {
@@ -264,7 +281,9 @@ mod tests {
         let s = Settings {
             theme: ThemePref::Light,
             language: Some("it".into()),
-            auth_issuer: None,
+            check_updates: false,
+            skipped_update: Some("0.3.0".into()),
+            ..Settings::default()
         };
         store.save_settings(&s);
         assert_eq!(store.load_settings(), s);
@@ -280,6 +299,17 @@ mod tests {
         assert_eq!(r.items[0].name(), "3.dcprj");
         store.save_recent(&r);
         assert_eq!(store.load_recent(), r);
+    }
+
+    #[test]
+    fn the_update_check_is_on_unless_turned_off() {
+        assert!(Settings::default().check_updates);
+        // settings saved before the setting existed
+        let old: Settings = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
+        assert!(old.check_updates);
+        assert_eq!(old.skipped_update, None);
+        let off: Settings = serde_json::from_str(r#"{"check_updates": false}"#).unwrap();
+        assert!(!off.check_updates);
     }
 
     #[test]
