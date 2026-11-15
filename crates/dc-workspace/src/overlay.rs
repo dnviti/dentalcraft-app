@@ -35,6 +35,9 @@ pub(crate) struct Layers {
     /// The IPR planned by the final position: a mark at each contact with
     /// its amount, moved with the teeth at the stage shown.
     pub ipr: bool,
+    /// The study models of the case: at the initial position, each drawn
+    /// in place of the scan, the 3D teeth and the gingiva of its arch.
+    pub study: bool,
 }
 
 impl Default for Layers {
@@ -46,6 +49,7 @@ impl Default for Layers {
             contacts: false,
             target: false,
             ipr: false,
+            study: true,
         }
     }
 }

@@ -27,6 +27,7 @@
 //! Tests and headless tools use [`Workspace::new_headless`] (no GPU, no
 //! native file dialogs).
 
+mod aligner;
 mod archline;
 pub mod autosave;
 mod bite;

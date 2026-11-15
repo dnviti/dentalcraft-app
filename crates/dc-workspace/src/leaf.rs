@@ -196,6 +196,8 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
                 sticky: false,
             })
         }
+        // the aligner of the view: the exact one built, the notes of a build
+        crate::aligner::SHOW | crate::aligner::EXACT => crate::aligner::report(id, out),
         _ => None,
     }
 }

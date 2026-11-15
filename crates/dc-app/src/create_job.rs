@@ -233,7 +233,9 @@ pub fn run(
             s.source_units
         );
     }
-    if req.module_id == "aligners" {
+    // the import of the module may have written its data already (the bases
+    // it closed the scans with): a new case starts from it
+    if req.module_id == "aligners" && state.module("aligners").is_none() {
         state.set_module("aligners", dca_module::AlignersModule::initial_state());
     }
     if ctx.is_cancelled() {

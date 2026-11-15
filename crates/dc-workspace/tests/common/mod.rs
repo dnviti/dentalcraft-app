@@ -4,7 +4,7 @@ use dc_workspace::Workspace;
 use dca_module::AlignersModule;
 use egui::{Rect, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 /// Window sizes the layout must hold at: the minimum window, and narrower
 /// ones for a smaller screen or a larger inspector.
@@ -25,6 +25,12 @@ pub struct Labels {
     pub hint: &'static str,
     /// The arch buttons of the toolbar, Upper then Lower.
     pub arches: [&'static str; 2],
+    /// The icon buttons of the toolbar by their tooltip, in its order
+    /// (display, tools, layers, marks, then the three of `solids`).
+    pub buttons: [&'static str; 15],
+    /// The group of the whole models over the arches (study models, final
+    /// position, aligner): its name for screen readers.
+    pub solids: &'static str,
     /// The overlay toggle of the timeline (the one at the right).
     pub overlay: &'static str,
 }
@@ -33,9 +39,9 @@ fn rect_of(h: &Harness<'_, ()>, label: &str) -> Rect {
     h.get_by_label(label).rect()
 }
 
-/// The toolbar (arch buttons included) stays left of the view cube and the
-/// timeline hint stays left of the overlay toggle, which keeps its own room,
-/// at every size.
+/// The toolbar (arch and icon buttons included) stays left of the view cube
+/// and the timeline hint stays left of the overlay toggle, which keeps its
+/// own room, at every size.
 pub fn assert_layout(labels: &Labels) {
     for (w, hgt) in SIZES {
         let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
@@ -50,8 +56,9 @@ pub fn assert_layout(labels: &Labels) {
         let centre_right = w - size.inspector_width;
         // the cube is 100 wide at the top right of the centre area, 16 pt in
         let cube_left = centre_right - 16.0 - 100.0;
-        let mut widgets: Vec<Rect> = labels.views.iter().map(|l| rect_of(&h, l)).collect();
-        widgets.push(rect_of(&h, labels.fit));
+        let mut widgets: Vec<(&str, Rect)> =
+            labels.views.iter().map(|l| (*l, rect_of(&h, l))).collect();
+        widgets.push((labels.fit, rect_of(&h, labels.fit)));
         // the inspector may use the same words: the toolbar ones are in the centre area
         for l in labels.arches {
             let r = h
@@ -60,16 +67,36 @@ pub fn assert_layout(labels: &Labels) {
                 .filter(|r| r.left() >= size.left_menu_width && r.right() <= centre_right)
                 .min_by(|a, b| a.top().total_cmp(&b.top()))
                 .unwrap_or_else(|| panic!("{w}x{hgt}: no {l} button in the toolbar"));
-            widgets.push(r);
+            widgets.push((l, r));
         }
-        for r in &widgets {
+        for l in labels.buttons {
+            let r = h
+                .get_all_by_label(l)
+                .map(|n| n.rect())
+                .filter(|r| r.left() >= size.left_menu_width && r.left() < centre_right)
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .unwrap_or_else(|| panic!("{w}x{hgt}: no {l} button in the toolbar"));
+            widgets.push((l, r));
+        }
+        for (l, r) in &widgets {
             assert!(
                 r.right() <= cube_left,
-                "{w}x{hgt}: a toolbar widget ({r:?}) runs under the view cube (left edge {cube_left})"
+                "{w}x{hgt}: the toolbar widget {l} ({r:?}) runs under the view cube (left edge {cube_left})"
             );
             assert!(
                 r.left() >= size.left_menu_width,
-                "{w}x{hgt}: toolbar widget left of the centre area: {r:?}"
+                "{w}x{hgt}: the toolbar widget {l} is left of the centre area: {r:?}"
+            );
+        }
+        // the last three buttons are one named group
+        let group = h.get_by_label(labels.solids);
+        assert_eq!(group.accesskit_node().role(), egui::accesskit::Role::Group);
+        let g = group.rect();
+        for (l, r) in &widgets[widgets.len() - 3..] {
+            assert!(
+                g.contains_rect(*r),
+                "{w}x{hgt}: {l} ({r:?}) is not in the group {} ({g:?})",
+                labels.solids
             );
         }
         // the overlay toggle keeps its room (the timeline one is the lowest)

@@ -140,6 +140,8 @@ static FUNCTIONS: &[Function] = &[
         results: Some(Workspace::staging_results),
         params: Params::Own(Workspace::staging_params),
         corrections: Corrections::Own(Workspace::staging_corrections),
+        // the aligner in the view, next to the playback as in the plugin
+        more: Some(Workspace::aligner_view_controls),
         ..PLAIN
     },
     Function {
@@ -420,13 +422,16 @@ mod tests {
     }
 
     #[test]
-    fn the_aligners_show_their_result_parameters_and_slow_a_tooth() {
+    fn the_aligners_show_their_result_parameters_slow_a_tooth_and_the_aligner_in_the_view() {
         let f = of(leaf::ALIGNERS);
         assert!(f.results.is_some());
         assert!(matches!(f.params, Params::Own(_)));
         // "Slow a tooth" works on the tooth selected in the view: not a pointer tool
         assert!(matches!(f.corrections, Corrections::Own(_)));
-        assert!(f.note.is_none() && f.more.is_none());
+        assert!(f.note.is_none());
+        // after it, "The aligner in the view" (the plugin's toggle and
+        // "Allineatore esatto di questo stadio" next to the playback)
+        assert!(f.more.is_some());
     }
 
     #[test]

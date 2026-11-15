@@ -1155,11 +1155,48 @@ fn moving_an_arch_scan_renumbers_it_and_a_bite_role_clears_it() {
     );
 }
 
+/// The demo lower arch opened under the gum (the demo scan is closed): the
+/// faces of its lowest 4 mm along the occlusal axis (+Z) removed.
+fn open_lower_project() -> Project {
+    let mut p = demo_project(&["lower"]);
+    let state = &mut p.case_state;
+    let mesh = TriMesh::clone(state.mesh(&state.case.scans[0].mesh).unwrap());
+    let low = mesh
+        .positions
+        .iter()
+        .map(|p| p.z)
+        .fold(f32::INFINITY, f32::min)
+        + 4.0;
+    let mut open = mesh.clone();
+    open.tris
+        .retain(|t| !t.iter().all(|&i| mesh.positions[i as usize].z < low));
+    state.case.scans[0].mesh = state.blobs.insert(open);
+    p
+}
+
+/// The line under the status of an arch scan open underneath.
+const OPEN_HINT: &str = "The scan is open underneath: close it to see and use it as a solid model.";
+
 #[test]
 fn the_import_inspector_holds_the_flip_and_the_base_and_selecting_it_runs_nothing() {
+    // a scan that came in closed: said so, and nothing to close
     let mut h = harness(Workspace::new_headless(
         module(),
         Some(demo_project(&["lower"])),
+        None,
+    ));
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    assert!(h.query_by_label("Closed as read").is_some());
+    assert!(
+        h.query_by_label("The scan came in closed: it needs no base.")
+            .is_some()
+    );
+    assert!(h.query_by_label_contains("Close with a base").is_none());
+
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(open_lower_project()),
         None,
     ));
     let before = Arc::clone(h.state().ws.state());
@@ -1171,16 +1208,41 @@ fn the_import_inspector_holds_the_flip_and_the_base_and_selecting_it_runs_nothin
         Arc::ptr_eq(&before, h.state().ws.state()),
         "the selection changed the case"
     );
-    // its manual corrections: the flip of the arch scan and the base
+    // its manual corrections: the flip of the arch scan, and the base with
+    // the status of the scan and its run button
     for label in [
         "Flip the occlusal side",
-        "Open scan: close with a base",
+        "Base under the scans",
         "Base height",
+        OPEN_HINT,
         "Close with a base \u{b7} Lower",
     ] {
         assert!(h.query_by_label_contains(label).is_some(), "{label}");
     }
     assert!(h.query_by_label("Flipped by hand").is_none());
+    // the base: one undoable change; the arch has its tooth marks, so the
+    // base is level with them, and the button runs it again
+    click_in_view(&mut h, "Close with a base \u{b7} Lower");
+    settle(&mut h);
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-base-done".to_owned())
+    );
+    let scan = &h.state().ws.state().case.scans[0];
+    assert!(
+        h.state()
+            .ws
+            .state()
+            .mesh(&scan.mesh)
+            .unwrap()
+            .validate()
+            .is_watertight()
+    );
+    assert!(h.query_by_label("Closed on the tooth marks").is_some());
+    assert!(h.query_by_label("Run again \u{b7} Lower").is_some());
+    assert!(h.query_by_label("Close with a base \u{b7} Lower").is_none());
     // the flip: one undoable change, shown on the scan
     click_in_view(&mut h, "Flip the occlusal side");
     settle(&mut h);
@@ -1196,20 +1258,14 @@ fn the_import_inspector_holds_the_flip_and_the_base_and_selecting_it_runs_nothin
             .toast_keys()
             .contains(&"ws-toast-flipped".to_owned())
     );
-    // the base: the demo scan is closed, the case stays as it is
-    let flipped = Arc::clone(h.state().ws.state());
-    click_in_view(&mut h, "Close with a base \u{b7} Lower");
-    settle(&mut h);
-    assert!(
-        h.state()
-            .ws
-            .toast_keys()
-            .contains(&"ws-toast-base-closed".to_owned())
-    );
-    assert_eq!(h.state().ws.state().case, flipped.case);
+    // undone twice: the open scan again
     assert!(h.state_mut().ws.undo());
     assert!(h.state_mut().ws.undo());
+    h.run();
     assert!(aligners(&h.state().ws).occlusal_flipped.is_empty());
+    assert_eq!(h.state().ws.state().case, before.case);
+    assert!(h.query_by_label(OPEN_HINT).is_some());
+    assert!(h.query_by_label("Close with a base \u{b7} Lower").is_some());
 }
 
 #[test]

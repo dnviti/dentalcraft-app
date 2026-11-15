@@ -785,15 +785,20 @@ impl Bridge {
             .map(|s| s.labels.clone())
             .unwrap_or_default();
         // the built teeth and gingiva: what the viewport shows (the 3D teeth or
-        // the scan, at its stage) unless `model` / `stage` say otherwise
+        // the scan, at its stage, the study models with their layer) unless
+        // `model` / `stage` / `study` say otherwise
         let entries = match ws {
-            Some(ws) => render_entries(
-                &[&self.view, call],
-                ws.teeth_shown(),
-                Some(ws.stage_shown()),
-                |stage| ws.module().scene_at(state, stage),
-            )
-            .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e))?,
+            Some(ws) => {
+                let (entries, study) = render_entries(
+                    &[&self.view, call],
+                    ws.teeth_shown(),
+                    Some(ws.stage_shown()),
+                    ws.study_shown(),
+                    |stage| ws.module().scene_at(state, stage),
+                )
+                .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e))?;
+                dca_module::study_models_drawn(state, entries, study)
+            }
             None => Vec::new(),
         };
         let png = req
@@ -808,8 +813,8 @@ impl Bridge {
 }
 
 /// What the render draws of the modules' entries (the built teeth and
-/// gingiva), from the `model` and `stage` keys of the request (the last of
-/// `layers` that has one wins; `view.set` stores them as defaults):
+/// gingiva), from the `model`, `stage` and `study` keys of the request (the
+/// last of `layers` that has one wins; `view.set` stores them as defaults):
 ///
 /// - `model`: `"teeth"` draws the entries (they replace the scan of their
 ///   arch), `"scan"` draws the scans and none of the entries of an arch
@@ -817,15 +822,18 @@ impl Bridge {
 /// - `stage`: the treatment stage that poses the 3D teeth and moves the
 ///   gingiva (`0` or absent: the initial position). The scans are drawn at
 ///   rest whatever the stage.
+/// - `study`: the study models are drawn (`dca_module::study_models_drawn`),
+///   only at the initial position; the flag returned says so.
 ///
-/// `at` gives the entries at a stage; `default_teeth` and `default_stage`
-/// apply when the keys are absent.
+/// `at` gives the entries at a stage; `default_teeth`, `default_stage` and
+/// `default_study` apply when the keys are absent.
 fn render_entries(
     layers: &[&Map<String, Value>],
     default_teeth: bool,
     default_stage: Option<u32>,
+    default_study: bool,
     at: impl Fn(Option<u32>) -> Vec<SceneEntry>,
-) -> Result<Vec<SceneEntry>, String> {
+) -> Result<(Vec<SceneEntry>, bool), String> {
     let get = |key: &str| {
         layers
             .iter()
@@ -848,22 +856,28 @@ fn render_entries(
                 .ok_or("`stage` must be a non-negative integer")?,
         ),
     };
+    let study = match get("study") {
+        None => default_study,
+        Some(v) => v.as_bool().ok_or("`study` must be true or false")?,
+    } && stage.unwrap_or(0) == 0;
     let rest = at(None);
     if teeth {
-        return Ok(match stage {
+        let entries = match stage {
             Some(n) if n > 0 => at(Some(n)),
             _ => rest,
-        });
+        };
+        return Ok((entries, study));
     }
     let replaced: Vec<_> = rest
         .iter()
         .filter(|e| e.hides_scan)
         .filter_map(|e| e.arch)
         .collect();
-    Ok(rest
+    let entries = rest
         .into_iter()
         .filter(|e| !e.arch.is_some_and(|a| replaced.contains(&a)))
-        .collect())
+        .collect();
+    Ok((entries, study))
 }
 
 /// The app with the bridge: pumps the control requests before each frame.

@@ -4,13 +4,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dc_case::{CaseState, RoleSource, ScanRole};
+use dc_case::{BlobRef, CaseState, RoleSource, ScanRole};
 use dc_module_api::MenuItem;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
 use dc_ui::tokens::tokens;
 use dc_ui::widgets::{self, Button};
+use dca_model::{ClosedBy, ScanBase};
 use egui::{
     Align, Align2, CentralPanel, CornerRadius, Frame, Id, Key, KeyboardShortcut, Layout, Margin,
     Modal, Modifiers, Panel, RichText, Role, Sense, Stroke, Ui, WidgetInfo, vec2,
@@ -581,12 +582,14 @@ impl Workspace {
         self.import_base(ui, &state);
     }
 
-    /// "Close with a base": the thickness of the base and a button per arch
-    /// scan (the plugin's fold "Scansione aperta: chiudi con una base").
+    /// "Close with a base" (the plugin's fold "Scansione aperta: chiudi con
+    /// una base"): the thickness of the base, then per arch scan how it is
+    /// closed ([`base_status`]) and the button that closes it, "Run again"
+    /// once it has a base. A scan the scanner closed has nothing to close.
     fn import_base(&mut self, ui: &mut Ui, state: &CaseState) {
-        let arches: Vec<ScanRole> = [ScanRole::Upper, ScanRole::Lower]
+        let arches: Vec<(ScanRole, BlobRef)> = [ScanRole::Upper, ScanRole::Lower]
             .into_iter()
-            .filter(|r| state.case.scan(*r).is_some())
+            .filter_map(|r| state.case.scan(r).map(|s| (r, s.mesh)))
             .collect();
         if arches.is_empty() || self.module_spec(leaf::MAKE_BASE).is_none() {
             return;
@@ -595,12 +598,31 @@ impl Workspace {
         sub_heading(ui, "ws-import-base-title");
         caption(ui, t("ws-import-base-hint"));
         ui.add_space(6.0);
+        let c = *colors(ui);
         let busy = self.is_busy();
         let (lo, hi) = (
             dca_algo::scan_base::HEIGHT_MIN_MM as f32,
             dca_algo::scan_base::HEIGHT_MAX_MM as f32,
         );
         let default = dca_algo::scan_base::HEIGHT_DEFAULT_MM as f32;
+        let records = crate::overlay::aligners(state).map(|d| &d.scan_bases);
+        // asked once per scan blob; the blobs the case no longer has go
+        self.scan_open
+            .retain(|b, _| arches.iter().any(|(_, m)| m == b));
+        let statuses: Vec<(ScanRole, BaseStatus)> = arches
+            .iter()
+            .map(|&(role, blob)| {
+                let record = records.and_then(|r| r.get(&blob)).copied();
+                let status = base_status(record, || {
+                    *self.scan_open.entry(blob).or_insert_with(|| {
+                        state
+                            .mesh(&blob)
+                            .is_some_and(|m| dca_algo::scan_base::is_open(m))
+                    })
+                });
+                (role, status)
+            })
+            .collect();
         let mut close = None;
         ui.add_enabled_ui(!busy, |ui| {
             widgets::labeled_slider_mm(
@@ -610,13 +632,23 @@ impl Workspace {
                 lo..=hi,
                 default,
             );
-            ui.add_space(4.0);
-            for role in arches {
-                let label = format!("{} \u{b7} {}", t("ws-import-base"), role_label(role));
-                if Button::secondary(label).full_width(true).show(ui).clicked() {
-                    close = Some(role);
+            for (role, status) in statuses {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(role_label(role))
+                            .font(fonts::semibold(13.0))
+                            .color(c.text_primary),
+                    );
+                    widgets::badge(ui, status.kind(), t(status.key()));
+                });
+                caption(ui, t(status.hint_key()));
+                if let Some(key) = status.button_key() {
+                    let label = format!("{} \u{b7} {}", t(key), role_label(role));
+                    if Button::secondary(label).full_width(true).show(ui).clicked() {
+                        close = Some(role);
+                    }
                 }
-                ui.add_space(4.0);
             }
         });
         if let Some(role) = close {
@@ -812,6 +844,68 @@ fn role_label(role: ScanRole) -> String {
     })
 }
 
+/// How an arch scan of the case is closed, as "Close with a base" shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseStatus {
+    /// It has a base, made by the import, by hand, or on the tooth marks.
+    Base(ClosedBy),
+    /// Open underneath, with no base.
+    Open,
+    /// Closed as it was read (by the scanner): nothing to close.
+    ClosedAsRead,
+}
+
+impl BaseStatus {
+    /// The badge of the scan (short: badges do not wrap).
+    fn key(self) -> &'static str {
+        match self {
+            Self::Base(ClosedBy::Import) => "ws-base-status-import",
+            Self::Base(ClosedBy::Hand) => "ws-base-status-hand",
+            Self::Base(ClosedBy::ToothMarks) => "ws-base-status-marks",
+            Self::Open => "ws-base-status-open",
+            Self::ClosedAsRead => "ws-base-status-read",
+        }
+    }
+
+    /// The line under the badge.
+    fn hint_key(self) -> &'static str {
+        match self {
+            Self::Base(ClosedBy::Import | ClosedBy::Hand) => "ws-base-hint-scan",
+            Self::Base(ClosedBy::ToothMarks) => "ws-base-hint-marks",
+            Self::Open => "ws-base-hint-open",
+            Self::ClosedAsRead => "ws-base-hint-read",
+        }
+    }
+
+    fn kind(self) -> widgets::BadgeKind {
+        match self {
+            Self::Base(_) => widgets::BadgeKind::Success,
+            Self::Open => widgets::BadgeKind::Warning,
+            Self::ClosedAsRead => widgets::BadgeKind::Neutral,
+        }
+    }
+
+    /// The run button: "Close with a base", "Run again" once it has one;
+    /// none for a scan closed as it was read.
+    fn button_key(self) -> Option<&'static str> {
+        match self {
+            Self::Base(_) => Some("ws-btn-run-again"),
+            Self::Open => Some("ws-import-base"),
+            Self::ClosedAsRead => None,
+        }
+    }
+}
+
+/// The status of an arch scan with the base record `record`; `open` (asked
+/// only without a record) says whether it is open underneath.
+fn base_status(record: Option<ScanBase>, open: impl FnOnce() -> bool) -> BaseStatus {
+    match record {
+        Some(b) => BaseStatus::Base(b.closed_by),
+        None if open() => BaseStatus::Open,
+        None => BaseStatus::ClosedAsRead,
+    }
+}
+
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl Z", "undo"),
     ("Ctrl Shift Z", "redo"),
@@ -841,10 +935,63 @@ pub(crate) fn format_bytes(b: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn bytes() {
         assert_eq!(super::format_bytes(1_234_000_000), "1.2 GB");
         assert_eq!(super::format_bytes(340_000_000), "340 MB");
         assert_eq!(super::format_bytes(12_000), "12 kB");
+    }
+
+    #[test]
+    fn a_scan_says_how_it_is_closed_and_only_a_scan_to_close_has_a_button() {
+        let record = |closed_by| ScanBase {
+            vertices: 3,
+            faces: 1,
+            flipped: false,
+            closed_by,
+        };
+        // a record says who closed it; the border is not asked then
+        for (by, key) in [
+            (ClosedBy::Import, "ws-base-status-import"),
+            (ClosedBy::Hand, "ws-base-status-hand"),
+            (ClosedBy::ToothMarks, "ws-base-status-marks"),
+        ] {
+            let s = base_status(Some(record(by)), || panic!("asked"));
+            assert_eq!(s, BaseStatus::Base(by));
+            assert_eq!(s.key(), key);
+            assert_eq!(s.button_key(), Some("ws-btn-run-again"));
+        }
+        let open = base_status(None, || true);
+        assert_eq!(open, BaseStatus::Open);
+        assert_eq!(open.button_key(), Some("ws-import-base"));
+        let read = base_status(None, || false);
+        assert_eq!(read, BaseStatus::ClosedAsRead);
+        assert_eq!(read.button_key(), None);
+        // every text is in English and Italian
+        for s in [
+            BaseStatus::Base(ClosedBy::Import),
+            BaseStatus::Base(ClosedBy::Hand),
+            BaseStatus::Base(ClosedBy::ToothMarks),
+            open,
+            read,
+        ] {
+            for key in [Some(s.key()), Some(s.hint_key()), s.button_key()]
+                .into_iter()
+                .flatten()
+            {
+                for lang in ["en", "it"] {
+                    let ftl = match lang {
+                        "en" => include_str!("../i18n/en/dc-workspace.ftl"),
+                        _ => include_str!("../i18n/it/dc-workspace.ftl"),
+                    };
+                    assert!(
+                        ftl.lines().any(|l| l.starts_with(&format!("{key} ="))),
+                        "{lang}: {key}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -290,6 +290,10 @@ pub struct Workspace {
     /// Thickness of the base of "Close with a base" in the Import scans
     /// inspector (mm; the plugin's `base_height`, default 3).
     pub(crate) base_height_mm: f32,
+    /// Whether each arch scan blob with no base is open underneath, asked
+    /// once per blob (`dca_algo::scan_base::is_open`) for the status of
+    /// "Close with a base".
+    pub(crate) scan_open: std::collections::BTreeMap<dc_case::BlobRef, bool>,
     import_spec: Option<CommandSpec>,
     set_role_spec: Option<CommandSpec>,
     pub(crate) timeline: TimelineState,
@@ -404,6 +408,7 @@ impl Workspace {
             selected: None,
             import_role: None,
             base_height_mm: dca_algo::scan_base::HEIGHT_DEFAULT_MM as f32,
+            scan_open: std::collections::BTreeMap::new(),
             import_spec,
             set_role_spec,
             timeline: TimelineState::default(),
@@ -933,6 +938,25 @@ impl Workspace {
     /// The module's command `id`, when it has one.
     pub(crate) fn module_spec(&self, id: &str) -> Option<CommandSpec> {
         self.specs.iter().copied().find(|s| s.id == id)
+    }
+
+    /// Runs the module's command `id` with `params` in the background as the
+    /// command of a button (`name_key` in the status bar, with its progress
+    /// and a cancel; one undo step when it changes the case, its report when
+    /// it ends). Refused, with a notification, while another command runs.
+    pub(crate) fn run_button_command(
+        &mut self,
+        id: &'static str,
+        params: Value,
+        name_key: &'static str,
+    ) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(id) {
+            self.run_spec(spec, params, SpecKind::Leaf(id), name_key);
+        }
     }
 
     /// Runs `spec` with `params` on a snapshot of the current state in the
@@ -1481,6 +1505,13 @@ impl Workspace {
         }
         if id == leaf::SEGMENT {
             self.view.model = crate::view::Model::Scan;
+        }
+        // the study models just built are shown: their layer, at the initial
+        // position (where they stand for their arch)
+        if id == leaf::STUDY_MODELS {
+            self.view.layers.study = true;
+            self.timeline.current = 0;
+            self.timeline.playing = false;
         }
         // what to check before delivery (the doubts the separation left)
         if id == leaf::AUTO || id == leaf::EXPORT_ALL {

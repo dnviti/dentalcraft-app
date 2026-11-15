@@ -122,6 +122,8 @@ palette! {
     model_arch_line,
     /// Ghost of the teeth at their final position.
     model_target,
+    /// The aligner shown over the teeth (translucent).
+    model_aligner,
 }
 
 /// Font family of a text style.
