@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.2.0-alpha.4](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.3...v0.2.0-alpha.4) (2026-11-15)
+
+
+### Features
+
+* **app:** aligner and study model layers, closure status in Import scans ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** aligners inspector with parameters, calendar, result and slow a tooth ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** arch change renumbers, occlusal flip and base in Import scans ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** bite inspector with report, scan slots and three-point picking ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** clinical review inspector and IPR marks ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** component selection, outline and transform gizmo ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** export for printing inspector with production settings and aligner end ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** final position asks for the bite first ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** final position tools, arch line and final position ghost ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** installers for Linux and Windows with automatic updates ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** manual corrections in Case analysis ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** menu grouped by function, delete a tooth, stage slider, autosave and out-of-date 3D teeth ([#15](https://github.com/dnviti-personal-org/dentalcraft-app/issues/15)) ([0d88fbe](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d88fbe168d5a1bb9c3ebc1f0c467d4103a2c9c7))
+* **app:** show a tooth's region and margin line ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+
+
+### Bug Fixes
+
+* **app:** gizmo rotation ring keeps its turn ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+* **app:** list out-of-date reasons for every arch ([adfbf24](https://github.com/dnviti-personal-org/dentalcraft-app/commit/adfbf2411b9c1e4952966b78d5fdcae02b9eb581))
+
 ## [0.2.0-alpha.3](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.2...v0.2.0-alpha.3) (2026-11-12)
 
 
