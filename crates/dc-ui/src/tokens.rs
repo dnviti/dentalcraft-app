@@ -116,6 +116,14 @@ palette! {
     model_attachment,
     /// IPR planes.
     model_ipr,
+    /// Margin line of a tooth region on the scan.
+    model_margin,
+    /// Arch line of the final position and its points.
+    model_arch_line,
+    /// Ghost of the teeth at their final position.
+    model_target,
+    /// The aligner shown over the teeth (translucent).
+    model_aligner,
 }
 
 /// Font family of a text style.

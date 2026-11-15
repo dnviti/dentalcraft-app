@@ -12,7 +12,7 @@
 
 use dc_app::config::{Dirs, Store};
 use dc_app::control::{ControlServer, ControlledApp};
-use dc_app::{AppDeps, DentalCraftApp};
+use dc_app::{AppDeps, DentalCraftApp, Updates};
 
 /// The port of `--control <port>` / `--control=<port>`, if given.
 fn control_port() -> Result<Option<u16>, String> {
@@ -53,6 +53,7 @@ fn main() -> eframe::Result {
     tracing::info!("DentalCraft {} starting", env!("CARGO_PKG_VERSION"));
 
     let store = Store::new(dirs);
+    let updates = Updates::standard(store.dirs());
     let issuer = store.load_settings().issuer();
     let auth = match dc_auth_client::AuthClient::new(&issuer, dc_auth_client::DEFAULT_CLIENT_ID) {
         Ok(a) => Some(a),
@@ -96,6 +97,7 @@ fn main() -> eframe::Result {
                 auth,
                 render_state,
                 native_dialogs: true,
+                updates: Some(updates),
             });
             Ok(match control {
                 Some(server) => Box::new(ControlledApp::new(app, server)),

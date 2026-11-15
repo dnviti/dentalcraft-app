@@ -7,14 +7,17 @@
 //! The commands run through the same registered specs as the CLI and the MCP
 //! server; the workspace only reads their JSON output.
 
+use std::sync::{Arc, Weak};
+
 use dc_case::{CaseState, ScanRole};
 use dc_i18n::Lang;
 use dc_module_api::{LeafInput, Toast, ToastLevel};
 use dc_ui::fonts;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind};
+use dca_algo::diagnosis::edit::{self, EditField};
 use dca_algo::diagnosis::{Level, LittleCategory};
-use dca_model::{AlignersState, ArchSpace, MODULE_ID, SegmentationSettings};
+use dca_model::{AlignersState, ArchSpace, Diagnosis, MODULE_ID, SegmentationSettings};
 use egui::{RichText, Ui};
 use serde_json::Value;
 
@@ -23,6 +26,10 @@ use crate::{import, t};
 
 /// "Run everything automatically".
 pub(crate) const AUTO: &str = "aligners.auto";
+/// "Aligners".
+pub(crate) const ALIGNERS: &str = "aligners.planning.aligners";
+/// "Clinical review".
+pub(crate) const REVIEW: &str = "aligners.review.classify";
 /// "Bite".
 pub(crate) const BITE: &str = "aligners.occlusion.align";
 /// "Case analysis".
@@ -44,6 +51,14 @@ pub(crate) const SEGMENT_CHECK: &str = "aligners.preparation.segmentation.check"
 pub(crate) const SETUP: &str = "aligners.planning.setup.automatic";
 /// "Study models".
 pub(crate) const STUDY_MODELS: &str = "aligners.output.study-models";
+/// The arch of a scan chosen by hand, and its occlusal side turned over
+/// (the manual corrections of "Import scans").
+pub(crate) const SET_ARCH: &str = "aligners.case.set-arch";
+/// "Close with a base" (the manual corrections of "Import scans").
+pub(crate) const MAKE_BASE: &str = "aligners.case.make-base";
+/// The values of the case analysis written by hand (the manual corrections
+/// of "Case analysis").
+pub(crate) const DIAGNOSIS_EDIT: &str = "aligners.diagnosis.edit-values";
 /// The separation parameters stored in the case.
 const SEGMENT_SETTINGS: &str = "aligners.settings.segmentation";
 
@@ -164,7 +179,135 @@ pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
                 .with_detail(segment_lines(out).join("\n")),
             sticky: false,
         }),
+        SET_ARCH => arch_report(out),
+        MAKE_BASE => Some(base_report(out)),
+        CASE_ANALYSIS => diagnosis_reset_report(out),
+        DIAGNOSIS_EDIT => Some(diagnosis_edit_report(out)),
+        // `oa.classify`: "N classificazioni preimpostate da rivedere", and the
+        // aligners made again with the pattern of the review
+        REVIEW => {
+            let pending = out["counts"]["pending"].as_u64().unwrap_or_default();
+            let mut detail = tr_args("ws-rev-done-detail", &[("n", &pending.to_string())]);
+            if out["restaged"].as_array().is_some_and(|a| !a.is_empty()) {
+                detail = format!("{detail} {}", t("ws-rev-done-restaged"));
+            }
+            Some(Reported {
+                toast: Toast::new(ToastLevel::Success, "ws-toast-review-done").with_detail(detail),
+                sticky: false,
+            })
+        }
+        // the aligner of the view: the exact one built, the notes of a build
+        crate::aligner::SHOW | crate::aligner::EXACT => crate::aligner::report(id, out),
         _ => None,
+    }
+}
+
+/// The text key of the level of a complexity score.
+fn level_key(level: Level) -> &'static str {
+    match level {
+        Level::Easy => "ws-ca-level-easy",
+        Level::Moderate => "ws-ca-level-moderate",
+        Level::Difficult => "ws-ca-level-difficult",
+        Level::VeryComplex => "ws-ca-level-very-complex",
+    }
+}
+
+/// What the correction of the case analysis by hand gave: the complexity
+/// now, and that the aligners planned with the old values are to be planned
+/// again.
+fn diagnosis_edit_report(out: &Value) -> Reported {
+    let score = out["catcat_score"].as_u64().unwrap_or(0);
+    let level = t(level_key(Level::of(u32::try_from(score).unwrap_or(0))));
+    let mut lines = vec![tr_args(
+        "ws-diag-edited-detail",
+        &[("score", &score.to_string()), ("level", &level)],
+    )];
+    if out["staging_outdated"] == true {
+        lines.push(t("ws-diag-edited-stale"));
+    }
+    Reported {
+        toast: Toast::new(ToastLevel::Success, "ws-toast-diag-edited")
+            .with_detail(lines.join("\n")),
+        sticky: false,
+    }
+}
+
+/// A new case analysis writes the diagnosis anew: the values the clinician
+/// had set by hand in the arches it analysed are gone, and the toast says
+/// which. Nothing when there were none.
+fn diagnosis_reset_report(out: &Value) -> Option<Reported> {
+    let mut names: Vec<String> = Vec::new();
+    for arch in ["upper", "lower"] {
+        for key in out[arch]["hand_values_reset"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let Some(field) = key.as_str().and_then(EditField::from_key) else {
+                continue;
+            };
+            let name = t(edit_label_key(field));
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(Reported {
+        toast: Toast::new(ToastLevel::Info, "ws-toast-diag-reset").with_detail(tr_args(
+            "ws-diag-reset-detail",
+            &[("values", &names.join(", "))],
+        )),
+        sticky: false,
+    })
+}
+
+/// What "Choose the arch" and "Flip the occlusal side" did: the arch the
+/// scan took (its marks and colours renumbered, its 3D teeth built again),
+/// the occlusal side turned over (the separation to redo). Nothing for a
+/// role only confirmed.
+fn arch_report(out: &Value) -> Option<Reported> {
+    let mut lines = Vec::new();
+    let mut title = None;
+    if out["renumbered"] == true {
+        let arch = out["to"].as_str().unwrap_or_default();
+        lines.push(tr_args("ws-arch-set-detail", &[("arch", arch)]));
+        let rebuilt = out["rebuilt"].as_u64().unwrap_or(0);
+        if rebuilt > 0 {
+            let count = rebuilt.to_string();
+            lines.push(tr_args("ws-arch-rebuilt-detail", &[("count", &count)]));
+        }
+        title = Some("ws-toast-arch-set");
+    }
+    if out["flipped"] == true {
+        lines.push(t(if out["occlusal_flipped"] == true {
+            "ws-flipped-detail"
+        } else {
+            "ws-unflipped-detail"
+        }));
+        title = title.or(Some("ws-toast-flipped"));
+    }
+    let title = title?;
+    Some(Reported {
+        toast: Toast::new(ToastLevel::Success, title).with_detail(lines.join("\n")),
+        sticky: false,
+    })
+}
+
+/// What "Close with a base" did, or that the scan was already closed.
+fn base_report(out: &Value) -> Reported {
+    let toast = if out["already_closed"] == true {
+        Toast::new(ToastLevel::Info, "ws-toast-base-closed")
+    } else {
+        let edges = out["closed_edges"].as_u64().unwrap_or(0).to_string();
+        Toast::new(ToastLevel::Success, "ws-toast-base-done")
+            .with_detail(tr_args("ws-base-detail", &[("edges", &edges)]))
+    };
+    Reported {
+        toast,
+        sticky: false,
     }
 }
 
@@ -303,7 +446,9 @@ pub(crate) fn warning_toasts(out: &Value) -> Vec<Toast> {
 /// from `arches` (per arch: `rebuilt` the tooth numbers built this time,
 /// else `teeth` their count, and `gingiva`), so a partial rebuild counts the
 /// teeth it rebuilt; the old output (the crowns and gingiva steps) is the
-/// fallback. A field the output lacks counts as nothing.
+/// fallback. A field the output lacks counts as nothing. An arch the build
+/// could not build (`built: false`) makes the toast a warning that names it
+/// with its reason.
 fn teeth_report(out: &Value) -> Reported {
     let (upper, lower, gum) = match out["arches"].as_object() {
         Some(arches) => {
@@ -337,16 +482,36 @@ fn teeth_report(out: &Value) -> Reported {
         (false, true) => "ws-teeth-detail-lower",
         (false, false) => "ws-teeth-detail-none",
     };
+    let mut detail = tr_args(
+        key,
+        &[
+            ("count", &(upper + lower).to_string()),
+            ("upper", &upper.to_string()),
+            ("lower", &lower.to_string()),
+        ],
+    );
+    let not_built: Vec<String> = out["arches"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, a)| a["built"] == false)
+        .map(|(_, a)| {
+            let reason = a["reason"].as_str().unwrap_or_default();
+            tr_args("ws-teeth-arch-not-built", &[("reason", reason)])
+        })
+        .collect();
+    let level = if not_built.is_empty() {
+        ToastLevel::Success
+    } else {
+        for line in &not_built {
+            detail.push('\n');
+            detail.push_str(line);
+        }
+        ToastLevel::Warning
+    };
     Reported {
-        toast: Toast::new(ToastLevel::Success, "ws-toast-teeth-built").with_detail(tr_args(
-            key,
-            &[
-                ("count", &(upper + lower).to_string()),
-                ("upper", &upper.to_string()),
-                ("lower", &lower.to_string()),
-            ],
-        )),
-        sticky: false,
+        toast: Toast::new(level, "ws-toast-teeth-built").with_detail(detail),
+        sticky: !not_built.is_empty(),
     }
 }
 
@@ -483,6 +648,36 @@ pub(crate) struct SegmentUi {
     drag: Option<(usize, f32)>,
 }
 
+/// What the "Manual corrections" of the case analysis keep between frames.
+#[derive(Debug, Default)]
+pub(crate) struct DiagnosisUi {
+    /// The field being typed in or dragged, with its value, written when it
+    /// is let go.
+    pub(crate) field: Option<(ScanRole, EditField, f64)>,
+}
+
+/// Whether the case needs the bite before the final position
+/// ([`dca_algo::occlusion::bite_needed`]), worked out once per state of the
+/// case: it reads the arch frames from the scans.
+#[derive(Debug, Default)]
+pub(crate) struct BiteCheck {
+    /// The state the answer is for (kept weak: the allocation stays, so a
+    /// new state never takes its address).
+    state: Weak<CaseState>,
+    needed: bool,
+}
+
+impl BiteCheck {
+    /// `true` when `state` needs the bite before the final position.
+    pub(crate) fn needed(&mut self, state: &Arc<CaseState>) -> bool {
+        if !std::ptr::eq(self.state.as_ptr(), Arc::as_ptr(state)) {
+            self.state = Arc::downgrade(state);
+            self.needed = dca_algo::occlusion::bite_needed(state);
+        }
+        self.needed
+    }
+}
+
 impl Workspace {
     /// The separation parameters, read from the case settings: a change is
     /// sent when the slider is let go, one undo step each.
@@ -542,26 +737,40 @@ impl Workspace {
         }
     }
 
-    /// The status of the 3D teeth when they are out of date: the arches whose
-    /// colours, tooth marks or missing teeth changed by hand since the teeth
-    /// were built, and what to do (run again builds them again; those arches
-    /// show the scan until then). Nothing while the built teeth match the
-    /// case.
+    /// The status of the 3D teeth: the arches with a scan and no 3D teeth
+    /// while the other arch has them, with the reason, and the arches whose
+    /// built teeth are out of date, each with what changed since the teeth
+    /// were built, and what to do (run again builds both arches again; an
+    /// out of date arch shows the scan until then). Nothing while every
+    /// arch has teeth that match the case.
     pub(crate) fn teeth_results(&mut self, ui: &mut Ui) {
-        let Some(arches) = crate::overlay::outdated_arch_names(self.undo.current()) else {
-            return;
-        };
+        let state = self.undo.current();
+        let unbuilt = crate::overlay::unbuilt_lines(state);
+        let outdated = crate::overlay::outdated_reasons(state);
         let c = *colors(ui);
-        widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-outdated"));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(dc_i18n::tr_args(
-                "ws-teeth-outdated-detail",
-                &[("arches", &arches)],
-            ))
-            .font(fonts::ui(12.0))
-            .color(c.text_secondary),
-        );
+        let line = |ui: &mut Ui, text: String| {
+            ui.label(
+                RichText::new(text)
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+        };
+        if !unbuilt.is_empty() {
+            widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-unbuilt"));
+            ui.add_space(4.0);
+            for text in unbuilt {
+                line(ui, text);
+            }
+            ui.add_space(6.0);
+        }
+        if let Some(arches) = outdated {
+            widgets::badge(ui, BadgeKind::Warning, t("ws-teeth-outdated"));
+            ui.add_space(4.0);
+            line(
+                ui,
+                dc_i18n::tr_args("ws-teeth-outdated-detail", &[("arches", &arches)]),
+            );
+        }
     }
 
     /// The results of the case analysis, or the line that says it has not
@@ -569,6 +778,98 @@ impl Workspace {
     pub(crate) fn case_analysis_results(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();
         case_analysis(ui, &state);
+    }
+
+    /// "Manual corrections" of the case analysis: the values the clinician
+    /// measured themselves, per arch. Each shows the computed value, a field
+    /// for the clinician's own value (written when the field is let go or
+    /// confirmed, `aligners.diagnosis.edit-values`, one undo step), a badge
+    /// when it is set by hand and a button that brings the computed one
+    /// back. The complexity follows them. Nothing runs by being shown.
+    pub(crate) fn case_analysis_corrections(&mut self, ui: &mut Ui) {
+        let state = self.undo.current().clone();
+        let Some(data) = state.module_data::<AlignersState>(MODULE_ID) else {
+            crate::function::caption(ui, t("ws-ca-edit-none"));
+            return;
+        };
+        let d = &data.diagnosis;
+        if d.arches.is_empty() {
+            crate::function::caption(ui, t("ws-ca-edit-none"));
+            return;
+        }
+        let c = *colors(ui);
+        crate::function::caption(ui, t("ws-ca-edit-hint"));
+        ui.add_space(6.0);
+        let enabled = !self.is_busy();
+        let mut write = None;
+        for role in d.arches.keys().copied() {
+            let name = match role {
+                ScanRole::Upper => "ws-role-upper",
+                ScanRole::Lower => "ws-role-lower",
+                ScanRole::Bite => continue,
+            };
+            let Some(computed) = edit::computed_values(data, role) else {
+                continue;
+            };
+            let hand = d.edits_of(role);
+            let typing = &mut self.diagnosis_ui;
+            card(ui, |ui| {
+                ui.label(
+                    RichText::new(t(name))
+                        .font(fonts::semibold(13.0))
+                        .color(c.text_primary),
+                );
+                for field in EditField::ALL {
+                    let in_force = match field {
+                        EditField::Discrepancy => d.discrepancy_mm(role),
+                        EditField::Little => d.little_index_mm(role),
+                        EditField::MidlineOffset => Some(d.midline_offset_mm(role)),
+                        EditField::LargestSpace => Some(d.largest_space_mm(role)),
+                    }
+                    .unwrap_or_else(|| computed.get(field));
+                    let done = correction_row(
+                        ui,
+                        typing,
+                        role,
+                        field,
+                        shown_value(field, computed.get(field)),
+                        shown_value(field, in_force),
+                        field.get(&hand).is_some(),
+                        enabled,
+                    );
+                    if let Some(v) = done {
+                        // the field shows crowding where the command has discrepancy
+                        write = Some((role, field, v.map(|v| shown_value(field, v))));
+                    }
+                }
+            });
+            ui.add_space(8.0);
+        }
+        if let Some((role, field, value)) = write {
+            self.edit_diagnosis(role, field, value);
+        }
+    }
+
+    /// Under the status of "Final position": the notice while the case
+    /// needs the bite first (both arches separated and not related,
+    /// [`dca_algo::occlusion::bite_needed`]), which points to Bite (the run
+    /// button stays; a run is refused with the reason, an error toast, and
+    /// the bite is never run from here: menu law), then the result of the
+    /// last computation of each arch (`setup::result_lines`).
+    pub(crate) fn setup_results(&mut self, ui: &mut Ui) {
+        let state = self.undo.current().clone();
+        if self.bite_check.needed(&state) {
+            let c = *colors(ui);
+            widgets::badge(ui, BadgeKind::Warning, t("ws-setup-bite-first"));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(t("ws-setup-bite-first-detail"))
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
+            );
+            ui.add_space(6.0);
+        }
+        self.setup_result_lines(ui);
     }
 }
 
@@ -598,7 +899,7 @@ fn case_analysis(ui: &mut Ui, state: &CaseState) {
             ScanRole::Lower => "ws-role-lower",
             ScanRole::Bite => continue,
         };
-        arch_card(ui, &t(name), space);
+        arch_card(ui, &t(name), d, *role, space);
         ui.add_space(8.0);
     }
     // the ratios need both arches; when a tooth of the segment is missing in
@@ -681,8 +982,9 @@ fn figure(ui: &mut Ui, name: &str, value: String) {
     });
 }
 
-fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
+fn arch_card(ui: &mut Ui, name: &str, d: &Diagnosis, role: ScanRole, space: &ArchSpace) {
     let c = *colors(ui);
+    let by_hand = !d.edits_of(role).is_empty();
     card(ui, |ui| {
         ui.label(
             RichText::new(name)
@@ -699,7 +1001,8 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             &t("ws-ca-required"),
             format!("{} mm", mm(space.required_mm)),
         );
-        let gap = space.required_mm - space.available_mm;
+        // the values in force: the ones written by hand over the computed
+        let gap = d.crowding_mm(role).unwrap_or_else(|| space.crowding_mm());
         figure(ui, &t("ws-ca-difference"), format!("{} mm", signed(gap)));
         ui.horizontal(|ui| {
             let (kind, key) = if gap > 0.5 {
@@ -711,12 +1014,9 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             };
             widgets::badge(ui, kind, t(key));
         });
-        figure(
-            ui,
-            &t("ws-ca-little"),
-            format!("{} mm", mm(space.little_index_mm)),
-        );
-        let (kind, key) = match LittleCategory::of(space.little_index_mm) {
+        let little = d.little_index_mm(role).unwrap_or(space.little_index_mm);
+        figure(ui, &t("ws-ca-little"), format!("{} mm", mm(little)));
+        let (kind, key) = match LittleCategory::of(little) {
             LittleCategory::Perfect => (BadgeKind::Success, "ws-ca-little-perfect"),
             LittleCategory::Minimal => (BadgeKind::Success, "ws-ca-little-minimal"),
             LittleCategory::Moderate => (BadgeKind::Info, "ws-ca-little-moderate"),
@@ -724,7 +1024,120 @@ fn arch_card(ui: &mut Ui, name: &str, space: &ArchSpace) {
             LittleCategory::VerySevere => (BadgeKind::Danger, "ws-ca-little-very-severe"),
         };
         widgets::badge(ui, kind, t(key));
+        if d.details.contains_key(&role) {
+            figure(
+                ui,
+                &t("ws-ca-midline"),
+                format!("{} mm", signed(d.midline_offset_mm(role))),
+            );
+            figure(
+                ui,
+                &t("ws-ca-largest"),
+                format!("{} mm", mm(d.largest_space_mm(role))),
+            );
+        }
+        if by_hand {
+            widgets::badge(ui, BadgeKind::Info, t("ws-ca-has-hand"));
+        }
     });
+}
+
+/// The label of a value of "Manual corrections" of the case analysis.
+fn edit_label_key(field: EditField) -> &'static str {
+    match field {
+        EditField::Discrepancy => "ws-ca-edit-crowding",
+        EditField::Little => "ws-ca-edit-little",
+        EditField::MidlineOffset => "ws-ca-edit-midline",
+        EditField::LargestSpace => "ws-ca-edit-largest",
+    }
+}
+
+/// The value of a field as the inspector shows and edits it: the
+/// discrepancy (negative is crowding) as crowding, positive when the teeth
+/// need more room, as the cards show it. The other fields as they are. The
+/// conversion is its own inverse.
+fn shown_value(field: EditField, v: f64) -> f64 {
+    if field == EditField::Discrepancy {
+        -v
+    } else {
+        v
+    }
+}
+
+/// One value of "Manual corrections": its name, the field (a click or a
+/// drag-and-let-go writes it), the computed value, and when the value is
+/// by hand its badge and the button that brings the computed one back.
+/// Returns what to write: `Some(Some(v))` a value (as the field shows it),
+/// `Some(None)` a reset.
+#[allow(clippy::too_many_arguments)]
+fn correction_row(
+    ui: &mut Ui,
+    typing: &mut DiagnosisUi,
+    role: ScanRole,
+    field: EditField,
+    computed: f64,
+    in_force: f64,
+    by_hand: bool,
+    enabled: bool,
+) -> Option<Option<f64>> {
+    let c = *colors(ui);
+    let (lo, hi) = field.range();
+    let (lo, hi) = (shown_value(field, lo), shown_value(field, hi));
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let mut out = None;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(t(edit_label_key(field)))
+                .font(fonts::medium(12.0))
+                .color(c.text_secondary),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut v = match typing.field {
+                Some((r, f, v)) if r == role && f == field => v,
+                _ => in_force,
+            };
+            let r = ui.add_enabled(
+                enabled,
+                egui::DragValue::new(&mut v)
+                    .speed(0.1)
+                    .range(lo..=hi)
+                    .fixed_decimals(1)
+                    .suffix(" mm"),
+            );
+            if (r.dragged() || r.has_focus()) && (v - in_force).abs() > 1e-9 {
+                typing.field = Some((role, field, v));
+            }
+            if (r.drag_stopped() || r.lost_focus())
+                && let Some((rr, ff, vv)) = typing.field.take()
+                && rr == role
+                && ff == field
+            {
+                out = Some(Some(vv));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(dc_i18n::tr_args(
+                "ws-ca-edit-computed",
+                &[("value", &mm(computed))],
+            ))
+            .font(fonts::ui(12.0))
+            .color(c.text_secondary),
+        );
+        if by_hand {
+            widgets::badge(ui, BadgeKind::Info, t("ws-ca-by-hand"));
+            if widgets::Button::ghost(t("ws-ca-reset"))
+                .size(widgets::ButtonSize::Compact)
+                .enabled(enabled)
+                .show(ui)
+                .clicked()
+            {
+                out = Some(None);
+            }
+        }
+    });
+    out
 }
 
 #[cfg(test)]
@@ -821,6 +1234,29 @@ mod tests {
             &[("count", "13"), ("upper", "0"), ("lower", "13")],
         );
         assert_eq!(r.toast.detail.unwrap(), none);
+    }
+
+    #[test]
+    fn the_teeth_report_warns_of_an_arch_it_could_not_build() {
+        crate::loader();
+        let out = json!({ "arches": {
+            "lower": { "built": true, "mode": "all", "teeth": 14, "gingiva": true },
+            "upper": { "built": false, "reason": "the upper arch has no tooth colours" },
+        } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.level, ToastLevel::Warning);
+        assert!(r.sticky);
+        let detail = r.toast.detail.unwrap();
+        let line = tr_args(
+            "ws-teeth-arch-not-built",
+            &[("reason", "the upper arch has no tooth colours")],
+        );
+        assert!(detail.ends_with(&format!("\n{line}")), "{detail}");
+        // both arches built: a plain success
+        let out = json!({ "arches": { "lower": { "built": true, "teeth": 14, "gingiva": true } } });
+        let r = report(BUILD_TEETH, &out).unwrap();
+        assert_eq!(r.toast.level, ToastLevel::Success);
+        assert!(!r.sticky);
     }
 
     #[test]

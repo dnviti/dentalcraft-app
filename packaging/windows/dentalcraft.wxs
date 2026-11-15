@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DentalCraft MSI for Windows x64, built with wixl (msitools) by
+     packaging/windows/build-msi.sh, sourced by packaging/installers.sh.
+     Per-machine install in Program Files\DentalCraft (administrator rights), Start
+     menu shortcut, optional desktop shortcut (msiexec /i <msi> ADDLOCAL=ALL), entry in
+     Apps & features, major upgrade of any earlier version. The files come from the
+     fragment that build-msi.sh generates with wixl-heat (component group AppFiles).
+     Variables: Version (0.2.0-alpha.4), MsiVersion (0.2.0.4), SourceDir, Win64.
+     The UpgradeCode identifies DentalCraft across all versions: never change it. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="DentalCraft" Language="1033" Version="$(var.MsiVersion)"
+           Manufacturer="Daniele Viti" UpgradeCode="90BDCF16-C5BE-4030-B024-F81F76394F48">
+    <!-- x64: wixl -a x64 (wixl has no Package/@Platform). -->
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="DentalCraft $(var.Version)"
+             Comments="Dental CAD for the practice and the lab. Not a medical device."
+             Manufacturer="Daniele Viti"/>
+    <!-- The first three numbers of MsiVersion carry X.Y.Z; a pre-release only changes
+         the fourth, which MSI ignores, hence AllowSameVersionUpgrades. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of DentalCraft is already installed."/>
+    <Media Id="1" Cabinet="dentalcraft.cab" EmbedCab="yes"/>
+
+    <Icon Id="DentalCraftIcon" SourceFile="$(var.SourceDir)/dentalcraft.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="DentalCraftIcon"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://dentalcraft.app/"/>
+    <Property Id="ARPNOMODIFY" Value="1"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="DentalCraft"/>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+      <Directory Id="DesktopFolder"/>
+    </Directory>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="51821293-4357-4D01-8349-A827E6F78A07" Win64="yes">
+        <Shortcut Id="StartMenuShortcut" Name="DentalCraft" Description="Dental CAD for the practice and the lab"
+                  Target="[INSTALLDIR]dentalcraft.exe" WorkingDirectory="INSTALLDIR" Icon="DentalCraftIcon"/>
+        <RegistryValue Root="HKLM" Key="Software\DentalCraft" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="ACC59D5E-CC75-4788-B39A-F3582EBF7BD3" Win64="yes">
+        <Shortcut Id="DesktopShortcut" Name="DentalCraft" Description="Dental CAD for the practice and the lab"
+                  Target="[INSTALLDIR]dentalcraft.exe" WorkingDirectory="INSTALLDIR" Icon="DentalCraftIcon"/>
+        <RegistryValue Root="HKLM" Key="Software\DentalCraft" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="DentalCraft" Title="DentalCraft" Level="1" Absent="disallow">
+      <ComponentGroupRef Id="AppFiles"/>
+      <ComponentRef Id="StartMenuShortcut"/>
+    </Feature>
+    <!-- Off by default (level above INSTALLLEVEL 1): ADDLOCAL=DesktopShortcut or ADDLOCAL=ALL. -->
+    <Feature Id="DesktopShortcut" Title="Desktop shortcut" Level="1000">
+      <ComponentRef Id="DesktopShortcut"/>
+    </Feature>
+  </Product>
+</Wix>

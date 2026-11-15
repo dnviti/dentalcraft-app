@@ -9,7 +9,9 @@
 //! 4. "Automatic": the button that runs it ("Run", "Run again" once done, or
 //!    the dialog it needs first), the only way to run it from the window;
 //! 5. "Manual corrections": its tools, the controls of the open one under
-//!    them (the viewport takes the pointer for that tool).
+//!    them (the viewport takes the pointer for that tool). The 3D teeth start
+//!    this section with the view of the region of a tooth (`region`): it only
+//!    changes what the viewport shows.
 //!
 //! [`FUNCTIONS`] says what each function has; one that is not listed has its
 //! title, status and run button only. A new function adds its entry here
@@ -64,6 +66,12 @@ struct Function {
     note: Option<&'static str>,
     /// The section "Manual corrections".
     corrections: Corrections,
+    /// The section "Manual corrections" starts with the controls of the view
+    /// of a tooth region on the scan (`region`).
+    region: bool,
+    /// Controls of their own after the tools of the section "Manual
+    /// corrections" (a correction that is a button, not a pointer tool).
+    more: Option<Draw>,
 }
 
 /// A function with nothing more than its run button.
@@ -73,6 +81,8 @@ const PLAIN: Function = Function {
     params: Params::None,
     note: None,
     corrections: Corrections::None,
+    region: false,
+    more: None,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -102,26 +112,61 @@ static FUNCTIONS: &[Function] = &[
         params: Params::Own(Workspace::segment_params),
         note: Some("ws-seg-info"),
         corrections: Corrections::Tools(&[Tool::Brush, Tool::Clean]),
+        ..PLAIN
     },
     Function {
         id: leaf::BUILD_TEETH,
         results: Some(Workspace::teeth_results),
         corrections: Corrections::Tools(&[Tool::Rebuild]),
+        region: true,
         ..PLAIN
     },
     Function {
         id: leaf::CASE_ANALYSIS,
         results: Some(Workspace::case_analysis_results),
+        corrections: Corrections::Own(Workspace::case_analysis_corrections),
         ..PLAIN
     },
     Function {
         id: leaf::SETUP,
-        corrections: Corrections::Tools(&[Tool::Adjust]),
+        results: Some(Workspace::setup_results),
+        params: Params::Own(Workspace::setup_params),
+        corrections: Corrections::Tools(&[Tool::Adjust, Tool::ArchLine]),
+        more: Some(Workspace::setup_corrections),
+        ..PLAIN
+    },
+    Function {
+        id: leaf::ALIGNERS,
+        results: Some(Workspace::staging_results),
+        params: Params::Own(Workspace::staging_params),
+        corrections: Corrections::Own(Workspace::staging_corrections),
+        // the aligner in the view, next to the playback as in the plugin
+        more: Some(Workspace::aligner_view_controls),
+        ..PLAIN
+    },
+    Function {
+        id: leaf::REVIEW,
+        results: Some(Workspace::review_results),
+        note: Some("ws-rev-info"),
+        corrections: Corrections::Own(Workspace::review_corrections),
+        ..PLAIN
+    },
+    Function {
+        id: leaf::EXPORT_ALL,
+        params: Params::Own(Workspace::production_params),
         ..PLAIN
     },
     Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
+        ..PLAIN
+    },
+    Function {
+        id: leaf::BITE,
+        results: Some(Workspace::bite_results),
+        params: Params::Own(Workspace::bite_params),
+        corrections: Corrections::Tools(&[Tool::ThreePoints]),
+        more: Some(Workspace::bite_corrections),
         ..PLAIN
     },
 ];
@@ -245,9 +290,19 @@ impl Workspace {
                     .copied()
                     .filter(|tool| self.tool_ready(*tool))
                     .collect();
-                if !tools.is_empty() {
+                if !tools.is_empty() || f.region || f.more.is_some() {
                     section(ui, "ws-fn-manual");
+                }
+                if f.region {
+                    self.region_controls(ui);
+                    ui.add_space(8.0);
+                }
+                if !tools.is_empty() {
                     self.tool_list(ui, &tools);
+                }
+                if let Some(more) = f.more {
+                    ui.add_space(8.0);
+                    more(self, ui);
                 }
             }
             Corrections::Own(draw) => {
@@ -311,6 +366,8 @@ mod tests {
             Tool::Missing,
             Tool::Rebuild,
             Tool::Adjust,
+            Tool::ThreePoints,
+            Tool::ArchLine,
         ] {
             let owners = FUNCTIONS
                 .iter()
@@ -323,12 +380,14 @@ mod tests {
         assert_eq!(owner(Tool::Delete), Some(leaf::FIND_TEETH));
         assert_eq!(owner(Tool::Rebuild), Some(leaf::BUILD_TEETH));
         assert_eq!(owner(Tool::Adjust), Some(leaf::SETUP));
+        assert_eq!(owner(Tool::ThreePoints), Some(leaf::BITE));
+        assert_eq!(owner(Tool::ArchLine), Some(leaf::SETUP));
     }
 
     #[test]
     fn a_function_not_listed_has_only_its_run_button() {
-        let f = of("aligners.occlusion.align");
-        assert!(f.results.is_none() && f.note.is_none());
+        let f = of(leaf::VISITS);
+        assert!(f.results.is_none() && f.note.is_none() && f.more.is_none());
         assert!(matches!(f.params, Params::None));
         assert!(matches!(f.corrections, Corrections::None));
         // the import of any module has its role and its scans
@@ -339,5 +398,58 @@ mod tests {
         for (i, f) in FUNCTIONS.iter().enumerate() {
             assert!(FUNCTIONS[..i].iter().all(|o| o.id != f.id), "{}", f.id);
         }
+    }
+
+    #[test]
+    fn the_bite_shows_its_report_its_scans_and_its_corrections() {
+        let f = of(leaf::BITE);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        assert!(matches!(f.corrections, Corrections::Tools(t) if t == [Tool::ThreePoints]));
+        assert!(f.more.is_some());
+    }
+
+    #[test]
+    fn the_final_position_shows_its_result_parameters_and_corrections() {
+        let f = of(leaf::SETUP);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        assert!(
+            matches!(f.corrections, Corrections::Tools(t) if t == [Tool::Adjust, Tool::ArchLine])
+        );
+        // "Back to the initial position" is a button after the tools
+        assert!(f.more.is_some());
+    }
+
+    #[test]
+    fn the_aligners_show_their_result_parameters_slow_a_tooth_and_the_aligner_in_the_view() {
+        let f = of(leaf::ALIGNERS);
+        assert!(f.results.is_some());
+        assert!(matches!(f.params, Params::Own(_)));
+        // "Slow a tooth" works on the tooth selected in the view: not a pointer tool
+        assert!(matches!(f.corrections, Corrections::Own(_)));
+        assert!(f.note.is_none());
+        // after it, "The aligner in the view" (the plugin's toggle and
+        // "Allineatore esatto di questo stadio" next to the playback)
+        assert!(f.more.is_some());
+    }
+
+    #[test]
+    fn the_clinical_review_shows_its_counts_and_its_decisions() {
+        let f = of(leaf::REVIEW);
+        assert!(f.results.is_some() && f.note.is_some());
+        // a run takes no parameter: the filter and the decisions are corrections
+        assert!(matches!(f.params, Params::None));
+        assert!(matches!(f.corrections, Corrections::Own(_)));
+    }
+
+    #[test]
+    fn export_for_printing_shows_the_production_parameters() {
+        let f = of(leaf::EXPORT_ALL);
+        assert!(matches!(f.params, Params::Own(_)));
+        // the aligner end and the settings are parameters of the export:
+        // nothing of it is corrected by hand
+        assert!(matches!(f.corrections, Corrections::None));
+        assert!(f.results.is_none() && f.note.is_none());
     }
 }

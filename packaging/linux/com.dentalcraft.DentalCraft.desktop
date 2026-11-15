@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=DentalCraft
+GenericName=Dental CAD
+GenericName[it]=CAD dentale
+Comment=Dental CAD for the practice and the lab, starting with clear aligners. Not a medical device.
+Comment[it]=CAD dentale per studio e laboratorio, a partire dagli allineatori. Non è un dispositivo medico.
+Exec=dentalcraft
+Icon=com.dentalcraft.DentalCraft
+Terminal=false
+Categories=Science;MedicalSoftware;
+Keywords=dental;dentistry;orthodontics;aligner;CAD;scan;STL;
+Keywords[it]=dentale;odontoiatria;ortodonzia;allineatori;CAD;scansione;STL;
+StartupNotify=true
+StartupWMClass=com.dentalcraft.DentalCraft

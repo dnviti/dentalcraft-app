@@ -4,7 +4,10 @@
 //! (offscreen pass recorded by an [`egui_wgpu::CallbackTrait`] paint
 //! callback, MSAA and depth), and handles navigation (orbit, pan, zoom to
 //! cursor, fit, [`StdView`] standard dental views, perspective/orthographic),
-//! an axis gizmo and CPU picking through a per-mesh [`Bvh`].
+//! an axis gizmo and CPU picking through a per-mesh [`Bvh`]. A selection is
+//! drawn with a screen-space outline around the selected meshes
+//! ([`Viewport::set_highlight`]), and a [`TransformGizmo`] moves, turns or
+//! scales it ([`Viewport::set_transform_gizmo`], [`GizmoEvent`]).
 //!
 //! Meshes are uploaded once (and cached by `Arc` identity across
 //! [`Viewport::set_meshes`] calls); a frame only rewrites the camera and
@@ -34,6 +37,7 @@ pub mod coloring;
 mod gizmo;
 pub mod pick;
 mod render;
+mod transform;
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -49,8 +53,11 @@ pub use bvh::Bvh;
 pub use camera::{Camera, FitInsets, Projection, Ray, Sphere, StdView};
 pub use coloring::{label_coloring, label_colors, resolve_colors};
 pub use pick::{Pick, PickTarget};
+pub use transform::{GizmoDelta, GizmoEvent, GizmoMode, TransformGizmo};
 
-use render::{CameraUniform, ColorData, DrawItem, FrameCallback, Gpu, GpuMesh, Targets};
+use render::{
+    CameraUniform, ColorData, DrawItem, FrameCallback, Gpu, GpuMesh, OutlinePass, Targets,
+};
 
 /// Caller-chosen identifier of a mesh in the viewport.
 pub type MeshId = u64;
@@ -222,6 +229,16 @@ pub struct ViewportSettings {
     /// What floats over the edges of the viewport (points): [`Viewport::fit`]
     /// frames the meshes in the free area left inside it.
     pub fit_insets: FitInsets,
+    /// Colour of the selection outline (linear; alpha = opacity), also the
+    /// tint of the mesh under the pointer.
+    pub outline_color: Color,
+    /// Width of the selection outline (points).
+    pub outline_width: f32,
+    /// Strength of the outline around the parts of the selection other
+    /// meshes cover (`0` = none, `1` = as around the visible parts).
+    pub outline_hidden: f32,
+    /// Strength of the tint of the highlighted mesh under the pointer.
+    pub hover_tint: f32,
 }
 
 impl Default for ViewportSettings {
@@ -236,6 +253,11 @@ impl Default for ViewportSettings {
             gizmo: Some(Corner::BottomLeft),
             fit_margin: 1.05,
             fit_insets: FitInsets::NONE,
+            // the design's select/blue (#6F9BFF), linear
+            outline_color: Color::rgb(0.159, 0.332, 1.0),
+            outline_width: 3.0,
+            outline_hidden: 0.35,
+            hover_tint: 0.22,
         }
     }
 }
@@ -245,12 +267,19 @@ impl Default for ViewportSettings {
 pub struct ViewportResponse {
     /// The egui response of the viewport area.
     pub response: egui::Response,
-    /// Primary click on a mesh.
+    /// Primary click on a mesh (never on a handle of the transform gizmo).
     pub pick: Option<Pick>,
     /// Mesh under the cursor (only with [`ViewportSettings::hover_pick`]).
     pub hovered: Option<Pick>,
     /// The camera moved this frame.
     pub camera_changed: bool,
+    /// What the transform gizmo did this frame.
+    pub gizmo: Option<GizmoEvent>,
+    /// The pointer is over a handle of the transform gizmo.
+    pub gizmo_hovered: bool,
+    /// The primary button belongs to the transform gizmo this frame (a press
+    /// on a handle, or a drag of it): the host leaves the click alone.
+    pub gizmo_consumed: bool,
 }
 
 struct Entry {
@@ -276,6 +305,7 @@ struct RenderKey {
     clear: Color,
     size: [u32; 2],
     scene_version: u64,
+    highlight_version: u64,
 }
 
 /// The 3D viewport widget.
@@ -298,6 +328,17 @@ pub struct Viewport {
     fitted_once: bool,
     last_hover: Option<(Pos2, Camera, u64)>,
     hovered: Option<Pick>,
+    /// Meshes drawn with the selection outline.
+    selected: Vec<MeshId>,
+    /// Meshes tinted as under the pointer.
+    hover_ids: Vec<MeshId>,
+    highlight_version: u64,
+    /// The transform gizmo shown, its drag and the handle under the pointer.
+    transform: Option<TransformGizmo>,
+    gizmo_drag: Option<transform::Drag>,
+    gizmo_hot: Option<transform::Handle>,
+    /// Where the viewport was drawn last (the gizmo is painted there).
+    last_rect: Rect,
 }
 
 impl Viewport {
@@ -326,6 +367,13 @@ impl Viewport {
             fitted_once: false,
             last_hover: None,
             hovered: None,
+            selected: Vec::new(),
+            hover_ids: Vec::new(),
+            highlight_version: 0,
+            transform: None,
+            gizmo_drag: None,
+            gizmo_hot: None,
+            last_rect: Rect::NOTHING,
         }
     }
 
@@ -478,12 +526,140 @@ impl Viewport {
         )
     }
 
+    /// The ray from the camera through a screen position inside the
+    /// viewport `rect` (world coordinates).
+    pub fn ray_at(&self, rect: Rect, pos: Pos2) -> Ray {
+        self.camera
+            .ray(ndc_of(rect, pos), aspect_of(rect), self.bounding_sphere())
+    }
+
     /// Picks under a screen position inside the viewport `rect`.
     pub fn pick_at(&self, rect: Rect, pos: Pos2) -> Option<Pick> {
-        let ray = self
-            .camera
-            .ray(ndc_of(rect, pos), aspect_of(rect), self.bounding_sphere());
-        self.pick_ray(&ray)
+        self.pick_ray(&self.ray_at(rect, pos))
+    }
+
+    /// Draws the selection outline around the meshes `selected` and tints
+    /// the meshes `hovered` (the object under the pointer). Ids that are not
+    /// shown are ignored.
+    pub fn set_highlight(&mut self, selected: &[MeshId], hovered: &[MeshId]) {
+        if self.selected != selected || self.hover_ids != hovered {
+            self.selected = selected.to_vec();
+            self.hover_ids = hovered.to_vec();
+            self.highlight_version += 1;
+        }
+    }
+
+    /// Shows the transform gizmo (`None` hides it and drops a drag going
+    /// on). A drag keeps going while the gizmo stays in the same mode, its
+    /// pivot may follow the preview of the drag.
+    pub fn set_transform_gizmo(&mut self, gizmo: Option<TransformGizmo>) {
+        if gizmo.map(|g| g.mode) != self.transform.map(|g| g.mode) {
+            self.gizmo_drag = None;
+            self.gizmo_hot = None;
+        }
+        self.transform = gizmo;
+    }
+
+    /// A handle of the transform gizmo is being dragged.
+    pub fn transform_dragging(&self) -> bool {
+        self.gizmo_drag.is_some()
+    }
+
+    /// Drops the drag of the transform gizmo going on (Escape); `true` when
+    /// there was one. No [`GizmoEvent::Commit`] follows.
+    pub fn cancel_transform_drag(&mut self) -> bool {
+        self.gizmo_hot = None;
+        self.gizmo_drag.take().is_some()
+    }
+
+    /// Draws the transform gizmo over the last frame of the viewport, with
+    /// `painter` (the host draws it after its own overlays, so the gizmo
+    /// stays on top of them). Nothing when no gizmo is set or its pivot is
+    /// behind the camera.
+    pub fn paint_transform_gizmo(&self, painter: &egui::Painter, pointer: Option<Pos2>) {
+        let Some(g) = self.transform else { return };
+        let rect = self.last_rect;
+        if !rect.is_positive() || self.camera.forward().dot(g.pivot - self.camera.eye()) <= 0.0 {
+            return;
+        }
+        let proj = self.projector(rect);
+        transform::paint(
+            &painter.with_clip_rect(rect),
+            &g,
+            &proj,
+            self.gizmo_hot,
+            self.gizmo_drag.as_ref().map(|d| &d.last),
+            pointer,
+        );
+    }
+
+    fn projector(&self, rect: Rect) -> transform::Projector {
+        transform::Projector {
+            camera: self.camera,
+            rect,
+            bounds: self.bounding_sphere(),
+        }
+    }
+
+    /// The transform gizmo's part of the input: a drag that starts on a
+    /// handle, goes on or ends, and the handle under the pointer. Returns the
+    /// event and whether the primary button belongs to the gizmo.
+    fn gizmo_input(
+        &mut self,
+        ui: &egui::Ui,
+        rect: Rect,
+        response: &egui::Response,
+    ) -> (Option<GizmoEvent>, bool) {
+        let Some(g) = self.transform else {
+            self.gizmo_drag = None;
+            self.gizmo_hot = None;
+            return (None, false);
+        };
+        if self.camera.forward().dot(g.pivot - self.camera.eye()) <= 0.0 {
+            self.gizmo_drag = None;
+            self.gizmo_hot = None;
+            return (None, false);
+        }
+        let proj = self.projector(rect);
+        let press = ui.input(|i| i.pointer.press_origin());
+        let on_handle = |pos: Pos2| transform::hit(&g, &proj, pos);
+        let primary = PointerButton::Primary;
+        let mut consumed = false;
+        if self.gizmo_drag.is_none()
+            && response.drag_started_by(primary)
+            && let Some(origin) = press
+            && let Some(h) = on_handle(origin)
+        {
+            self.gizmo_drag = Some(transform::Drag::start(h, &g, &proj, origin));
+        }
+        let mut event = None;
+        if let Some(drag) = &mut self.gizmo_drag {
+            consumed = true;
+            let snap = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            let pointer = response
+                .interact_pointer_pos()
+                .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+            if let Some(pos) = pointer {
+                drag.update(&proj, pos, snap);
+            }
+            if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                event = Some(GizmoEvent::Commit(drag.last));
+                self.gizmo_drag = None;
+            } else {
+                event = Some(GizmoEvent::Drag(drag.last));
+            }
+        }
+        // a click on a handle is not a pick
+        if (response.clicked_by(primary) || response.double_clicked_by(primary))
+            && press.and_then(on_handle).is_some()
+        {
+            consumed = true;
+        }
+        self.gizmo_hot = self
+            .gizmo_drag
+            .map(|d| d.handle)
+            .or_else(|| response.hover_pos().and_then(on_handle));
+        (event, consumed)
     }
 
     /// Shows the viewport in all the available space and handles input.
@@ -510,11 +686,21 @@ impl Viewport {
             .settings
             .gizmo
             .map(|corner| corner.anchor(rect, gizmo::RADIUS));
+        let (gizmo_event, gizmo_consumed) = self.gizmo_input(ui, rect, &response);
+        let gizmo_hovered = self.gizmo_hot.is_some();
         let mut pick = None;
-        self.handle_input(ui, rect, &response, aspect, gizmo_center, &mut pick);
+        self.handle_input(
+            ui,
+            rect,
+            &response,
+            aspect,
+            gizmo_center,
+            gizmo_consumed,
+            &mut pick,
+        );
 
         // hover picking, only when the pointer, the camera or the scene changed
-        if self.settings.hover_pick {
+        if self.settings.hover_pick && !gizmo_hovered {
             match response.hover_pos() {
                 Some(p) => {
                     let key = (p, self.camera, self.scene_version);
@@ -532,6 +718,7 @@ impl Viewport {
             self.hovered = None;
         }
 
+        self.last_rect = rect;
         self.paint(ui, rect);
         if let Some(center) = gizmo_center
             && rect.height() > 4.0 * gizmo::RADIUS
@@ -549,9 +736,13 @@ impl Viewport {
             response,
             pick,
             hovered: self.hovered,
+            gizmo: gizmo_event,
+            gizmo_hovered,
+            gizmo_consumed,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_input(
         &mut self,
         ui: &egui::Ui,
@@ -559,6 +750,7 @@ impl Viewport {
         response: &egui::Response,
         aspect: f32,
         gizmo_center: Option<Pos2>,
+        gizmo_consumed: bool,
         pick: &mut Option<Pick>,
     ) {
         let nav = self.navigation;
@@ -592,6 +784,7 @@ impl Viewport {
 
         let gizmo_center = gizmo_center.filter(|_| rect.height() > 4.0 * gizmo::RADIUS);
         if response.clicked_by(PointerButton::Primary)
+            && !gizmo_consumed
             && let Some(pos) = response.interact_pointer_pos()
         {
             match gizmo_center.and_then(|c| gizmo::hit(c, self.camera.rotation, pos)) {
@@ -600,6 +793,7 @@ impl Viewport {
             }
         }
         if response.double_clicked_by(PointerButton::Primary)
+            && !gizmo_consumed
             && let Some(pos) = response.interact_pointer_pos()
         {
             // double click: orbit around the point under the cursor, or fit
@@ -663,9 +857,10 @@ impl Viewport {
             clear,
             size,
             scene_version: self.scene_version,
+            highlight_version: self.highlight_version,
         };
         if self.last_render.as_ref() != Some(&key) && ui.is_rect_visible(rect) {
-            let callback = self.frame_callback(targets, clear, aspect_of(rect));
+            let callback = self.frame_callback(targets, clear, aspect_of(rect), ppp, size);
             ui.painter()
                 .add(egui_wgpu::Callback::new_paint_callback(rect, callback));
             // a discarded pass never reaches the GPU: render again next pass
@@ -681,7 +876,14 @@ impl Viewport {
         );
     }
 
-    fn frame_callback(&self, targets: Arc<Targets>, clear: Color, aspect: f32) -> FrameCallback {
+    fn frame_callback(
+        &self,
+        targets: Arc<Targets>,
+        clear: Color,
+        aspect: f32,
+        ppp: f32,
+        size: [u32; 2],
+    ) -> FrameCallback {
         let cam = &self.camera;
         let (near, far) = cam.clip_planes(self.bounding_sphere());
         let view = cam.view_matrix();
@@ -700,16 +902,18 @@ impl Viewport {
             ],
             wire_color: s.wire_color.to_array(),
             back_color: back.to_array(),
+            hover_color: s.outline_color.with_alpha(s.hover_tint).to_array(),
         };
         let backface = match s.backface {
             BackfaceMode::Show => 0,
             BackfaceMode::Tint => 1,
             BackfaceMode::Cull => 2,
         };
+        let shown = |e: &&Entry| e.visible && e.opacity > 0.0;
         let items = self
             .entries
             .iter()
-            .filter(|e| e.visible && e.opacity > 0.0)
+            .filter(shown)
             .map(|e| {
                 if s.wireframe {
                     self.gpu.ensure_edges(&e.gpu, &e.mesh);
@@ -718,23 +922,91 @@ impl Viewport {
                     e.xform.transform_point3((lo + hi) * 0.5)
                 });
                 let transparent = e.opacity < 0.999 || e.colors.base.a < 0.999;
+                let hovered = self.hover_ids.contains(&e.id) && !self.selected.contains(&e.id);
                 DrawItem {
                     mesh: e.gpu.clone(),
-                    uniform: render::mesh_uniform(e.xform, view, &e.colors, e.opacity, backface),
+                    uniform: render::mesh_uniform(
+                        e.xform, view, &e.colors, e.opacity, backface, hovered,
+                    ),
                     transparent,
                     wireframe: s.wireframe,
                     depth: view.transform_point3(center).z,
                 }
             })
             .collect();
+        let selected: Vec<&Entry> = self
+            .entries
+            .iter()
+            .filter(shown)
+            .filter(|e| self.selected.contains(&e.id))
+            .collect();
+        let outline = (!selected.is_empty()).then(|| {
+            let view_proj = proj * view;
+            let bbox = selected
+                .iter()
+                .map(|e| {
+                    e.local_box
+                        .map(|(lo, hi)| render::transform_box(lo, hi, e.xform))
+                })
+                .try_fold(None, |acc: Option<[f32; 4]>, b| {
+                    let px = pixel_box(b?, view_proj, size)?;
+                    Some(Some(match acc {
+                        Some(a) => [
+                            a[0].min(px[0]),
+                            a[1].min(px[1]),
+                            a[2].max(px[2]),
+                            a[3].max(px[3]),
+                        ],
+                        None => px,
+                    }))
+                })
+                .flatten();
+            OutlinePass::new(
+                selected.iter().map(|e| e.gpu.clone()).collect(),
+                s.outline_color,
+                s.outline_width * ppp,
+                s.outline_hidden,
+                bbox,
+                size,
+            )
+        });
         FrameCallback {
             gpu: self.gpu.clone(),
             targets,
             camera,
             clear,
             items,
+            outline,
         }
     }
+}
+
+/// The pixel box (`[min x, min y, max x, max y]`, y down) of the world box
+/// `b` in a target of `size` pixels; `None` when a corner is behind the
+/// camera (the caller then uses the whole target).
+fn pixel_box(b: (Vec3, Vec3), view_proj: Mat4, size: [u32; 2]) -> Option<[f32; 4]> {
+    let (lo, hi) = b;
+    let mut out = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for i in 0..8 {
+        let p = Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let c = view_proj * p.extend(1.0);
+        if c.w <= 1e-6 {
+            return None;
+        }
+        let x = (c.x / c.w * 0.5 + 0.5) * size[0] as f32;
+        let y = (0.5 - c.y / c.w * 0.5) * size[1] as f32;
+        out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+    }
+    Some(out)
 }
 
 impl Drop for Viewport {

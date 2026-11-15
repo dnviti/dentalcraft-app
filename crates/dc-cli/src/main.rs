@@ -2,10 +2,11 @@
 //! MCP for AI agents (port plan B2.1).
 //!
 //! Subcommands: `info`, `commands`, `describe`, `run`, `render`, `mcp`,
-//! `app` and `licence`. Everything runs on a headless engine session (`dc-session`
-//! with the Aligners module) except `mcp --connect PORT`, which talks to a
-//! running app started with `dentalcraft --control PORT` (protocol in
-//! [`remote`]).
+//! `app`, `update` and `licence`. Everything runs on a headless engine
+//! session (`dc-session` with the Aligners module) except `mcp --connect
+//! PORT`, which talks to a running app started with `dentalcraft --control
+//! PORT` (protocol in [`remote`]), and `update`, which works on this
+//! installation (`dc-update`).
 
 mod host;
 mod remote;
@@ -141,6 +142,21 @@ Starts the DentalCraft app (`dentalcraft`), found next to dentalcraft-cli or on 
 `dentalcraft-cli app -- --control 7300` starts it with the bridge that `mcp --connect 7300` uses.
 Prints the process id and the path as JSON and returns at once.";
 
+const UPDATE_HELP: &str = "\
+Asks the DentalCraft website for the newest version (DC_UPDATE_URL, when set, is another address
+for its update.json) and checks that the answer is signed with the DentalCraft release key.
+
+--check prints the answer as JSON and changes nothing: current, latest, update_available, kind
+(standalone, appimage, deb, rpm, flatpak, exe, msi or unknown: how this copy was installed),
+action (install, package-manager, manual or none), notes_url; command for apt, dnf and Flatpak
+installations; download {url, size} when DentalCraft installs it itself.
+
+Without --check, a newer version is downloaded, checked against the size and SHA-256 the signed
+answer gives, and installed: a standalone folder (.tar.gz, .zip) and an AppImage at once, a Windows
+setup or MSI when dentalcraft-cli ends. Installations of apt, dnf and Flatpak are left to their
+package manager: the JSON gives the command. Prints the JSON of --check plus `updated`; the
+download progress goes to stderr. The same commands are app.update.check and app.update.apply.";
+
 /// Command line of `dentalcraft-cli`.
 #[derive(Debug, Parser)]
 #[command(
@@ -209,6 +225,13 @@ enum Cmd {
         /// Print the copyright and licence notices of the bundled open source components.
         #[arg(long)]
         third_party: bool,
+    },
+    /// Look for a newer version of DentalCraft and install it.
+    #[command(long_about = UPDATE_HELP)]
+    Update {
+        /// Only say whether a newer version exists and how it is installed.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -314,6 +337,7 @@ fn main() -> ExitCode {
             licence(third_party);
             Ok(())
         }
+        Some(Cmd::Update { check }) => update(check),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -478,7 +502,7 @@ fn info(inputs: &Inputs) -> Result<()> {
             })
         })
         .collect();
-    let commands = host.session.list_commands().len();
+    let commands = host.list_commands().len();
     print_json(&json!({
         "name": "DentalCraft",
         "cli": "dentalcraft-cli",
@@ -493,7 +517,7 @@ fn info(inputs: &Inputs) -> Result<()> {
 
 fn commands(as_json: bool) -> Result<()> {
     let host = new_host()?;
-    let list = host.session.list_commands();
+    let list = host.list_commands();
     if as_json {
         return print_json(&serde_json::to_value(&list).map_err(|e| e.to_string())?);
     }
@@ -507,7 +531,7 @@ fn commands(as_json: bool) -> Result<()> {
 
 fn describe(id: &str, as_json: bool) -> Result<()> {
     let host = new_host()?;
-    let d = host.session.describe(id).map_err(|e| e.to_string())?;
+    let d = host.describe_command(id)?;
     if as_json {
         return print_json(&serde_json::to_value(&d).map_err(|e| e.to_string())?);
     }
@@ -683,6 +707,27 @@ fn app(print_path: bool, args: &[String]) -> Result<()> {
     }))
 }
 
+/// `update`: the check, or the check and the install, of this installation.
+fn update(check_only: bool) -> Result<()> {
+    let source = dc_update::Source::standard();
+    if check_only {
+        let out = dc_update::commands::run_check(&source).map_err(|e| e.to_string())?;
+        return print_json(&out);
+    }
+    // a line every 5 %, on stderr
+    let shown = std::cell::Cell::new(None);
+    let progress = |done: u64, total: u64| {
+        let pct = done * 100 / total.max(1);
+        if shown.get() != Some(pct / 5) {
+            shown.set(Some(pct / 5));
+            eprintln!("download: {pct}% of {:.1} MB", total as f64 / 1_000_000.0);
+        }
+    };
+    let out = dc_update::commands::run_apply(&source, &dc_update::work_dir(), &progress)
+        .map_err(|e| e.to_string())?;
+    print_json(&out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,7 +738,7 @@ mod tests {
         let help = Cli::command().render_help().to_string();
         assert!(help.contains("dentalcraft-cli"), "{help}");
         for sub in [
-            "info", "commands", "describe", "run", "render", "mcp", "app",
+            "info", "commands", "describe", "run", "render", "mcp", "app", "update",
         ] {
             assert!(help.contains(sub), "{sub}: {help}");
         }

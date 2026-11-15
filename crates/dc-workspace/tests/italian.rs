@@ -111,6 +111,24 @@ fn italian_toolbar_and_timeline_hold_at_every_width() {
         fit: "Inquadra tutto",
         hint: "Nessuno stadio",
         arches: ["Superiore", "Inferiore"],
+        buttons: [
+            "Solido",
+            "Trasparente",
+            "Reticolo",
+            "Misura",
+            "Angolo",
+            "Piano di sezione",
+            "Colori dei denti",
+            "Punti dente",
+            "Numeri dei denti",
+            "Mappa dei contatti",
+            "Attacchi",
+            "IPR",
+            "Modelli da studio",
+            "Posizione finale",
+            "Allineatore",
+        ],
+        solids: "Modelli nella vista",
         overlay: "Sovrapponi stadio 0",
     });
 }
@@ -182,7 +200,7 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     );
     let mut h = harness(ws);
     h.run();
-    assert!(h.query_by_label("Flusso di trattamento 3/8").is_some());
+    assert!(h.query_by_label("Flusso di trattamento 3/9").is_some());
     h.state_mut()
         .select_item("aligners.diagnosis.space-analysis");
     h.run();
@@ -207,6 +225,16 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     ] {
         assert!(h.query_by_label(label).is_some(), "{label}");
     }
+    // the 3D teeth: the view of the region of a tooth, in Italian
+    h.state_mut().select_item("aligners.teeth.build");
+    h.run();
+    for label in ["Correzioni a mano", "Mostra la zona", "Fine"] {
+        assert!(h.get_all_by_label(label).count() >= 1, "{label}");
+    }
+    assert!(
+        h.query_by_label_contains("Clicca un dente nella vista")
+            .is_some()
+    );
     // the keys of the tools, with the new labels
     h.get_by_label("Guida").click();
     h.run();

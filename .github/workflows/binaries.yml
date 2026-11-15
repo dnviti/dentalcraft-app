@@ -1,12 +1,22 @@
 name: binaries
 
-# Builds the release binaries of the application (the GUI `dentalcraft` and the
-# command line `dentalcraft-cli`, both in each archive) and attaches them to the
-# GitHub release of a tag:
-#   dentalcraft_<ver>_linux_x86_64.tar.gz    (golgari-dev)
-#   dentalcraft_<ver>_windows_x86_64.zip     (golgari-dev, cross-compiled with mingw-w64)
+# Builds the release downloads of the application and attaches them to the GitHub
+# release of a tag. Each one holds the GUI `dentalcraft` and the command line
+# `dentalcraft-cli`:
+#   dentalcraft_<ver>_linux_x86_64.tar.gz    standalone (build, golgari-dev)
+#   dentalcraft_<ver>_windows_x86_64.zip     standalone (build, golgari-dev, cross-compiled with mingw-w64)
+#   DentalCraft-<ver>-x86_64.AppImage        installers (installers, from the two archives:
+#   dentalcraft_<ver>_amd64.deb              packaging/installers.sh in a Fedora 45 container,
+#   dentalcraft-<ver>-1.x86_64.rpm           see packaging/README.md)
+#   DentalCraft-<ver>.flatpak
+#   DentalCraft-<ver>-setup.exe
+#   DentalCraft-<ver>-x86_64.msi
+#   update.json, update.json.minisig         signed update manifest for the in-app updater (release)
+#   dentalcraft_<ver>_SHA256SUMS.txt         (release)
 #   (macOS universal .zip: DISABLED for now, see the build-macos job)
-#   SHA256SUMS
+# Secrets: DEPLOY_KEY_CORE, DEPLOY_KEY_ALIGNERS (private dependencies);
+# DENTALCRAFT_GPG_KEY (armored secret release key: signs the rpm and the Flatpak commit);
+# DENTALCRAFT_MINISIGN_KEY (minisign secret key file: signs update.json).
 # Called by release-please.yml when a release is created; run it by hand
 # (Actions > binaries > Run workflow, or `gh workflow run binaries.yml -f tag=vX.Y.Z`)
 # to backfill a tag. The sources are always those of the tag.
@@ -21,6 +31,10 @@ on:
       DEPLOY_KEY_CORE:
         required: true
       DEPLOY_KEY_ALIGNERS:
+        required: true
+      DENTALCRAFT_GPG_KEY:
+        required: true
+      DENTALCRAFT_MINISIGN_KEY:
         required: true
   workflow_dispatch:
     inputs:
@@ -146,7 +160,10 @@ jobs:
             d="$STAGE/LICENSES/$(basename "$(dirname "$f")")"
             mkdir -p "$d" && cp "$f" "$d/"
           done
-          cp README.md "$STAGE/"
+          # The licence (EULA) and the third-party notices, also built into the programs.
+          cp README.md LICENSE.md THIRD-PARTY-NOTICES.md "$STAGE/"
+          # How this copy was installed, read by the in-app updater (packaging/README.md).
+          echo standalone > "$STAGE/install-kind"
           case "$TARGET" in
             x86_64-pc-windows-gnu)
               cp "target/$TARGET/release/dentalcraft.exe" "target/$TARGET/release/dentalcraft-cli.exe" "$STAGE/"
@@ -165,12 +182,62 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The installers, built from the two archives so that every package holds the same
+  # binaries. packaging/installers.sh runs in a throwaway Fedora 45 container (the
+  # runner pod has Docker-in-Docker) and installs its tools there; --privileged because
+  # flatpak-builder runs the build in a bubblewrap sandbox. The secret key reaches the
+  # container as a mounted file, not through its environment.
+  installers:
+    name: installers
+    needs: [build]
+    runs-on: golgari-dev
+    steps:
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must look like vX.Y.Z, got '$TAG'" >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - name: Build the installers
+        env:
+          TAG: ${{ inputs.tag }}
+          DENTALCRAFT_GPG_KEY: ${{ secrets.DENTALCRAFT_GPG_KEY }}
+        run: |
+          keyfile="$RUNNER_TEMP/dentalcraft-gpg-key"
+          trap 'rm -f "$keyfile"' EXIT
+          (umask 077 && printf '%s\n' "$DENTALCRAFT_GPG_KEY" > "$keyfile")
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          docker run --rm --privileged \
+            -v "$PWD:/work/dentalcraft-app" -w /work/dentalcraft-app \
+            -v "$keyfile:/run/secrets/dentalcraft-gpg-key:ro" -e DENTALCRAFT_GPG_KEY_FILE=/run/secrets/dentalcraft-gpg-key \
+            -e TAG -e SOURCE_DATE_EPOCH \
+            registry.fedoraproject.org/fedora:45 bash packaging/installers.sh
+          ls -l installers
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers
+          path: installers/*
+          if-no-files-found: error
+          retention-days: 7
+
   # Billed GitHub-hosted runner: only macOS builds here.
   # DISABLED until GitHub-hosted runner billing is resolved. To re-enable:
   #   1. remove the `if: false` line below;
   #   2. add build-macos to `needs` of the release job;
-  #   3. in the release job, expect 3 archives in "Checksums" and restore the macOS
-  #      line in "Release notes" (kept there as a comment).
+  #   3. in the release job, add the macOS .zip to the assets of "Checksums" and restore
+  #      the macOS line in "Release notes" (kept there as a comment).
   build-macos:
     name: build macos_universal
     if: false
@@ -262,12 +329,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Only uploads. Runs on the self-hosted runner (hosted minutes are billed and can be
-  # blocked); the runner image may lack the gh CLI, so a pinned one is fetched if needed.
+  # Signs the update manifest, then uploads. Runs on the self-hosted runner (hosted
+  # minutes are billed and can be blocked); the runner image may lack the gh CLI, so a
+  # pinned one is fetched if needed.
   release:
     name: attach to release
     # build-macos is intentionally not listed: it is disabled (see its comment).
-    needs: [build]
+    needs: [build, installers]
     runs-on: golgari-dev
     permissions:
       contents: write
@@ -292,37 +360,61 @@ jobs:
           cp gh-dist/bin/gh "$HOME/.local/bin/gh"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           rm -rf gh.tar.gz gh-dist
+      # The tag's packaging/update-manifest.py
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
-          pattern: binaries-*
           path: dist
           merge-multiple: true
+      # update.json: version, date and the downloads the in-app updater installs (url,
+      # sha256, size); update.json.minisig: its signature. The site serves both.
+      - name: Update manifest
+        env:
+          DENTALCRAFT_MINISIGN_KEY: ${{ secrets.DENTALCRAFT_MINISIGN_KEY }}
+        run: |
+          VERSION="${TAG#v}"
+          python3 packaging/update-manifest.py --version "$VERSION" --assets dist --date "$(date -u -d "@$(git log -1 --format=%ct)" +%F)"
       - name: Checksums
         working-directory: dist
         run: |
+          VERSION="${TAG#v}"
+          assets="dentalcraft_${VERSION}_linux_x86_64.tar.gz dentalcraft_${VERSION}_windows_x86_64.zip DentalCraft-${VERSION}-x86_64.AppImage dentalcraft_${VERSION}_amd64.deb dentalcraft-${VERSION}-1.x86_64.rpm DentalCraft-${VERSION}.flatpak DentalCraft-${VERSION}-setup.exe DentalCraft-${VERSION}-x86_64.msi"
           ls -l
-          [ "$(ls | wc -l)" -eq 2 ] || { echo "expected 2 archives (Linux, Windows)" >&2; exit 1; }
-          sha256sum -- * > SHA256SUMS
-          cat SHA256SUMS
+          for f in $assets; do [ -f "$f" ] || { echo "missing release asset $f" >&2; exit 1; }; done
+          for f in *; do
+            case " $assets update.json update.json.minisig " in
+              *" $f "*) ;;
+              *) echo "unexpected file among the release assets: $f" >&2; exit 1 ;;
+            esac
+          done
+          sha256sum -- * > "dentalcraft_${VERSION}_SHA256SUMS.txt"
+          cat "dentalcraft_${VERSION}_SHA256SUMS.txt"
       - name: Upload to the release
         run: |
           gh release view "$TAG" >/dev/null   # the release must already exist
           gh release upload "$TAG" dist/* --clobber
       - name: Release notes
         run: |
+          VERSION="${TAG#v}"
           marker='<!-- binaries-note -->'
           gh release view "$TAG" --json body --jq .body > notes.md
           if ! grep -qF "$marker" notes.md; then
             {
               echo
               echo "$marker"
-              echo "## Binaries"
+              echo "## Downloads"
               echo
+              echo "- Windows x86_64 installers: \`DentalCraft-${VERSION}-setup.exe\` (for the current user, no administrator rights) or \`DentalCraft-${VERSION}-x86_64.msi\` (for all users)."
+              echo "- Linux x86_64 installers: Flatpak, \`.deb\` (Debian, Ubuntu), \`.rpm\` (Fedora), AppImage."
               # When macOS is re-enabled, append to the line below: "; macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`"
-              echo "- Linux x86_64: \`.tar.gz\`; Windows x86_64: \`.zip\` (\`dentalcraft.exe\`)."
-              echo "- Each archive also holds \`dentalcraft-cli\`: the command line and MCP server that drive DentalCraft headless or through a running app."
-              echo "- Verify the downloads against \`SHA256SUMS\`."
-              echo "- **The binaries are not code-signed.** Windows: SmartScreen may warn."
+              echo "- Standalone, without installation: Linux \`.tar.gz\`, Windows \`.zip\` (\`dentalcraft.exe\`)."
+              echo "- Updates: the \`.deb\` and the \`.rpm\` add the DentalCraft apt or dnf repository, the Flatpak updates from the DentalCraft Flatpak repository, the other versions check dentalcraft.app at startup."
+              echo "- Each download also holds \`dentalcraft-cli\`: the command line and MCP server that drive DentalCraft headless or through a running app."
+              echo "- Verify the downloads against \`dentalcraft_${VERSION}_SHA256SUMS.txt\`. The Linux packages and repositories are signed with the DentalCraft release key, https://dentalcraft.app/keys/dentalcraft.gpg."
+              echo "- **The Windows programs are not code-signed.** SmartScreen may warn."
             } >> notes.md
             gh release edit "$TAG" --notes-file notes.md
           fi

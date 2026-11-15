@@ -1,5 +1,5 @@
 //! `03 Support`: documentation links, ticket form, tickets list and the
-//! workstation panel (system info, diagnostics export).
+//! workstation panel (system info, diagnostics export, check for updates).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -813,6 +813,15 @@ impl DentalCraftApp {
                 .clicked()
             {
                 self.show_shortcuts = true;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if Button::secondary(t!("update-support-check"))
+                .icon(icons::ARROWS_CLOCKWISE)
+                .show(ui)
+                .clicked()
+            {
+                self.check_for_updates();
             }
         });
     }

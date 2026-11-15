@@ -20,7 +20,12 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// View format egui samples: egui expects gamma-encoded ("non sRGB-aware") textures.
 const SAMPLE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Selection mask: red where the selected mesh is the front surface, green
+/// its whole silhouette.
+const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 pub(crate) const PALETTE_SIZE: usize = 32;
+/// Widest selection outline (pixels).
+const MAX_OUTLINE_PX: f32 = 8.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -30,6 +35,8 @@ pub(crate) struct CameraUniform {
     pub params: [f32; 4],
     pub wire_color: [f32; 4],
     pub back_color: [f32; 4],
+    /// Tint of the mesh under the pointer (linear rgb, a = strength).
+    pub hover_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -39,7 +46,18 @@ pub(crate) struct MeshUniform {
     pub normal_mat: [[f32; 4]; 4],
     pub color: [f32; 4],
     pub params: [f32; 4],
+    /// x: 1 under the pointer.
+    pub extra: [f32; 4],
     pub palette: [[f32; 4]; PALETTE_SIZE],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct OutlineUniform {
+    /// Linear rgb, a = opacity.
+    pub color: [f32; 4],
+    /// x: radius (pixels), y: strength around the hidden parts.
+    pub params: [f32; 4],
 }
 
 /// Colour mode values understood by the shader.
@@ -141,6 +159,14 @@ pub(crate) struct Gpu {
     opaque: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     wire: wgpu::RenderPipeline,
+    /// The selected meshes where they are the front surface (mask red).
+    mask_visible: wgpu::RenderPipeline,
+    /// Their whole silhouette (mask green).
+    mask_full: wgpu::RenderPipeline,
+    /// The outline over the resolved image, from the mask.
+    outline: wgpu::RenderPipeline,
+    outline_bgl: wgpu::BindGroupLayout,
+    outline_buf: wgpu::Buffer,
 }
 
 /// Geometry and per-mesh uniforms on the GPU.
@@ -161,6 +187,11 @@ pub(crate) struct Targets {
     resolve: wgpu::TextureView,
     depth: wgpu::TextureView,
     pub sample_view: wgpu::TextureView,
+    /// The selection mask, multisampled like the scene (resolved into `mask`).
+    mask_msaa: Option<wgpu::TextureView>,
+    mask: wgpu::TextureView,
+    /// The mask and the outline uniform, for the outline pass.
+    outline_bg: wgpu::BindGroup,
 }
 
 impl Gpu {
@@ -170,10 +201,13 @@ impl Gpu {
             .find(|&n| {
                 let c = adapter.get_texture_format_features(COLOR_FORMAT);
                 let d = adapter.get_texture_format_features(DEPTH_FORMAT);
+                let m = adapter.get_texture_format_features(MASK_FORMAT);
+                let resolves = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE;
                 c.flags.sample_count_supported(n)
                     && d.flags.sample_count_supported(n)
-                    && c.flags
-                        .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+                    && m.flags.sample_count_supported(n)
+                    && c.flags.contains(resolves)
+                    && m.flags.contains(resolves)
             })
             .unwrap_or(1);
 
@@ -282,6 +316,112 @@ impl Gpu {
         };
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         let tri = wgpu::PrimitiveTopology::TriangleList;
+        // the selection mask: same meshes, uniforms and depth as the scene
+        let mask = |label: &str, compare: wgpu::CompareFunction, write: wgpu::ColorWrites| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_mask"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &vertex_buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: tri,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(compare),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_mask"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: MASK_FORMAT,
+                        blend: None,
+                        write_mask: write,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let outline_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("dc_viewport_outline"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
+        });
+        let outline_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dc_viewport_outline"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(size_of::<OutlineUniform>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let outline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("dc_viewport_outline"),
+            bind_group_layouts: &[Some(&outline_bgl)],
+            immediate_size: 0,
+        });
+        let outline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("dc_viewport_outline"),
+            layout: Some(&outline_layout),
+            vertex: wgpu::VertexState {
+                module: &outline_module,
+                entry_point: Some("vs_full"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_module,
+                entry_point: Some("fs_outline"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: alpha,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let outline_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dc_viewport_outline"),
+            size: size_of::<OutlineUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             opaque: pipeline("dc_viewport_opaque", "vs_main", "fs_main", tri, None, true),
             transparent: pipeline(
@@ -300,6 +440,19 @@ impl Gpu {
                 alpha,
                 false,
             ),
+            mask_visible: mask(
+                "dc_viewport_mask_visible",
+                wgpu::CompareFunction::LessEqual,
+                wgpu::ColorWrites::RED,
+            ),
+            mask_full: mask(
+                "dc_viewport_mask_full",
+                wgpu::CompareFunction::Always,
+                wgpu::ColorWrites::GREEN,
+            ),
+            outline,
+            outline_bgl,
+            outline_buf,
             device: device.clone(),
             queue: queue.clone(),
             sample_count,
@@ -465,6 +618,38 @@ impl Gpu {
             wgpu::TextureUsages::RENDER_ATTACHMENT,
             &[],
         );
+        let mask = tex(
+            "dc_viewport_mask",
+            MASK_FORMAT,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            &[],
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_msaa = (self.sample_count > 1).then(|| {
+            tex(
+                "dc_viewport_mask_msaa",
+                MASK_FORMAT,
+                self.sample_count,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                &[],
+            )
+            .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let outline_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dc_viewport_outline"),
+            layout: &self.outline_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.outline_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&mask),
+                },
+            ],
+        });
         Targets {
             size,
             msaa,
@@ -474,6 +659,9 @@ impl Gpu {
             }),
             resolve: resolve.create_view(&wgpu::TextureViewDescriptor::default()),
             depth: depth.create_view(&wgpu::TextureViewDescriptor::default()),
+            mask_msaa,
+            mask,
+            outline_bg,
         }
     }
 }
@@ -488,13 +676,14 @@ pub(crate) struct DrawItem {
     pub depth: f32,
 }
 
-/// Builds the per-mesh uniform.
+/// Builds the per-mesh uniform; `hovered` tints it with the hover colour.
 pub(crate) fn mesh_uniform(
     model: Mat4,
     view: Mat4,
     colors: &ColorData,
     opacity: f32,
     backface: u32,
+    hovered: bool,
 ) -> MeshUniform {
     let normal_mat = (view * model).inverse().transpose();
     let base = colors.base;
@@ -508,8 +697,60 @@ pub(crate) fn mesh_uniform(
             opacity.clamp(0.0, 1.0),
             colors.palette_len as f32,
         ],
+        extra: [f32::from(u8::from(hovered)), 0.0, 0.0, 0.0],
         palette: colors.palette,
     }
+}
+
+/// The selection outline of a frame.
+pub(crate) struct OutlinePass {
+    /// The selected meshes (their uniforms are written by the scene pass).
+    pub meshes: Vec<Arc<GpuMesh>>,
+    pub uniform: OutlineUniform,
+    /// Pixels the outline can touch: `[x, y, width, height]`.
+    pub scissor: [u32; 4],
+}
+
+impl OutlinePass {
+    /// The outline of `meshes` in `color` (linear), `width_px` wide, at
+    /// `hidden` strength around the parts other meshes cover; `bbox` is the
+    /// pixel box of the meshes (`None`: the whole target of `size`).
+    pub fn new(
+        meshes: Vec<Arc<GpuMesh>>,
+        color: Color,
+        width_px: f32,
+        hidden: f32,
+        bbox: Option<[f32; 4]>,
+        size: [u32; 2],
+    ) -> Self {
+        let r = width_px.clamp(1.0, MAX_OUTLINE_PX);
+        Self {
+            meshes,
+            uniform: OutlineUniform {
+                color: color.to_array(),
+                params: [r, hidden.clamp(0.0, 1.0), 0.0, 0.0],
+            },
+            scissor: scissor(bbox, r + 2.0, size),
+        }
+    }
+}
+
+/// `[x, y, width, height]` of `bbox` (`[min x, min y, max x, max y]`,
+/// pixels) grown by `pad` and clipped to a target of `size`; the whole target
+/// without a box.
+pub(crate) fn scissor(bbox: Option<[f32; 4]>, pad: f32, size: [u32; 2]) -> [u32; 4] {
+    let (w, h) = (size[0] as f32, size[1] as f32);
+    let [x0, y0, x1, y1] = bbox.unwrap_or([0.0, 0.0, w, h]);
+    let x0 = (x0 - pad).floor().clamp(0.0, w);
+    let y0 = (y0 - pad).floor().clamp(0.0, h);
+    let x1 = (x1 + pad).ceil().clamp(0.0, w);
+    let y1 = (y1 + pad).ceil().clamp(0.0, h);
+    [
+        x0 as u32,
+        y0 as u32,
+        (x1 - x0).max(0.0) as u32,
+        (y1 - y0).max(0.0) as u32,
+    ]
 }
 
 /// Everything the paint callback needs to render one frame.
@@ -519,6 +760,8 @@ pub(crate) struct FrameCallback {
     pub camera: CameraUniform,
     pub clear: Color,
     pub items: Vec<DrawItem>,
+    /// The selection outline, if something is selected and shown.
+    pub outline: Option<OutlinePass>,
 }
 
 impl FrameCallback {
@@ -556,7 +799,12 @@ impl FrameCallback {
                 view: &t.depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
+                    // the selection mask tests it
+                    store: if self.outline.is_some() {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
+                    },
                 }),
                 stencil_ops: None,
             }),
@@ -606,6 +854,82 @@ impl FrameCallback {
             pass.set_pipeline(&gpu.wire);
             draw_wire(&mut pass, it);
         }
+        drop(pass);
+        if let Some(o) = &self.outline {
+            self.record_outline(encoder, o);
+        }
+    }
+
+    /// The selection mask of the selected meshes against the depth of the
+    /// scene, then the outline over the resolved image.
+    fn record_outline(&self, encoder: &mut wgpu::CommandEncoder, o: &OutlinePass) {
+        let gpu = &self.gpu;
+        let t = &self.targets;
+        if o.meshes.is_empty() || o.scissor[2] == 0 || o.scissor[3] == 0 {
+            return;
+        }
+        let (view, resolve_target) = match &t.mask_msaa {
+            Some(m) => (m, Some(&t.mask)),
+            None => (&t.mask, None),
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dc_viewport_mask"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &t.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &gpu.camera_bg, &[]);
+        for pipeline in [&gpu.mask_visible, &gpu.mask_full] {
+            pass.set_pipeline(pipeline);
+            for m in o.meshes.iter().filter(|m| m.index_count > 0) {
+                pass.set_bind_group(1, &m.bind_group, &[]);
+                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                pass.set_vertex_buffer(1, m.attr.slice(..));
+                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+        }
+        drop(pass);
+        gpu.queue
+            .write_buffer(&gpu.outline_buf, 0, bytemuck::bytes_of(&o.uniform));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dc_viewport_outline"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &t.resolve,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let [x, y, w, h] = o.scissor;
+        pass.set_scissor_rect(x, y, w, h);
+        pass.set_pipeline(&gpu.outline);
+        pass.set_bind_group(0, &t.outline_bg, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -657,10 +981,36 @@ mod tests {
     fn uniform_layouts_are_16_byte_aligned() {
         assert_eq!(size_of::<CameraUniform>() % 16, 0);
         assert_eq!(size_of::<MeshUniform>() % 16, 0);
+        assert_eq!(size_of::<OutlineUniform>() % 16, 0);
+        assert_eq!(size_of::<CameraUniform>(), 64 * 2 + 16 * 4);
         assert_eq!(
             size_of::<MeshUniform>(),
-            64 * 2 + 16 * 2 + 16 * PALETTE_SIZE
+            64 * 2 + 16 * 3 + 16 * PALETTE_SIZE
         );
+    }
+
+    #[test]
+    fn the_outline_touches_the_box_of_the_meshes_and_its_width_only() {
+        // a box grown by the pad, inside the target
+        assert_eq!(
+            scissor(Some([100.0, 50.0, 200.0, 80.0]), 5.0, [800, 600]),
+            [95, 45, 110, 40]
+        );
+        // clipped at the edges; without a box, the whole target
+        assert_eq!(
+            scissor(Some([-30.0, 590.0, 10.0, 700.0]), 5.0, [800, 600]),
+            [0, 585, 15, 15]
+        );
+        assert_eq!(scissor(None, 5.0, [800, 600]), [0, 0, 800, 600]);
+        // off the target: nothing to draw
+        assert_eq!(
+            scissor(Some([900.0, 0.0, 950.0, 10.0]), 5.0, [800, 600])[2],
+            0
+        );
+        // the width is kept to a sane range
+        let o = OutlinePass::new(Vec::new(), Color::WHITE, 40.0, 2.0, None, [10, 10]);
+        assert_eq!(o.uniform.params[0], MAX_OUTLINE_PX);
+        assert_eq!(o.uniform.params[1], 1.0);
     }
 
     #[test]
@@ -688,21 +1038,31 @@ mod tests {
     }
 
     #[test]
-    fn shader_parses_and_validates() {
+    fn shaders_parse_and_validate() {
         use wgpu::naga;
-        let module = naga::front::wgsl::parse_str(include_str!("mesh.wgsl"))
-            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(include_str!("mesh.wgsl"))));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .expect("valid shader");
-        for entry in ["vs_main", "fs_main", "vs_wire", "fs_wire"] {
-            assert!(
-                module.entry_points.iter().any(|e| e.name == entry),
-                "{entry}"
-            );
+        for (source, entries) in [
+            (
+                include_str!("mesh.wgsl"),
+                &[
+                    "vs_main", "fs_main", "vs_wire", "fs_wire", "vs_mask", "fs_mask",
+                ][..],
+            ),
+            (include_str!("outline.wgsl"), &["vs_full", "fs_outline"][..]),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("valid shader");
+            for entry in entries {
+                assert!(
+                    module.entry_points.iter().any(|e| e.name == *entry),
+                    "{entry}"
+                );
+            }
         }
     }
 

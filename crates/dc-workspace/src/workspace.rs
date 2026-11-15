@@ -14,6 +14,7 @@ use dc_module_api::{
 };
 use dc_project::{Manifest, Project};
 use dc_session::builtins::{CASE_IMPORT, CASE_SET_ROLE};
+use dca_algo::diagnosis::edit::EditField;
 use egui::KeyboardShortcut;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -217,7 +218,9 @@ impl Running {
 
 /// Answer of a native file dialog (run on its own thread).
 pub(crate) enum DialogAnswer {
-    Import(Vec<PathBuf>),
+    /// The scan files chosen, and the role they are imported with (`None`:
+    /// the role chosen in the import inspector, else auto).
+    Import(Vec<PathBuf>, Option<ScanRole>),
     SaveAs(Option<PathBuf>, Option<Exit>),
     /// The folder or file a menu leaf asked for (`None`: cancelled).
     Leaf(&'static str, Option<PathBuf>),
@@ -257,13 +260,40 @@ pub struct Workspace {
     pub(crate) egui_ctx: Option<egui::Context>,
     pub(crate) view: ViewState,
     pub(crate) manual: crate::manual::Manual,
+    /// The component selected in the viewport and its gizmo.
+    pub(crate) selection: crate::select::Selection,
+    /// The view of the region of the selected tooth on the scan.
+    pub(crate) region: crate::region::RegionView,
+    /// The arch line of the final position: shown, its points moved.
+    pub(crate) archline: crate::archline::ArchLine,
     /// The separation parameters of "Separate teeth and gum" being dragged.
     pub(crate) segment: leaf::SegmentUi,
+    /// The final position parameter being dragged.
+    pub(crate) setup_ui: crate::setup::SetupUi,
+    /// The parameter of "Aligners" being dragged or typed, and the speed
+    /// chosen for the selected tooth.
+    pub(crate) staging_ui: crate::staging::StagingUi,
+    /// The production setting being dragged or typed.
+    pub(crate) production_ui: crate::production::ProductionUi,
+    /// The filter and the record chosen in "Clinical review".
+    pub(crate) review_ui: crate::review::ReviewUi,
+    /// The value of "Manual corrections" of the case analysis being typed
+    /// or dragged.
+    pub(crate) diagnosis_ui: leaf::DiagnosisUi,
+    /// Whether the case needs the bite before "Final position".
+    pub(crate) bite_check: leaf::BiteCheck,
     pub(crate) menu_view: MenuView,
     pub(crate) selected: Option<&'static str>,
     /// Role the user chose for the next import (`None` = auto): it applies
     /// to the next file dialog or drop and goes back to auto.
     pub(crate) import_role: Option<ScanRole>,
+    /// Thickness of the base of "Close with a base" in the Import scans
+    /// inspector (mm; the plugin's `base_height`, default 3).
+    pub(crate) base_height_mm: f32,
+    /// Whether each arch scan blob with no base is open underneath, asked
+    /// once per blob (`dca_algo::scan_base::is_open`) for the status of
+    /// "Close with a base".
+    pub(crate) scan_open: std::collections::BTreeMap<dc_case::BlobRef, bool>,
     import_spec: Option<CommandSpec>,
     set_role_spec: Option<CommandSpec>,
     pub(crate) timeline: TimelineState,
@@ -365,9 +395,20 @@ impl Workspace {
             egui_ctx: None,
             view: ViewState::default(),
             manual: crate::manual::Manual::default(),
+            selection: crate::select::Selection::default(),
+            region: crate::region::RegionView::default(),
+            archline: crate::archline::ArchLine::default(),
             segment: leaf::SegmentUi::default(),
+            setup_ui: crate::setup::SetupUi::default(),
+            staging_ui: crate::staging::StagingUi::default(),
+            production_ui: crate::production::ProductionUi::default(),
+            review_ui: crate::review::ReviewUi::default(),
+            diagnosis_ui: leaf::DiagnosisUi::default(),
+            bite_check: leaf::BiteCheck::default(),
             selected: None,
             import_role: None,
+            base_height_mm: dca_algo::scan_base::HEIGHT_DEFAULT_MM as f32,
+            scan_open: std::collections::BTreeMap::new(),
             import_spec,
             set_role_spec,
             timeline: TimelineState::default(),
@@ -554,6 +595,10 @@ impl Workspace {
         {
             self.close_tool();
         }
+        // the view of a tooth region belongs to the 3D teeth
+        if command != Some(leaf::BUILD_TEETH) {
+            self.set_region_view(false);
+        }
         self.selected = Some(id);
         self.module.select(id);
         self.menu_view.reveal(&self.menu, id);
@@ -582,6 +627,7 @@ impl Workspace {
     pub(crate) fn clear_selection(&mut self) {
         self.selected = None;
         self.close_tool();
+        self.set_region_view(false);
     }
 
     /// The key of a command of the module ([`CommandDesc::shortcut`]): it
@@ -618,7 +664,7 @@ impl Workspace {
             if self.command_running() {
                 self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
             } else {
-                self.request_import_dialog();
+                self.request_import_dialog(None);
             }
             return;
         }
@@ -680,6 +726,17 @@ impl Workspace {
                         .with_detail(e.to_string()),
                 );
             }
+        }
+    }
+
+    /// The button "Import the bite scans" of Bite (`oa.import_bite`): the
+    /// file dialog, then the files are imported with the role bite. Nothing
+    /// runs before the answer; refused while a command runs.
+    pub(crate) fn import_bite_scans(&mut self) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+        } else {
+            self.request_import_dialog(Some(ScanRole::Bite));
         }
     }
 
@@ -783,10 +840,27 @@ impl Workspace {
     /// Gives scan `scan_id`, now `from`, the role `to` (`case.set-role`: a
     /// scan already there takes `from`). One undoable change; the scan is
     /// marked as chosen by the user, and what the module cleared is reported.
-    /// Refused while an import or command runs.
+    /// An arch scan moved to the other arch goes through the module's
+    /// `aligners.case.set-arch` when it has it: its tooth marks, colours and
+    /// teeth are renumbered instead of cleared. Refused while an import or
+    /// command runs.
     pub fn set_scan_role(&mut self, scan_id: Uuid, from: ScanRole, to: ScanRole) {
         if self.command_running() {
             self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        let arches = from != ScanRole::Bite && to != ScanRole::Bite;
+        if from != to
+            && arches
+            && let Some(spec) = self.module_spec(leaf::SET_ARCH)
+        {
+            let params = json!({ "scan": import::role_id(from), "arch": import::role_id(to) });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::SET_ARCH),
+                "ws-job-command",
+            );
             return;
         }
         let Some(spec) = self.set_role_spec else {
@@ -798,6 +872,91 @@ impl Workspace {
             "scan_id": scan_id.to_string(),
         });
         self.run_spec(spec, params, SpecKind::SetRole, "ws-job-command");
+    }
+
+    /// Turns the occlusal side of the arch scan `role` over, or back
+    /// (`aligners.case.set-arch` with `flip_occlusal`). One undoable change.
+    /// Refused while an import or command runs.
+    pub fn flip_occlusal(&mut self, role: ScanRole) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::SET_ARCH) {
+            let params = json!({ "scan": import::role_id(role), "flip_occlusal": true });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::SET_ARCH),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// Closes the arch scan `role` with a flat base `height_mm` thick
+    /// (`aligners.case.make-base`). One undoable change. Refused while an
+    /// import or command runs.
+    pub fn close_with_base(&mut self, role: ScanRole, height_mm: f64) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::MAKE_BASE) {
+            let params = json!({ "arch": import::role_id(role), "height_mm": height_mm });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::MAKE_BASE),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// Writes by hand (`Some`, mm) or resets to the computed one (`None`) a
+    /// value of the case analysis of the arch `role`
+    /// (`aligners.diagnosis.edit-values`). One undoable change; the
+    /// complexity follows. Refused while an import or command runs.
+    pub fn edit_diagnosis(&mut self, role: ScanRole, field: EditField, value: Option<f64>) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(leaf::DIAGNOSIS_EDIT) {
+            let params = json!({
+                "arch": import::role_id(role),
+                "values": { field.key(): value },
+            });
+            self.run_spec(
+                spec,
+                params,
+                SpecKind::Leaf(leaf::DIAGNOSIS_EDIT),
+                "ws-job-command",
+            );
+        }
+    }
+
+    /// The module's command `id`, when it has one.
+    pub(crate) fn module_spec(&self, id: &str) -> Option<CommandSpec> {
+        self.specs.iter().copied().find(|s| s.id == id)
+    }
+
+    /// Runs the module's command `id` with `params` in the background as the
+    /// command of a button (`name_key` in the status bar, with its progress
+    /// and a cancel; one undo step when it changes the case, its report when
+    /// it ends). Refused, with a notification, while another command runs.
+    pub(crate) fn run_button_command(
+        &mut self,
+        id: &'static str,
+        params: Value,
+        name_key: &'static str,
+    ) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.module_spec(id) {
+            self.run_spec(spec, params, SpecKind::Leaf(id), name_key);
+        }
     }
 
     /// Runs `spec` with `params` on a snapshot of the current state in the
@@ -988,6 +1147,20 @@ impl Workspace {
         self.confirm_exit.is_some() || self.show_help || self.dialog.is_some()
     }
 
+    /// `true` while a request to leave ([`Workspace::request_quit`]) may
+    /// still end in its action: a save runs or waits, a dialog asks the
+    /// user (unsaved changes, where to save), or an action waits for the
+    /// shell. `false` once that is over without leaving (the user chose to
+    /// stay).
+    pub fn is_leaving(&self) -> bool {
+        self.is_saving()
+            || self.queued_save.is_some()
+            || self.leave_after_save.is_some()
+            || self.confirm_exit.is_some()
+            || self.dialog.is_some()
+            || !self.actions.is_empty()
+    }
+
     /// Leaves towards `exit` once nothing is left to save: a project that
     /// has a file is saved first (as the automatic save would), one never
     /// saved or opened read-only asks the user; a save that runs ends first.
@@ -1102,7 +1275,7 @@ impl Workspace {
 
     // ------------------------------------------------------------ dialogs
 
-    fn request_import_dialog(&mut self) {
+    fn request_import_dialog(&mut self, role: Option<ScanRole>) {
         if !self.native_dialogs {
             self.dialog_requests += 1;
             return;
@@ -1117,7 +1290,7 @@ impl Workspace {
             if let Some(c) = ctx {
                 c.request_repaint();
             }
-            DialogAnswer::Import(files)
+            DialogAnswer::Import(files, role)
         });
     }
 
@@ -1189,7 +1362,12 @@ impl Workspace {
                 Ok(answer) => {
                     self.dialog = None;
                     match answer {
-                        DialogAnswer::Import(files) => self.import_files(files),
+                        DialogAnswer::Import(files, role) => {
+                            if role.is_some() && !files.is_empty() {
+                                self.import_role = role;
+                            }
+                            self.import_files(files);
+                        }
                         DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then, true),
                         DialogAnswer::SaveAs(None, _) => {}
                         DialogAnswer::Leaf(id, path) => self.answer_leaf_input(id, path),
@@ -1314,6 +1492,10 @@ impl Workspace {
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        // an arch chosen by hand: what it cleared, as a role change says it
+        if id == leaf::SET_ARCH {
+            self.show_role_report(out);
+        }
         // new tooth marks: what they dropped, and the arches not numbered
         if id == leaf::FIND_TEETH {
             for toast in crate::manual::marks_toasts(out) {
@@ -1337,6 +1519,13 @@ impl Workspace {
         }
         if id == leaf::SEGMENT {
             self.view.model = crate::view::Model::Scan;
+        }
+        // the study models just built are shown: their layer, at the initial
+        // position (where they stand for their arch)
+        if id == leaf::STUDY_MODELS {
+            self.view.layers.study = true;
+            self.timeline.current = 0;
+            self.timeline.playing = false;
         }
         // what to check before delivery (the doubts the separation left)
         if id == leaf::AUTO || id == leaf::EXPORT_ALL {

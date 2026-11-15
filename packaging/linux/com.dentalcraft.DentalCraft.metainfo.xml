@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata of the DentalCraft desktop application, installed as
+     share/metainfo/com.dentalcraft.DentalCraft.metainfo.xml by every Linux
+     package. packaging/installers.sh fills in the release version and date. -->
+<component type="desktop-application">
+  <id>com.dentalcraft.DentalCraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary=https://dentalcraft.app/en/licence/</project_license>
+  <name>DentalCraft</name>
+  <summary>Dental CAD for the practice and the lab</summary>
+  <summary xml:lang="it">CAD dentale per studio e laboratorio</summary>
+  <description>
+    <p>DentalCraft is an application for digital dentistry that you install on your practice or lab computer. It starts with clear aligner planning, from the intraoral scan to the print.</p>
+    <p xml:lang="it">DentalCraft è un'applicazione per l'odontoiatria digitale, da installare sul computer dello studio o del laboratorio. Si parte dalla pianificazione degli allineatori, dalla scansione intraorale alla stampa.</p>
+    <p>DentalCraft is not a medical device: do not use it on patients or for clinical decisions. It is free of charge for non-clinical use under the DentalCraft end-user licence agreement.</p>
+    <p xml:lang="it">DentalCraft non è un dispositivo medico: non usarlo sui pazienti né per decisioni cliniche. È gratuito per uso non clinico secondo il contratto di licenza d'uso di DentalCraft.</p>
+  </description>
+  <launchable type="desktop-id">com.dentalcraft.DentalCraft.desktop</launchable>
+  <url type="homepage">https://dentalcraft.app/</url>
+  <developer id="app.dentalcraft">
+    <name>Daniele Viti</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>dentalcraft</binary>
+    <binary>dentalcraft-cli</binary>
+  </provides>
+  <recommends>
+    <display_length compare="ge">1280</display_length>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Entry point of the DentalCraft AppImage.
+#   DentalCraft-<V>-x86_64.AppImage [args]          the app
+#   DentalCraft-<V>-x86_64.AppImage --cli [args]    dentalcraft-cli, the command line and MCP server
+# A symlink to the AppImage named dentalcraft-cli also runs the command line.
+HERE=$(dirname "$(readlink -f "$0")")
+if [ "${1:-}" = --cli ]; then
+  shift
+  exec "$HERE/usr/bin/dentalcraft-cli" "$@"
+fi
+case "$(basename "${ARGV0:-$0}")" in
+  dentalcraft-cli*) exec "$HERE/usr/bin/dentalcraft-cli" "$@" ;;
+esac
+exec "$HERE/usr/bin/dentalcraft" "$@"

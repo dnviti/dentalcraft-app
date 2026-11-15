@@ -9,6 +9,7 @@ const BANNED: &[(&str, bool)] = &[
     ("6-dof", false),
     ("blake3", false),
     ("manifold", false),
+    ("watertight", false),
     ("bvh", true),
     ("voxel", false),
     ("signed distance", false),

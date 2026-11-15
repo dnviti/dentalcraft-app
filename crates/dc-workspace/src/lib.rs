@@ -27,7 +27,10 @@
 //! Tests and headless tools use [`Workspace::new_headless`] (no GPU, no
 //! native file dialogs).
 
+mod aligner;
+mod archline;
 pub mod autosave;
+mod bite;
 mod function;
 mod icons;
 pub mod import;
@@ -37,7 +40,13 @@ mod leaf;
 mod manual;
 mod menu;
 mod overlay;
+mod production;
 mod project;
+mod region;
+mod review;
+mod select;
+mod setup;
+mod staging;
 pub mod timeline;
 mod ui;
 mod view;

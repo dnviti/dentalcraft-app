@@ -25,7 +25,7 @@ use dc_module_api::{CommandSpec, Module};
 use dc_project::{AppInfo, Project};
 use dc_workspace::autosave::DELAY_S;
 use dc_workspace::{Workspace, WorkspaceAction};
-use dca_model::{AlignersState, MODULE_ID};
+use dca_model::{AlignersState, ClosedBy, MODULE_ID};
 use dca_module::AlignersModule;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -302,6 +302,18 @@ const FILES: &str = "writes files only; the case it returns is the one it got";
 /// same data the other steps change and the round trip compares.
 const BITE_SCANS: &str = "needs the bite scans of a patient";
 
+/// A move of `mm` of the upper arch towards the lower one (from the centre
+/// of the upper scan to the centre of the lower one).
+fn towards_lower(ws: &Workspace, mm: f32) -> [f32; 3] {
+    let centre = |role: ScanRole| {
+        let s = ws.state();
+        let m = s.mesh(&s.case.scan(role).unwrap().mesh).unwrap();
+        m.positions.iter().copied().sum::<glam::Vec3>() / m.positions.len() as f32
+    };
+    let d = (centre(ScanRole::Lower) - centre(ScanRole::Upper)).normalize() * mm;
+    d.to_array()
+}
+
 fn null(_: &Workspace, _: &Path) -> Value {
     Value::Null
 }
@@ -323,6 +335,34 @@ fn plan() -> Vec<(&'static str, Plan)> {
         (
             "aligners.settings.study-models",
             Run(|_, _| json!({ "style": "abo", "total_height_mm": 80.0 })),
+        ),
+        // the parameters of the final position and the steps of Move a tooth
+        (
+            "aligners.settings.setup",
+            Run(
+                |_, _| json!({ "ipr_zone": "anterior", "advance_max_mm": 1.5, "midline": "balance", "adjust_step_mm": 0.2 }),
+            ),
+        ),
+        // the parameters of the aligners and of their calendar
+        (
+            "aligners.settings.staging",
+            Run(
+                |_, _| json!({ "pattern": "proportional", "step_linear_mm": 0.2, "overcorrection": true, "interval_policy": "adaptive", "interval_days": 10, "start_date": "2026-11-16" }),
+            ),
+        ),
+        // the production settings: trim, shell, stamp, bite, ramps, quality
+        (
+            "aligners.settings.production",
+            Run(|_, _| {
+                json!({
+                    "trim": { "mode": "scalloped", "margin_gap_mm": 1.0, "insertion_axis": "common" },
+                    "shell": { "shell_thickness_mm": 0.8 },
+                    "stamp": { "tooth": "M7L", "code": "CASE-1", "date": "start" },
+                    "bite": { "mode": "manual", "thickness_mm": 0.6 },
+                    "ramps": { "width_mm": 4.0 },
+                    "quality": "light",
+                })
+            }),
         ),
         // a new demo arch in the place of the lower one
         (
@@ -364,14 +404,81 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.diagnosis.little-index", Run(|_, _| json!({}))),
         ("aligners.diagnosis.bolton", Run(|_, _| json!({}))),
         ("aligners.diagnosis.complexity", Run(|_, _| json!({}))),
+        // the clinician's own values over the computed ones: the complexity follows
+        (
+            "aligners.diagnosis.edit-values",
+            Run(
+                |_, _| json!({ "arch": "lower", "values": { "discrepancy": -9.5, "little": 11.0, "midline_offset": 3.0 } }),
+            ),
+        ),
+        // with both arches the bite comes before the final position
+        ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
+        // the upper arch pushed into the lower one, then the interpenetration
+        // corrected: the arch moved and the report of the bite with it
+        (
+            "aligners.components.transform",
+            Run(|ws, _| {
+                let t = towards_lower(ws, 0.4);
+                json!({ "component": "scan", "arch": "upper", "move": { "t": t, "q": [0.0, 0.0, 0.0, 1.0] } })
+            }),
+        ),
+        ("aligners.occlusion.bite-correct", Run(|_, _| json!({}))),
+        // the aligner ends one tooth early on the lower right: the final
+        // position keeps the tooth behind it at rest and records the end
+        (
+            "aligners.production.aligner-end",
+            Run(|ws, _| {
+                let mut right: Vec<_> = aligners(ws)
+                    .arch_teeth(ScanRole::Lower)
+                    .into_iter()
+                    .filter(|f| f.quadrant() == 4)
+                    .collect();
+                right.sort_by_key(|f| f.position());
+                json!({ "action": "set", "fdi": right[right.len() - 2].get() })
+            }),
+        ),
         ("aligners.planning.setup.automatic", Run(|_, _| json!({}))),
+        // the arch line of the lower arch drawn by hand: kept, final position again
+        (
+            "aligners.planning.setup.line",
+            Run(|ws, _| {
+                let points: Vec<[f64; 3]> = aligners(ws).setup.lines[&ScanRole::Lower]
+                    .iter()
+                    .map(|p| [p.x, p.y - 0.5, p.z])
+                    .collect();
+                json!({ "arch": "lower", "points": points })
+            }),
+        ),
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (
             "aligners.planning.schedule",
             Run(|_, _| json!({ "start_date": "2026-11-16" })),
         ),
         ("aligners.planning.aligners", Run(|_, _| json!({}))),
-        ("aligners.occlusion.virtual-bite", Run(|_, _| json!({}))),
+        // a tooth slowed: the aligners of its arch computed again with it
+        (
+            "aligners.planning.tooth-speed",
+            Run(|ws, _| json!({ "fdi": lower_crown(ws, 1), "speed": 0.5 })),
+        ),
+        // the clinical review: classified, one item decided, one value
+        // chosen, the rest confirmed together
+        ("aligners.review.classify", Run(|_, _| json!({}))),
+        (
+            "aligners.review.decide",
+            Run(|ws, _| json!({ "key": aligners(ws).review[0].key() })),
+        ),
+        (
+            "aligners.review.set-value",
+            Run(|ws, _| {
+                let r = aligners(ws)
+                    .review
+                    .into_iter()
+                    .find(|r| r.kind == dca_model::ReviewKind::Attachment)
+                    .unwrap();
+                json!({ "key": r.key(), "value": "rotation" })
+            }),
+        ),
+        ("aligners.review.bulk", Run(|_, _| json!({}))),
         ("aligners.occlusion.contact-map", Run(null)),
         (
             "aligners.occlusion.bite-with-aligners",
@@ -384,8 +491,21 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Skip(BITE_SCANS),
         ),
         ("aligners.occlusion.align", Skip(BITE_SCANS)),
+        // the final position of the upper arch back to the initial one; the
+        // pipeline computes it again
+        (
+            "aligners.planning.setup.reset",
+            Run(|_, _| json!({ "arch": "upper" })),
+        ),
         // the whole pipeline as one step
         ("aligners.auto", Run(null)),
+        // the aligner in the view: the preview of aligner 1 of both arches,
+        // then its exact aligner at the draft quality, kept with the case
+        ("aligners.view.aligner", Run(|_, _| json!({ "stage": 1 }))),
+        (
+            "aligners.view.aligner-exact",
+            Run(|_, _| json!({ "stage": 1, "quality": "draft" })),
+        ),
         // corrections of the built teeth and of the plan
         (
             "aligners.preparation.reconstruction.rebuild-tooth",
@@ -395,9 +515,32 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.manual.rebuild-tooth",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
         ),
+        // a query of the region and margin line of a tooth: the case is not touched
+        (
+            "aligners.manual.tooth-region",
+            Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
+        ),
         (
             "aligners.planning.movements",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 3), "mesial_mm": 0.3 })),
+        ),
+        // the exact values of a tooth, locked
+        (
+            "aligners.planning.movements",
+            Run(
+                |ws, _| json!({ "fdi": lower_crown(ws, 4), "exact": true, "rotation_deg": 4.0, "mesial_mm": -0.2, "lock": true }),
+            ),
+        ),
+        // the gizmo of the viewport: a tooth scaled, the lower arch moved
+        (
+            "aligners.components.transform",
+            Run(|ws, _| json!({ "component": "tooth", "fdi": lower_crown(ws, 3), "scale": 1.05 })),
+        ),
+        (
+            "aligners.components.transform",
+            Run(
+                |_, _| json!({ "component": "gingiva", "arch": "lower", "move": { "t": [0.2, -0.1, 0.3], "q": [0.0, 0.0, 0.0087, 0.99996] } }),
+            ),
         ),
         // the report of 2026-11-13: the brush over built teeth, then the marks
         (
@@ -501,6 +644,28 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.followup.tracking",
             Run(|_, _| json!({ "arch": "lower" })),
         ),
+        // the arch of a scan by hand: the occlusal side turned over and back,
+        // then the two arches swapped (renumbered, their 3D teeth built again)
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "flip_occlusal": true })),
+        ),
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "flip_occlusal": true })),
+        ),
+        (
+            "aligners.case.set-arch",
+            Run(|_, _| json!({ "scan": "lower", "arch": "upper" })),
+        ),
+        // the demo scans are closed: the case stays as it is (an open scan
+        // closed and saved: `a_scan_closed_with_a_base_comes_back_after_save`)
+        (
+            "aligners.case.make-base",
+            // the upper scan now: the old lower one, with all its tooth marks
+            // (the swapped upper had its marks cleared: no arch frame)
+            Run(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
+        ),
         // the scans
         (
             "case.import",
@@ -530,12 +695,16 @@ fn plan() -> Vec<(&'static str, Plan)> {
                 json!({ "from": "bite", "to": "bite", "scan_id": scan.id.to_string() })
             }),
         ),
+        // the study models are kept in the case (a coarse voxel keeps it short)
+        (
+            "aligners.output.study-models",
+            Run(|_, _| json!({ "voxel_mm": 1.0, "tolerance_mm": 0.1 })),
+        ),
         // what only writes files
         ("aligners.output.export-stl", Skip(FILES)),
         ("aligners.output.print-check", Skip(FILES)),
         ("aligners.output.manifest", Skip(FILES)),
         ("aligners.output.report", Skip(FILES)),
-        ("aligners.output.study-models", Skip(FILES)),
         ("aligners.output.export-all", Skip(FILES)),
         ("aligners.production.shell.automatic", Skip(FILES)),
         ("aligners.production.base-labels", Skip(FILES)),
@@ -587,13 +756,137 @@ fn every_change_comes_back_after_save_and_reopen() {
             (start.elapsed() - ran).as_secs_f64()
         );
         // undo after an edit: the file goes back with it
-        if id == "aligners.preparation.segmentation.clean-borders" {
+        if matches!(
+            id,
+            "aligners.preparation.segmentation.clean-borders" | "aligners.diagnosis.edit-values"
+        ) {
             assert!(ws.undo());
             save_and_compare(&mut ws, &path, "undo");
             assert!(ws.redo());
             save_and_compare(&mut ws, &path, "redo");
         }
     }
+    // the study models of both arches were saved and read back with the rest
+    // (the last change, compared with the file above)
+    assert_eq!(aligners(&ws).study_models.len(), 2);
+}
+
+/// The lower demo arch opened under the gum (the demo scan is closed): the
+/// faces of its lowest 4 mm along the occlusal axis (+Z) removed.
+fn open_lower(state: &CaseState) -> TriMesh {
+    let mesh = state
+        .mesh(&state.case.scan(ScanRole::Lower).unwrap().mesh)
+        .unwrap();
+    let lowest = mesh
+        .positions
+        .iter()
+        .map(|p| p.z)
+        .fold(f32::INFINITY, f32::min);
+    let mut open = TriMesh::clone(mesh);
+    open.tris.retain(|t| {
+        !t.iter()
+            .all(|&i| mesh.positions[i as usize].z < lowest + 4.0)
+    });
+    open
+}
+
+#[test]
+fn a_scan_closed_with_a_base_comes_back_after_save() {
+    let mut state = demo_state(&["lower"]);
+    let role = ScanRole::Lower;
+    let r = state.blobs.insert(open_lower(&state));
+    state.case.scans[0].mesh = r;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("base.dcprj");
+    let mut ws = saved(state, &path);
+    run(
+        &mut ws,
+        "aligners.case.make-base",
+        json!({ "height_mm": 2.5 }),
+    );
+    let closed = ws.state().mesh(&ws.state().case.scans[0].mesh).unwrap();
+    assert!(closed.validate().is_watertight());
+    let labels = ws.state().mesh(&aligners(&ws).labels[&role]).unwrap();
+    assert_eq!(
+        labels.vertex_labels.as_ref().unwrap().len(),
+        closed.positions.len()
+    );
+    save_and_compare(&mut ws, &path, "make-base");
+    // undo: the open scan, saved again
+    assert!(ws.undo());
+    assert!(
+        !ws.state()
+            .mesh(&ws.state().case.scans[0].mesh)
+            .unwrap()
+            .validate()
+            .is_watertight()
+    );
+    save_and_compare(&mut ws, &path, "make-base undone");
+}
+
+#[test]
+fn an_open_scan_closed_at_import_comes_back_after_save_undo_and_redo() {
+    let dir = tempfile::tempdir().unwrap();
+    let stl = dir.path().join("patient_lower.stl");
+    let open = open_lower(&demo_state(&["lower"]));
+    dc_mesh::io::write(&stl, &open, MeshFormat::Stl).unwrap();
+    let path = dir.path().join("import.dcprj");
+    let mut ws = saved(CaseState::default(), &path);
+    run(
+        &mut ws,
+        "aligners.case.import-scans",
+        json!({ "files": [{ "path": stl.to_string_lossy(), "role": "lower" }] }),
+    );
+    // the case scan is the closed solid, the scan as read its start
+    let read = dc_case::import::prepare(&stl, &JobCtx::detached())
+        .unwrap()
+        .mesh;
+    assert!(!read.validate().is_watertight());
+    let check = |ws: &Workspace, by: ClosedBy| {
+        let scan = ws.state().case.scan(ScanRole::Lower).unwrap();
+        let closed = ws.state().mesh(&scan.mesh).unwrap();
+        assert!(closed.validate().is_watertight());
+        let record = aligners(ws).scan_base(&scan.mesh).unwrap();
+        assert_eq!(record.closed_by, by);
+        let back = dca_algo::scan_base::open_part(closed, &record).unwrap();
+        assert_eq!(back, *read);
+    };
+    check(&ws, ClosedBy::Import);
+    save_and_compare(&mut ws, &path, "import closed");
+    // the import undone and done again, each saved: one step with its closure
+    assert!(ws.undo());
+    assert!(ws.state().case.scans.is_empty());
+    save_and_compare(&mut ws, &path, "import undone");
+    assert!(ws.redo());
+    check(&ws, ClosedBy::Import);
+    save_and_compare(&mut ws, &path, "import redone");
+    // read back from the file: the record and the closed scan
+    let p = reopen(&path);
+    let file = p
+        .case_state
+        .module_data::<AlignersState>(MODULE_ID)
+        .unwrap()
+        .clone();
+    assert_eq!(file.scan_bases, aligners(&ws).scan_bases);
+    assert_eq!(file.scan_bases.len(), 1);
+    // a workspace on the file reopened goes on from it: close again by hand
+    let mut ws = Workspace::new_headless(module(), Some(p), Some(path.clone()));
+    check(&ws, ClosedBy::Import);
+    run(
+        &mut ws,
+        "aligners.case.make-base",
+        json!({ "height_mm": 4.0 }),
+    );
+    check(&ws, ClosedBy::Hand);
+    save_and_compare(&mut ws, &path, "closed again by hand");
+    // undo and redo, each saved: the record follows the scan
+    assert!(ws.undo());
+    check(&ws, ClosedBy::Import);
+    save_and_compare(&mut ws, &path, "undo");
+    assert!(ws.redo());
+    check(&ws, ClosedBy::Hand);
+    save_and_compare(&mut ws, &path, "redo");
 }
 
 /// A command that renames the patient at once: a change of the case.

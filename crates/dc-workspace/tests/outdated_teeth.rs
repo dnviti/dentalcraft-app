@@ -202,7 +202,80 @@ fn the_inspector_and_the_view_say_the_3d_teeth_are_out_of_date_after_a_mark_move
     h.run();
     assert!(h.query_by_label("Out of date").is_some());
     assert!(
-        h.query_by_label_contains("changed after the 3D teeth were built (Lower)")
+        h.query_by_label_contains("Changed after the 3D teeth were built (Lower: tooth marks)")
+            .is_some()
+    );
+}
+
+/// The inspector of 3D teeth on `state`, drawn once.
+fn teeth_inspector(state: CaseState) -> Harness<'static, Workspace> {
+    let project = Project::new(
+        AppInfo {
+            version: "0.1.0".into(),
+            commit: "test".into(),
+        },
+        dc_workspace::now_rfc3339(),
+        state,
+    );
+    let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), Some(project), None);
+    ws.select_item("aligners.teeth.build");
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                ws.show(ui);
+            },
+            ws,
+        );
+    h.run();
+    h
+}
+
+/// The user's case: both arches built, then the bite moves the upper arch
+/// with its 3D teeth. Neither arch is out of date, also once the project is
+/// saved and opened again, so the view draws the 3D teeth of both.
+#[test]
+fn the_bite_after_the_build_leaves_the_3d_teeth_of_both_arches_up_to_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = exec(
+        &CaseState::default(),
+        "aligners.demo",
+        json!({ "arch": "lower" }),
+    );
+    let s = exec(&s, "aligners.demo", json!({ "arch": "upper", "seed": 11 }));
+    let s = exec(&s, "aligners.teeth.build", Value::Null);
+    let both =
+        |s: &CaseState| [ScanRole::Upper, ScanRole::Lower].map(|r| data(s).teeth_out_of_date(r));
+    assert_eq!(both(&s), [false, false]);
+    let bitten = exec(&s, "aligners.occlusion.virtual-bite", Value::Null);
+    assert_eq!(both(&bitten), [false, false]);
+    let back = reopened(&bitten, dir.path());
+    assert_eq!(both(&back), [false, false]);
+    let h = teeth_inspector(back);
+    assert!(h.query_by_label("Out of date").is_none());
+    assert!(h.query_by_label("Arch without 3D teeth").is_none());
+}
+
+/// One arch without its tooth colours: the build makes the other one and
+/// the inspector names the arch left without 3D teeth and why.
+#[test]
+fn the_inspector_names_an_arch_left_without_3d_teeth() {
+    let s = exec(
+        &CaseState::default(),
+        "aligners.demo",
+        json!({ "arch": "lower" }),
+    );
+    let mut s = exec(&s, "aligners.demo", json!({ "arch": "upper", "seed": 11 }));
+    let mut d = data(&s).clone();
+    d.labels.remove(&ScanRole::Upper);
+    s.set_module(MODULE_ID, dc_case::ModuleState::new(d));
+    let s = exec(&s, "aligners.teeth.build", Value::Null);
+    assert!(built(&s));
+    let h = teeth_inspector(s);
+    assert!(h.query_by_label("Arch without 3D teeth").is_some());
+    assert!(
+        h.query_by_label_contains("Upper: no 3D teeth, its teeth and gum are not separated")
             .is_some()
     );
 }

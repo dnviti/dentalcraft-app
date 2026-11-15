@@ -10,6 +10,8 @@ struct CameraU {
     params: vec4<f32>,
     wire_color: vec4<f32>,
     back_color: vec4<f32>,
+    // tint of the mesh under the pointer (linear rgb, a = strength)
+    hover_color: vec4<f32>,
 };
 
 struct MeshU {
@@ -21,6 +23,8 @@ struct MeshU {
     // y: backface mode (0 same, 1 tint, 2 cull)
     // z: opacity, w: palette colour count (labels 1..)
     params: vec4<f32>,
+    // x: 1 = under the pointer (hover tint)
+    extra: vec4<f32>,
     // [0] = unlabeled colour, [1..] = label colours (linear)
     palette: array<vec4<f32>, PALETTE_SIZE>,
 };
@@ -98,7 +102,8 @@ fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     if !front && backface == 1u {
         base = mix(base, cam.back_color.rgb, cam.back_color.a);
     }
-    let rgb = base * (ambient + vec3<f32>(0.72 * ndl)) + vec3<f32>(spec);
+    var rgb = base * (ambient + vec3<f32>(0.72 * ndl)) + vec3<f32>(spec);
+    rgb = mix(rgb, cam.hover_color.rgb, cam.hover_color.a * mesh.extra.x);
     return vec4<f32>(rgb, in.color.a * mesh.params.z);
 }
 
@@ -118,4 +123,22 @@ fn vs_wire(
 @fragment
 fn fs_wire() -> @location(0) vec4<f32> {
     return vec4<f32>(cam.wire_color.rgb, cam.wire_color.a * mesh.params.z);
+}
+
+// Selection mask: the selected mesh again, in a red/green target. The
+// "visible" pipeline tests the depth of the scene (red: where the mesh is the
+// front surface), the "full" one does not (green: its whole silhouette).
+@vertex
+fn vs_mask(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    let world = mesh.model * vec4<f32>(pos, 1.0);
+    let vp = cam.view * world;
+    var clip = cam.proj * vp;
+    // a hair towards the camera, so the front surface passes its own depth
+    clip.z = clip.z - cam.params.y * 0.05 * clip.w;
+    return clip;
+}
+
+@fragment
+fn fs_mask() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 0.0, 1.0);
 }

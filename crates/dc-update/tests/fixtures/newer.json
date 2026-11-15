@@ -1,0 +1,33 @@
+{
+  "version": "999.0.0",
+  "tag": "v999.0.0",
+  "date": "2026-11-15",
+  "notes_url": "https://dentalcraft.app/en/download/",
+  "assets": {
+    "linux-standalone": {
+      "url": "https://dentalcraft.app/download/dentalcraft_999.0.0_linux_x86_64.tar.gz",
+      "sha256": "92469503054a19548a4b5d9b061ff56317aab6029b480ac666f47d9f0f35f604",
+      "size": 39
+    },
+    "appimage": {
+      "url": "https://dentalcraft.app/download/DentalCraft-999.0.0-x86_64.AppImage",
+      "sha256": "1d13be2721c57093c2ffa1eab613ec30b3b395f00f330d9beba4bc95f5e351bd",
+      "size": 35
+    },
+    "windows-standalone": {
+      "url": "https://dentalcraft.app/download/dentalcraft_999.0.0_windows_x86_64.zip",
+      "sha256": "259212c61206a6d777602c68d2d059409f315a006de4269774022f93b82dde4f",
+      "size": 38
+    },
+    "windows-exe": {
+      "url": "https://dentalcraft.app/download/DentalCraft-999.0.0-setup.exe",
+      "sha256": "14687ff8e191911484ae9af0c71175ba48cf3901b64d7075cb401ca1a7d99d44",
+      "size": 29
+    },
+    "windows-msi": {
+      "url": "https://dentalcraft.app/download/DentalCraft-999.0.0-x86_64.msi",
+      "sha256": "86c626b326a1771579724174e684f95df6eed1ee687d0a9bb8083ffd2b1e8590",
+      "size": 30
+    }
+  }
+}

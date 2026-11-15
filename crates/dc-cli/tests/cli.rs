@@ -558,3 +558,64 @@ fn licence_and_third_party_notices() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("Copyright (c) 2026 Daniele Viti."), "{text}");
 }
+
+/// `dentalcraft-cli` with `DC_UPDATE_URL` pointing at a closed port.
+fn cli_offline(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dentalcraft-cli"))
+        .args(args)
+        .env("DC_UPDATE_URL", "http://127.0.0.1:9/stable.json")
+        .output()
+        .expect("run dentalcraft-cli")
+}
+
+#[test]
+fn the_update_commands_are_listed_and_described() {
+    let list = ok_json(&["commands", "--json"]);
+    for id in ["app.update.check", "app.update.apply"] {
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} not listed"));
+        assert_eq!(entry["source"], "app");
+    }
+    let d = ok_json(&["describe", "app.update.apply", "--json"]);
+    assert_eq!(d["label"], "Update DentalCraft");
+    assert_eq!(
+        d["params_schema"]["properties"]["restart"]["type"],
+        "boolean"
+    );
+    assert!(d["doc"].as_str().unwrap().contains("package manager"));
+    let info = ok_json(&["info"]);
+    assert_eq!(
+        info["commands"].as_u64().unwrap() as usize,
+        list.as_array().unwrap().len()
+    );
+    let help = String::from_utf8(cli(&["help", "update"]).stdout).unwrap();
+    assert!(
+        help.contains("--check") && help.contains("DC_UPDATE_URL"),
+        "{help}"
+    );
+}
+
+#[test]
+fn update_without_the_website_fails_plainly_and_changes_nothing() {
+    for args in [
+        &["update", "--check"][..],
+        &["update"],
+        &["run", "--cmd", "app.update.check"],
+    ] {
+        let out = cli_offline(args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("cannot reach the DentalCraft website"),
+            "{args:?}: {err}"
+        );
+    }
+    // a parameter the command does not take
+    let out = cli_offline(&["run", "--cmd", r#"app.update.apply={"force":true}"#]);
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("unknown parameter `force`"));
+}

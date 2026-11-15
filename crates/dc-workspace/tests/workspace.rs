@@ -68,7 +68,7 @@ fn module() -> Box<dyn Module> {
 /// shortcuts, the exports and the corrections.
 fn leaf_count() -> usize {
     let steps = module().menu().step_ids().len();
-    assert_eq!(steps, 8);
+    assert_eq!(steps, 9);
     steps
 }
 
@@ -300,7 +300,7 @@ fn menu_search_filters() {
 type ToolRow = (&'static str, &'static str, &'static str);
 
 /// The functions with manual corrections and their tools.
-const TOOLS: [(&str, &[ToolRow]); 4] = [
+const TOOLS: [(&str, &[ToolRow]); 5] = [
     (
         "aligners.teeth.find",
         &[
@@ -351,7 +351,27 @@ const TOOLS: [(&str, &[ToolRow]); 4] = [
     ),
     (
         "aligners.planning.setup.automatic",
-        &[("Move a tooth", "aligners.planning.movements", "Mesial")],
+        &[
+            // no tooth chosen yet: the panel asks for one
+            (
+                "Move a tooth",
+                "aligners.planning.movements",
+                "Choose a tooth with 3D teeth built: click it in the view or enter its number.",
+            ),
+            (
+                "Arch line",
+                "aligners.planning.setup.line",
+                "There is no arch line yet: compute the final position first.",
+            ),
+        ],
+    ),
+    (
+        "aligners.occlusion.align",
+        &[(
+            "Three points",
+            "aligners.occlusion.bite-registration.three-points",
+            "Take the last point back",
+        )],
     ),
 ];
 
@@ -390,7 +410,7 @@ fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
         assert_eq!(h.state().ws.active_tool(), None, "{last}");
     }
     // a function without tools has no such section
-    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.state_mut().ws.select_item("aligners.output.study-models");
     h.run();
     assert!(h.query_by_label("Manual corrections").is_none());
     let ws = &h.state().ws;
@@ -427,7 +447,7 @@ fn selecting_any_function_runs_nothing_done_or_not() {
         let mut ws = Workspace::new_headless(module(), project, None);
         let before = Arc::clone(ws.state());
         let leaves = ws.module().menu().command_ids();
-        assert_eq!(leaves.len(), 13);
+        assert_eq!(leaves.len(), 14);
         let mut done = 0;
         for id in leaves {
             assert!(dca_module::commands::is_registered(id), "{id}");
@@ -454,7 +474,7 @@ fn a_click_on_any_row_only_selects_it() {
     let mut h = harness(ws);
     h.run();
     let n = h.get_all_by_role(Role::TreeItem).count();
-    assert_eq!(n, 13 + 6, "the functions and their groups, nothing else");
+    assert_eq!(n, 14 + 6, "the functions and their groups, nothing else");
     // bottom-up: collapsing a group only removes rows below it
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();
@@ -1091,21 +1111,26 @@ fn changing_a_role_in_the_inspector_is_undoable() {
 }
 
 #[test]
-fn setting_a_role_reports_what_the_module_cleared() {
+fn moving_an_arch_scan_renumbers_it_and_a_bite_role_clears_it() {
     let mut ws = Workspace::new_headless(module(), Some(project_with_results()), None);
     let upper = ws.state().case.scans[0].id;
+    // upper to lower: the module's set-arch renumbers the marks (the plugin's
+    // arch_set) and says what is gone (the aligners of the arch)
     ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
     assert!(ws.wait_for_jobs(WAIT));
     assert_eq!(ws.state().case.scans[0].role, ScanRole::Lower);
-    assert!(aligners(&ws).seeds.is_empty());
-    // a role change is not a replacement: the notice says what happened
-    assert_eq!(ws.toast_keys(), ["ws-toast-role-changed"]);
+    assert_eq!(ws.state().case.scans[0].role_source, RoleSource::Explicit);
+    let fdis: Vec<u8> = aligners(&ws).seeds.iter().map(|s| s.fdi.get()).collect();
+    assert_eq!(fdis, [41]);
+    assert_eq!(
+        ws.toast_keys(),
+        ["ws-toast-role-changed", "ws-toast-arch-set"]
+    );
     let text = ws.toast_details()[0].1.clone().unwrap();
-    assert!(text.contains("tooth marks"), "{text}");
+    assert!(text.contains("aligner sequence"), "{text}");
     assert!(text.contains("Ctrl+Z brings the previous roles"), "{text}");
-    for word in ["replaced", "reset"] {
-        assert!(!text.to_lowercase().contains(word), "{text}");
-    }
+    let text = ws.toast_details()[1].1.clone().unwrap();
+    assert!(text.contains("renumbered for the lower arch"), "{text}");
     assert!(ws.sticky_toast_keys().is_empty());
     // there is no scan on that role any more: the command fails with a toast
     ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Lower);
@@ -1116,7 +1141,131 @@ fn setting_a_role_reports_what_the_module_cleared() {
     );
     assert!(ws.undo());
     assert_eq!(ws.state().case.scans[0].role, ScanRole::Upper);
-    assert!(!aligners(&ws).seeds.is_empty());
+    let fdis: Vec<u8> = aligners(&ws).seeds.iter().map(|s| s.fdi.get()).collect();
+    assert_eq!(fdis, [11]);
+
+    // an arch scan that becomes the bite: the shell's set-role, the arch cleared
+    ws.set_scan_role(upper, ScanRole::Upper, ScanRole::Bite);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans[0].role, ScanRole::Bite);
+    assert!(aligners(&ws).seeds.is_empty());
+    assert!(
+        ws.toast_keys()
+            .contains(&"ws-toast-role-changed".to_owned())
+    );
+}
+
+/// The demo lower arch opened under the gum (the demo scan is closed): the
+/// faces of its lowest 4 mm along the occlusal axis (+Z) removed.
+fn open_lower_project() -> Project {
+    let mut p = demo_project(&["lower"]);
+    let state = &mut p.case_state;
+    let mesh = TriMesh::clone(state.mesh(&state.case.scans[0].mesh).unwrap());
+    let low = mesh
+        .positions
+        .iter()
+        .map(|p| p.z)
+        .fold(f32::INFINITY, f32::min)
+        + 4.0;
+    let mut open = mesh.clone();
+    open.tris
+        .retain(|t| !t.iter().all(|&i| mesh.positions[i as usize].z < low));
+    state.case.scans[0].mesh = state.blobs.insert(open);
+    p
+}
+
+/// The line under the status of an arch scan open underneath.
+const OPEN_HINT: &str = "The scan is open underneath: close it to see and use it as a solid model.";
+
+#[test]
+fn the_import_inspector_holds_the_flip_and_the_base_and_selecting_it_runs_nothing() {
+    // a scan that came in closed: said so, and nothing to close
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(demo_project(&["lower"])),
+        None,
+    ));
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    assert!(h.query_by_label("Closed as read").is_some());
+    assert!(
+        h.query_by_label("The scan came in closed: it needs no base.")
+            .is_some()
+    );
+    assert!(h.query_by_label_contains("Close with a base").is_none());
+
+    let mut h = harness(Workspace::new_headless(
+        module(),
+        Some(open_lower_project()),
+        None,
+    ));
+    let before = Arc::clone(h.state().ws.state());
+    // the menu law: selecting the function runs nothing
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    assert!(!h.state().ws.is_busy());
+    assert!(
+        Arc::ptr_eq(&before, h.state().ws.state()),
+        "the selection changed the case"
+    );
+    // its manual corrections: the flip of the arch scan, and the base with
+    // the status of the scan and its run button
+    for label in [
+        "Flip the occlusal side",
+        "Base under the scans",
+        "Base height",
+        OPEN_HINT,
+        "Close with a base \u{b7} Lower",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    assert!(h.query_by_label("Flipped by hand").is_none());
+    // the base: one undoable change; the arch has its tooth marks, so the
+    // base is level with them, and the button runs it again
+    click_in_view(&mut h, "Close with a base \u{b7} Lower");
+    settle(&mut h);
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-base-done".to_owned())
+    );
+    let scan = &h.state().ws.state().case.scans[0];
+    assert!(
+        h.state()
+            .ws
+            .state()
+            .mesh(&scan.mesh)
+            .unwrap()
+            .validate()
+            .is_watertight()
+    );
+    assert!(h.query_by_label("Closed on the tooth marks").is_some());
+    assert!(h.query_by_label("Run again \u{b7} Lower").is_some());
+    assert!(h.query_by_label("Close with a base \u{b7} Lower").is_none());
+    // the flip: one undoable change, shown on the scan
+    click_in_view(&mut h, "Flip the occlusal side");
+    settle(&mut h);
+    assert!(
+        aligners(&h.state().ws)
+            .occlusal_flipped
+            .contains(&ScanRole::Lower)
+    );
+    assert!(h.query_by_label("Flipped by hand").is_some());
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-flipped".to_owned())
+    );
+    // undone twice: the open scan again
+    assert!(h.state_mut().ws.undo());
+    assert!(h.state_mut().ws.undo());
+    h.run();
+    assert!(aligners(&h.state().ws).occlusal_flipped.is_empty());
+    assert_eq!(h.state().ws.state().case, before.case);
+    assert!(h.query_by_label(OPEN_HINT).is_some());
+    assert!(h.query_by_label("Close with a base \u{b7} Lower").is_some());
 }
 
 #[test]
@@ -1261,12 +1410,12 @@ fn demo_project(arches: &[&str]) -> Project {
 }
 
 fn footer(h: &Harness<'static, App>, done: usize) -> bool {
-    h.query_by_label(&format!("Treatment workflow {done}/8"))
+    h.query_by_label(&format!("Treatment workflow {done}/9"))
         .is_some()
 }
 
 #[test]
-fn the_footer_counts_the_eight_steps_that_have_their_result() {
+fn the_footer_counts_the_nine_steps_that_have_their_result() {
     // a new case: nothing done; the demo arch has its scans, tooth marks and colours
     let mut h = harness(Workspace::new_headless(module(), None, None));
     h.run();
@@ -1294,8 +1443,8 @@ fn the_shortcuts_and_the_exports_do_not_count() {
     assert_eq!(count("aligners.diagnosis"), 1);
     assert_eq!(
         count("aligners.planning"),
-        3,
-        "moving a tooth is not a step"
+        4,
+        "bite, final position, aligners, clinical review; moving a tooth is not a step"
     );
     assert_eq!(
         count("aligners.production"),
@@ -1341,7 +1490,7 @@ fn run_everything_fills_the_steps_stops_on_a_guess_and_leads_to_the_analysis() {
     assert_eq!(ws.selected(), Some("aligners.diagnosis.space-analysis"));
     let mut h = harness(ws);
     h.run();
-    assert!(footer(&h, 8), "all the steps have their result");
+    assert!(footer(&h, 9), "all the steps have their result");
     assert_eq!(
         h.get_all_by_label("Space available").count(),
         2,
@@ -1376,6 +1525,121 @@ fn run_everything_stops_with_a_clear_message_on_a_guessed_arch() {
     assert!(detail.contains("Stopped at Arch recognition"), "{detail}");
     assert!(!detail.contains("aligners."), "{detail}");
     assert!(!ws.is_dirty(), "the case is left as it was");
+}
+
+#[test]
+fn the_final_position_asks_for_the_bite_first_with_two_arches_not_related() {
+    const SETUP: &str = "aligners.planning.setup.automatic";
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower", "upper"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    // the notice points to Bite; the run button stays
+    assert!(h.query_by_label("Bite first").is_some());
+    click_in_view(&mut h, "Run");
+    settle(&mut h);
+    let details = h.state().ws.toast_details();
+    let (key, detail) = details.last().unwrap();
+    assert_eq!(key, "ws-toast-command-failed");
+    let detail = detail.as_deref().unwrap();
+    assert!(detail.contains("the bite comes first"), "{detail}");
+    assert!(!h.state().ws.is_dirty(), "the refusal changes nothing");
+    // the bite is never run from here: the selection stays on the function
+    assert_eq!(h.state().ws.selected(), Some(SETUP));
+
+    // after the bite the notice goes and the final position runs
+    h.state_mut().ws.run_leaf("aligners.occlusion.align");
+    settle(&mut h);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    assert!(h.query_by_label("Bite first").is_none());
+    click_in_view(&mut h, "Run");
+    settle(&mut h);
+    assert!(!aligners_of(h.state().ws.state()).setup.poses.is_empty());
+
+    // a single arch has nothing to relate
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item(SETUP);
+    h.run();
+    assert!(h.query_by_label("Bite first").is_none());
+}
+
+/// The inspector of Aligners: its result, its parameters (one change, one
+/// undo step, nothing computed) and "Slow a tooth"; selecting it runs
+/// nothing.
+#[test]
+fn the_aligners_inspector_holds_its_result_parameters_and_slow_a_tooth() {
+    const ALIGNERS: &str = "aligners.planning.aligners";
+    let mut project = demo_project(&["lower"]);
+    let mut al = aligners_of(&project.case_state);
+    let f = dc_case::Fdi::new(31).unwrap();
+    al.staging_results.insert(
+        ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 12,
+            pattern: dca_model::StagingPattern::Structured,
+            level: "easy".to_owned(),
+            slowed: [(f, 0.5)].into(),
+            collisions_left: 1,
+            overcorrection: false,
+        },
+    );
+    al.tooth_speed.insert(f, 0.5);
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    let mut ws = Workspace::new_headless(module(), Some(project), None);
+    let before = Arc::clone(ws.state());
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    for label in [
+        "12 aligners",
+        "Pattern: Structured; complexity: easy",
+        "Slowed teeth: 31 (0.50)",
+        "Collisions left: 1 (see the report)",
+        "Parameters",
+        "Periodontium",
+        "Healthy",
+        "Calendar",
+        "Fixed interval",
+        "Start of treatment",
+        "Largest movement per aligner",
+        "Manual corrections",
+        "Slow a tooth",
+        "Select a tooth in the view to slow it down.",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(!h.state().ws.is_busy(), "selecting Aligners ran something");
+    assert!(
+        Arc::ptr_eq(h.state().ws.state(), &before),
+        "the case changed"
+    );
+    // a parameter: one change of the settings, nothing computed
+    click_in_view(&mut h, "Simultaneous, proportional");
+    settle(&mut h);
+    let after = aligners_of(h.state().ws.state());
+    assert_eq!(
+        after.settings.staging.pattern,
+        dca_model::StagingPattern::Proportional
+    );
+    assert_eq!(after.stages, aligners_of(&before).stages);
+    assert_eq!(after.staging_results, aligners_of(&before).staging_results);
+    // the adaptive calendar hides the days
+    click_in_view(&mut h, "Adaptive (7/14 days)");
+    settle(&mut h);
+    assert_eq!(
+        aligners_of(h.state().ws.state()).settings.interval_policy,
+        dca_model::IntervalPolicy::Adaptive
+    );
+    h.run();
+    assert!(h.query_by_label("Days per aligner").is_none());
+    // each change is one undo step
+    assert!(h.state_mut().ws.undo());
+    assert!(h.state_mut().ws.undo());
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
 }
 
 #[test]
@@ -1446,6 +1710,185 @@ fn a_bolton_that_could_not_be_calculated_says_so() {
         h.query_by_label_contains("Bolton needs every tooth")
             .is_some()
     );
+}
+
+/// A case with the lower arch analysed: 62.4 mm available, 66.1 needed (3.7 mm
+/// of crowding), Little index 4.2 mm, midline 0.5 mm off, largest space 1.5 mm,
+/// complexity 3.
+fn analysed_project() -> Project {
+    let mut project = demo_project(&["lower"]);
+    let mut al = aligners_of(&project.case_state);
+    al.diagnosis.arches.insert(
+        ScanRole::Lower,
+        dca_model::ArchSpace {
+            available_mm: 62.4,
+            required_mm: 66.1,
+            little_index_mm: 4.2,
+        },
+    );
+    al.diagnosis.details.insert(
+        ScanRole::Lower,
+        dca_model::ArchDetails {
+            largest_space_mm: 1.5,
+            midline_offset_mm: 0.5,
+            catcat_score: 3,
+        },
+    );
+    al.diagnosis.complexity_score = Some(3.0);
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    project
+}
+
+const CASE_ANALYSIS_ID: &str = "aligners.diagnosis.space-analysis";
+
+/// Something on the screen has this label (a figure may be shown twice, as a
+/// card and as a field).
+fn has(h: &Harness<'static, App>, label: &str) -> bool {
+    h.query_all_by_label(label).count() > 0
+}
+
+#[test]
+fn the_case_analysis_inspector_lists_the_values_to_correct_and_runs_nothing() {
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let before = ws.state().clone();
+    let mut h = harness(ws);
+    h.run();
+    for label in [
+        "Manual corrections",
+        "Your crowding (+) or spacing (−)",
+        "Your Little index",
+        "Your midline offset",
+        "Your largest space",
+        // the computed values stay next to the fields
+        "Computed: 3.7 mm",
+        "Computed: 4.2 mm",
+        "Computed: 0.5 mm",
+        "Computed: 1.5 mm",
+    ] {
+        assert!(has(&h, label), "{label}");
+    }
+    // none set by hand yet; showing the section started nothing
+    assert!(!has(&h, "Set by hand") && !has(&h, "Reset"));
+    assert!(!h.state().ws.is_busy());
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
+    assert!(h.state().ws.toast_keys().is_empty());
+
+    // a case that has no analysis says what to do first
+    let mut ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    assert!(has(&h, "Manual corrections"));
+    assert!(
+        h.query_by_label_contains("Run the case analysis first")
+            .is_some()
+    );
+    assert!(!has(&h, "Your Little index"));
+}
+
+#[test]
+fn a_value_written_by_hand_shows_in_the_cards_undoes_and_resets() {
+    use dca_algo::diagnosis::edit::EditField;
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    let start = aligners_of(h.state().ws.state());
+    let lower = ScanRole::Lower;
+
+    // 9 mm of crowding by hand (the command's discrepancy is -9)
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Discrepancy, Some(-9.0));
+    settle(&mut h);
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis.edits_of(lower).discrepancy_mm, Some(-9.0));
+    // the computed values are as they were; the complexity follows (crowding 9: 4 points)
+    assert_eq!(al.diagnosis.arches, start.diagnosis.arches);
+    assert_eq!(al.diagnosis.complexity_score, Some(4.0));
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-diag-edited".to_owned())
+    );
+    // the cards show the value in force, the section the badge and the reset
+    for label in [
+        "+9.0 mm",
+        "Includes values set by hand",
+        "Set by hand",
+        "Reset",
+        "Computed: 3.7 mm",
+    ] {
+        assert!(has(&h, label), "{label}");
+    }
+    assert!(!has(&h, "+3.7 mm"));
+    // the complexity card: 4 is still easy
+    assert!(has(&h, "Easy"));
+
+    // a Little index by hand, then the card words it
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Little, Some(12.0));
+    settle(&mut h);
+    assert!(has(&h, "12.0 mm"));
+    assert!(has(&h, "Very severe irregularity"));
+    assert_eq!(h.get_all_by_label("Set by hand").count(), 2);
+
+    // one undo step each
+    assert!(h.state_mut().ws.undo());
+    h.run();
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis.edits_of(lower).little_index_mm, None);
+    assert_eq!(al.diagnosis.edits_of(lower).discrepancy_mm, Some(-9.0));
+    assert!(h.state_mut().ws.redo());
+    h.run();
+    assert_eq!(
+        aligners_of(h.state().ws.state())
+            .diagnosis
+            .edits_of(lower)
+            .little_index_mm,
+        Some(12.0)
+    );
+
+    // a reset by the command, then the Reset button of the other value
+    h.state_mut()
+        .ws
+        .edit_diagnosis(lower, EditField::Little, None);
+    settle(&mut h);
+    assert_eq!(h.get_all_by_label("Set by hand").count(), 1);
+    click_in_view(&mut h, "Reset");
+    settle(&mut h);
+    let al = aligners_of(h.state().ws.state());
+    assert_eq!(al.diagnosis, start.diagnosis);
+    assert!(!has(&h, "Reset"));
+    assert!(has(&h, "+3.7 mm"));
+}
+
+#[test]
+fn a_value_out_of_range_is_refused_and_leaves_the_case_as_it_was() {
+    use dca_algo::diagnosis::edit::EditField;
+    let mut ws = Workspace::new_headless(module(), Some(analysed_project()), None);
+    ws.select_item(CASE_ANALYSIS_ID);
+    let mut h = harness(ws);
+    h.run();
+    let before = h.state().ws.state().clone();
+    h.state_mut()
+        .ws
+        .edit_diagnosis(ScanRole::Lower, EditField::Little, Some(99.0));
+    settle(&mut h);
+    assert!(Arc::ptr_eq(h.state().ws.state(), &before));
+    assert!(
+        h.state()
+            .ws
+            .toast_keys()
+            .contains(&"ws-toast-command-failed".to_owned())
+    );
+    // nothing to undo from it
+    assert!(!h.state_mut().ws.undo());
 }
 
 #[test]
@@ -1592,4 +2035,162 @@ fn the_numbering_in_order_stops_when_the_case_changes_and_follows_the_third_mola
             .iter()
             .any(|k| k == "ws-manual-seq-stopped")
     );
+}
+
+/// Bite, the plugin's MORSO page: the report of the last bite under the
+/// status, the bite scans with the button that imports them, Three points
+/// and the correction of the interpenetration. Selecting it runs nothing.
+#[test]
+fn the_bite_inspector_shows_the_report_the_scans_and_the_corrections() {
+    let mut project = demo_project(&["lower", "upper"]);
+    let state = &mut project.case_state;
+    // a bite scan and the report of a registration on it
+    let blob = state.blobs.insert(tetra(12.0));
+    let scan: Scan = serde_json::from_value(json!({
+        "id": "b1700000-0000-4000-8000-000000000009",
+        "role": "bite",
+        "source_name": "right-bite.stl",
+        "source_units": "mm",
+        "import_xform": { "t": [0.0, 0.0, 0.0], "q": [0.0, 0.0, 0.0, 1.0] },
+        "mesh": blob,
+    }))
+    .unwrap();
+    state.case.scans.push(scan);
+    let mut data = state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    let fit = |rms: f64, n: usize, area: f64| dca_model::BiteFit {
+        rms_mm: rms,
+        n_teeth: n,
+        area_mm2: area,
+        ..dca_model::BiteFit::default()
+    };
+    data.bite_registered = true;
+    data.bite_report = Some(dca_model::BiteReport {
+        method: dca_model::BiteMethod::Registration,
+        registration: Some(dca_model::BiteRegistration {
+            scans: vec![dca_model::BiteScanFit {
+                scan: "right-bite.stl".into(),
+                side: Some("right".into()),
+                lower: fit(0.021, 4, 212.0),
+                upper: fit(0.034, 3, 187.0),
+            }],
+            penetration_mm: 0.18,
+            reasons: vec!["one_side_only".into(), "interpenetration".into()],
+            verdict: dca_model::BiteVerdict::ToReview,
+            ..dca_model::BiteRegistration::default()
+        }),
+        correction_mm: 0.0,
+    });
+    state.set_module(dca_model::MODULE_ID, ModuleState::new(data));
+    let mut h = harness(Workspace::new_headless(module(), Some(project), None));
+    h.run();
+    let before = Arc::clone(h.state().ws.state());
+    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.run();
+    for label in [
+        // the report
+        "Bite registered, to check",
+        "Bite registered from 1 buccal scan(s) (right): largest RMS deviation 0.034 mm, \
+         interpenetration 0.18 mm.",
+        "To check: Bite of one side only",
+        "To check: Interpenetration of the arches 0.18 mm",
+        "right-bite.stl (right): RMS 0.021 / 0.034 mm, teeth 4 + 3, 212 + 187 mm²",
+        // the bite scans and the button that imports them
+        "Side 1: right-bite.stl",
+        "Import the bite scans…",
+        "Run registers the arches on the bite scans",
+        // the manual corrections
+        "Manual corrections",
+        "Three points",
+        "Correct the interpenetration (0.18 mm)",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    let ws = &h.state().ws;
+    assert!(!ws.is_busy());
+    assert_eq!(ws.dialog_requests(), 0);
+    assert_eq!(ws.active_tool(), None);
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(
+        Arc::ptr_eq(&before, ws.state()),
+        "the selection changed the case"
+    );
+    // the button of the bite scans asks for the files, and only that
+    click_in_view(&mut h, "Import the bite scans…");
+    h.run();
+    let ws = &h.state().ws;
+    assert_eq!(ws.dialog_requests(), 1);
+    assert!(!ws.is_busy());
+    assert!(Arc::ptr_eq(&before, ws.state()));
+}
+
+/// "Export for printing": where the aligner ends (the teeth left out, the
+/// advice, the final position computed with another end), the quality and
+/// the folded groups of the production settings; selecting it runs
+/// nothing, the advice button ends the aligner in one undo step.
+#[test]
+fn the_export_inspector_shows_the_aligner_end_and_the_production_settings() {
+    let mut project = demo_project(&["lower"]);
+    let mut d = aligners_of(&project.case_state);
+    let lower = ScanRole::Lower;
+    d.seeds.retain(|s| s.fdi.get() != 35);
+    d.crowns.retain(|f, _| f.get() != 35);
+    d.aligner_end.insert(
+        lower,
+        dca_model::AlignerEnd {
+            right: Some(Fdi::new(46).unwrap()),
+            left: None,
+        },
+    );
+    d.setup
+        .results
+        .insert(lower, dca_model::SetupSummary::default());
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(d));
+    let mut h = harness(Workspace::new_headless(module(), Some(project), None));
+    h.run();
+    let before = Arc::clone(h.state().ws.state());
+    h.state_mut().ws.select_item("aligners.output.export-all");
+    h.run();
+    for label in [
+        "Where the aligner ends",
+        "Lower arch",
+        "Right side",
+        "Left side",
+        "Out of the aligner: 47.",
+        "Computed with another end",
+        "computed with another end of the aligner",
+        "Advice, left side",
+        "Tooth 35 is missing",
+        "End at 34",
+        "Quality of the print files",
+        "Standard (production files, 0.1 mm detail)",
+        "Aligner edge",
+        "Shell",
+        "Identification text",
+        "Bite with the aligners worn",
+        "Bite ramps",
+    ] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    let ws = &h.state().ws;
+    assert!(!ws.is_busy());
+    assert_eq!(ws.dialog_requests(), 0);
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(
+        Arc::ptr_eq(&before, ws.state()),
+        "the selection changed the case"
+    );
+    // nothing of the inspector is wider than the window (a long line wraps)
+    let button = h.get_by_label("End at 34").rect();
+    assert!(button.max.x <= 1920.0, "{button:?}");
+    // the advice ends the aligner at 34 on the left
+    click_in_view(&mut h, "End at 34");
+    settle(&mut h);
+    let end = aligners_of(h.state().ws.state()).aligner_end_of(lower);
+    assert_eq!(end.left.map(|f| f.get()), Some(34));
+    assert_eq!(end.right.map(|f| f.get()), Some(46));
 }

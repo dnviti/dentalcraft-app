@@ -60,9 +60,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.4" }
-dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.4" }
-dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.4" }
+dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
+dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
+dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"
@@ -75,6 +75,13 @@ zip = { version = "9.2.0", default-features = false, features = ["deflate-flate2
 
 # dc-cli (dentalcraft-cli: headless engine, MCP server, bridge to the app)
 clap = { version = "4.6.7", features = ["derive"] }
+
+# dc-update (update check, verification and install; app and dentalcraft-cli)
+dc-update = { path = "crates/dc-update" }
+minisign-verify = "0.3.0" # signature of the update manifest (pure Rust, no dependencies)
+semver = "1.0.28"
+tar = { version = "0.4.46", default-features = false } # no xattr
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] } # the backend zip already uses
 
 [workspace.lints.rust]
 missing_docs = "warn"
