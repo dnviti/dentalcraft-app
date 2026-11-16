@@ -13,13 +13,18 @@
 //!
 //! With `DC_VIEWPORT_SCREENSHOT=out.ppm` the window saves a screenshot after
 //! a few frames and closes (smoke test of the rendering path).
+//!
+//! `DC_VIEWPORT_POINTS=1` starts with the "Point cloud" demo on (the vertices
+//! of the first mesh, lifted 30 mm, drawn as shaded sprites).
 
 use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
 
 use dc_mesh::TriMesh;
 use dc_scene::{Color, LabelPalette, MeshColoring};
-use dc_viewport::{BackfaceMode, Corner, Pick, Projection, StdView, ViewMesh, Viewport};
+use dc_viewport::{
+    BackfaceMode, Corner, Pick, Projection, StdView, ViewMesh, ViewPoints, Viewport,
+};
 use glam::Vec3;
 
 fn main() -> eframe::Result {
@@ -56,6 +61,8 @@ struct App {
     frames: u32,
     screenshot: Option<String>,
     started: Option<std::time::Instant>,
+    /// The vertices of the first mesh as a point cloud, lifted 30 mm.
+    cloud: ViewPoints,
 }
 
 impl App {
@@ -89,12 +96,13 @@ impl App {
             );
         }
         let triangles = meshes.iter().map(|m| m.mesh.face_count()).sum();
+        let meshes_for_cloud = meshes[0].mesh.clone();
         let mut viewport = Viewport::new(rs);
         viewport.settings.hover_pick = true;
         viewport.set_meshes(meshes.clone());
         viewport.set_view(StdView::Front);
         viewport.fit();
-        Self {
+        let mut app = Self {
             viewport,
             meshes,
             source,
@@ -104,7 +112,25 @@ impl App {
             frames: 0,
             screenshot: std::env::var("DC_VIEWPORT_SCREENSHOT").ok(),
             started: None,
+            cloud: {
+                let mesh = &meshes_for_cloud;
+                let normals = mesh.compute_vertex_normals();
+                let points = mesh
+                    .positions
+                    .iter()
+                    .map(|p| *p + Vec3::new(0.0, 0.0, 30.0))
+                    .collect();
+                let mut cloud = ViewPoints::new(1, Arc::new(points))
+                    .with_normals(Arc::new(normals))
+                    .with_size_px(2.0);
+                cloud.visible = std::env::var_os("DC_VIEWPORT_POINTS").is_some();
+                cloud
+            },
+        };
+        if app.cloud.visible {
+            app.viewport.set_points(vec![app.cloud.clone()]);
         }
+        app
     }
 }
 
@@ -199,6 +225,16 @@ impl App {
             self.viewport.toggle_projection();
         }
         ui.separator();
+        let mut points_changed = ui
+            .checkbox(&mut self.cloud.visible, "Point cloud")
+            .changed();
+        points_changed |= ui
+            .add(egui::Slider::new(&mut self.cloud.size_px, 1.0..=12.0).text("point size"))
+            .changed();
+        if points_changed {
+            // same Arcs: only the sprite size and visibility change
+            self.viewport.set_points(vec![self.cloud.clone()]);
+        }
         let s = &mut self.viewport.settings;
         ui.checkbox(&mut s.wireframe, "Wireframe");
         ui.checkbox(&mut s.hover_pick, "Pick on hover");

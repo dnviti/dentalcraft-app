@@ -14,6 +14,13 @@
 //! per-mesh uniforms, and the 3D pass is skipped entirely when nothing
 //! changed since the last frame.
 //!
+//! Point clouds ([`ViewPoints`], [`Viewport::set_points`]) are drawn as
+//! instanced screen-space sprites in the same pass, depth-tested with the
+//! meshes, cached by `Arc` identity and included in [`Viewport::bounds`] /
+//! [`Viewport::fit`]; a second `Viewport` (a scan popup) can show a live
+//! cloud with nothing but `set_points` and `ui`. The mesh wireframe is
+//! [`ViewportSettings::wireframe`].
+//!
 //! World frame: occlusal plane XY, incisors towards −Y, patient's right on
 //! −X, lower arch teeth up (+Z); see [`camera`].
 //!
@@ -56,11 +63,15 @@ pub use pick::{Pick, PickTarget};
 pub use transform::{GizmoDelta, GizmoEvent, GizmoMode, TransformGizmo};
 
 use render::{
-    CameraUniform, ColorData, DrawItem, FrameCallback, Gpu, GpuMesh, OutlinePass, Targets,
+    CameraUniform, ColorData, DrawItem, FrameCallback, Gpu, GpuMesh, GpuPoints, OutlinePass,
+    PointDraw, Targets,
 };
 
 /// Caller-chosen identifier of a mesh in the viewport.
 pub type MeshId = u64;
+
+/// Caller-chosen identifier of a point cloud in the viewport.
+pub type PointsId = u64;
 
 /// A mesh to show.
 #[derive(Debug, Clone)]
@@ -135,6 +146,71 @@ impl ViewMesh {
             }),
             _ => None,
         }
+    }
+}
+
+/// A point cloud to show (world coordinates, mm), drawn as round screen-space
+/// sprites of [`ViewPoints::size_px`] pixels, depth-tested with the meshes.
+/// It takes part in [`Viewport::bounds`] and [`Viewport::fit`] while visible.
+#[derive(Debug, Clone)]
+pub struct ViewPoints {
+    /// Identifier of the cloud (not shared with mesh ids).
+    pub id: PointsId,
+    /// Positions. Uploads are cached by `Arc` identity (with `normals` and
+    /// `colors`): pass the same `Arc`s again to avoid re-uploading; a new
+    /// `Arc` re-uploads the whole cloud.
+    pub points: Arc<Vec<Vec3>>,
+    /// Per-point normals; with them the points are shaded (two-sided, lit
+    /// from the eye), without them they are flat. Ignored when the length
+    /// differs from `points`.
+    pub normals: Option<Arc<Vec<Vec3>>>,
+    /// Per-point sRGB colours. Ignored when the length differs from `points`.
+    pub colors: Option<Arc<Vec<[u8; 3]>>>,
+    /// Linear RGBA used when there are no `colors` (with colours only the
+    /// alpha is used).
+    pub color: [f32; 4],
+    /// Sprite diameter in pixels (clamped to 1..=64).
+    pub size_px: f32,
+    /// Drawn only when `true`.
+    pub visible: bool,
+}
+
+impl ViewPoints {
+    /// Visible, flat, 3 px cloud in a light blue.
+    pub fn new(id: PointsId, points: Arc<Vec<Vec3>>) -> Self {
+        Self {
+            id,
+            points,
+            normals: None,
+            colors: None,
+            color: [0.45, 0.62, 0.95, 1.0],
+            size_px: 3.0,
+            visible: true,
+        }
+    }
+
+    /// Builder: normals.
+    pub fn with_normals(mut self, normals: Arc<Vec<Vec3>>) -> Self {
+        self.normals = Some(normals);
+        self
+    }
+
+    /// Builder: per-point colours.
+    pub fn with_colors(mut self, colors: Arc<Vec<[u8; 3]>>) -> Self {
+        self.colors = Some(colors);
+        self
+    }
+
+    /// Builder: uniform colour (linear RGBA).
+    pub fn with_color(mut self, color: [f32; 4]) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Builder: sprite diameter in pixels.
+    pub fn with_size_px(mut self, size_px: f32) -> Self {
+        self.size_px = size_px;
+        self
     }
 }
 
@@ -296,6 +372,22 @@ struct Entry {
     pickable: bool,
 }
 
+/// An uploaded point cloud.
+struct PointEntry {
+    id: PointsId,
+    points: Arc<Vec<Vec3>>,
+    normals: Option<Arc<Vec<Vec3>>>,
+    colors: Option<Arc<Vec<[u8; 3]>>>,
+    gpu: Arc<GpuPoints>,
+    /// Normals / colours that matched the points and went to the GPU.
+    has_normals: bool,
+    has_colors: bool,
+    aabb: Option<(Vec3, Vec3)>,
+    color: [f32; 4],
+    size_px: f32,
+    visible: bool,
+}
+
 /// Inputs of the last rendered frame: when they do not change, the 3D pass
 /// is skipped and egui keeps showing the previous image.
 #[derive(Clone, PartialEq)]
@@ -316,6 +408,7 @@ pub struct Viewport {
     texture: Option<egui::TextureId>,
     targets: Option<Arc<Targets>>,
     entries: Vec<Entry>,
+    points: Vec<PointEntry>,
     bounds: Option<(Vec3, Vec3)>,
     camera: Camera,
     /// Display options.
@@ -357,6 +450,7 @@ impl Viewport {
             texture: None,
             targets: None,
             entries: Vec::new(),
+            points: Vec::new(),
             bounds: None,
             camera: Camera::default(),
             settings: ViewportSettings::default(),
@@ -420,14 +514,83 @@ impl Viewport {
             };
             self.entries.push(entry);
         }
-        self.bounds = self
-            .entries
+        self.refresh_bounds();
+    }
+
+    /// Replaces the shown point clouds (see [`ViewPoints`]). A cloud whose
+    /// id and `Arc`s are the same as before is not uploaded again, so this
+    /// can be called every frame with the same data. Point clouds are not
+    /// pickable.
+    pub fn set_points(&mut self, pts: Vec<ViewPoints>) {
+        let mut changed = self.points.len() != pts.len();
+        let mut old: HashMap<PointsId, PointEntry> =
+            self.points.drain(..).map(|e| (e.id, e)).collect();
+        for vp in pts {
+            let valid_n = vp.normals.filter(|n| n.len() == vp.points.len());
+            let valid_c = vp.colors.filter(|c| c.len() == vp.points.len());
+            let entry = match old.remove(&vp.id) {
+                Some(mut e)
+                    if Arc::ptr_eq(&e.points, &vp.points)
+                        && same_arc(&e.normals, &valid_n)
+                        && same_arc(&e.colors, &valid_c) =>
+                {
+                    changed |=
+                        e.color != vp.color || e.size_px != vp.size_px || e.visible != vp.visible;
+                    e.color = vp.color;
+                    e.size_px = vp.size_px;
+                    e.visible = vp.visible;
+                    e
+                }
+                _ => {
+                    changed = true;
+                    let gpu = self.gpu.upload_points(
+                        &vp.points,
+                        valid_n.as_ref().map(|n| n.as_slice()),
+                        valid_c.as_ref().map(|c| c.as_slice()),
+                    );
+                    PointEntry {
+                        id: vp.id,
+                        aabb: points_aabb(&vp.points),
+                        points: vp.points,
+                        has_normals: valid_n.is_some(),
+                        has_colors: valid_c.is_some(),
+                        normals: valid_n,
+                        colors: valid_c,
+                        gpu: Arc::new(gpu),
+                        color: vp.color,
+                        size_px: vp.size_px,
+                        visible: vp.visible,
+                    }
+                }
+            };
+            self.points.push(entry);
+        }
+        // a cloud that went away
+        changed |= !old.is_empty();
+        if changed {
+            self.refresh_bounds();
+        }
+    }
+
+    /// Ids of the point clouds currently set.
+    pub fn points_ids(&self) -> impl Iterator<Item = PointsId> + '_ {
+        self.points.iter().map(|e| e.id)
+    }
+
+    /// World box of the visible meshes and point clouds; also versions the
+    /// scene and arms the first automatic fit.
+    fn refresh_bounds(&mut self) {
+        let meshes = self.entries.iter().filter(|e| e.visible).filter_map(|e| {
+            e.local_box
+                .map(|(lo, hi)| render::transform_box(lo, hi, e.xform))
+        });
+        let clouds = self
+            .points
             .iter()
             .filter(|e| e.visible)
-            .filter_map(|e| {
-                e.local_box
-                    .map(|(lo, hi)| render::transform_box(lo, hi, e.xform))
-            })
+            .filter_map(|e| e.aabb);
+        self.bounds = meshes
+            .chain(clouds)
             .reduce(|(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)));
         self.scene_version += 1;
         self.hovered = None;
@@ -442,7 +605,7 @@ impl Viewport {
         self.entries.iter().map(|e| e.id)
     }
 
-    /// World bounding box of the visible meshes.
+    /// World bounding box of the visible meshes and point clouds.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         self.bounds
     }
@@ -910,6 +1073,24 @@ impl Viewport {
             BackfaceMode::Cull => 2,
         };
         let shown = |e: &&Entry| e.visible && e.opacity > 0.0;
+        let points = self
+            .points
+            .iter()
+            .filter(|p| p.visible)
+            .map(|p| PointDraw {
+                cloud: p.gpu.clone(),
+                uniform: render::points_uniform(
+                    if p.has_colors {
+                        [1.0, 1.0, 1.0, p.color[3]]
+                    } else {
+                        p.color
+                    },
+                    p.size_px * ppp,
+                    size,
+                    p.has_normals,
+                ),
+            })
+            .collect();
         let items = self
             .entries
             .iter()
@@ -974,6 +1155,7 @@ impl Viewport {
             gpu: self.gpu.clone(),
             targets,
             camera,
+            points,
             clear,
             items,
             outline,
@@ -1014,6 +1196,26 @@ impl Drop for Viewport {
         if let Some(id) = self.texture.take() {
             self.renderer.write().free_texture(&id);
         }
+    }
+}
+
+/// Box of the finite points; `None` without any.
+fn points_aabb(points: &[Vec3]) -> Option<(Vec3, Vec3)> {
+    points
+        .iter()
+        .filter(|p| p.is_finite())
+        .fold(None, |acc, &p| match acc {
+            Some((lo, hi)) => Some((lo.min(p), hi.max(p))),
+            None => Some((p, p)),
+        })
+}
+
+/// Both absent, or the same allocation.
+fn same_arc<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+        _ => false,
     }
 }
 
@@ -1112,5 +1314,30 @@ mod tests {
             &MeshColoring::Uniform(Color::TOOTH),
             &MeshColoring::Uniform(Color::TOOTH)
         ));
+    }
+
+    #[test]
+    fn point_box_skips_non_finite_points() {
+        assert_eq!(points_aabb(&[]), None);
+        assert_eq!(points_aabb(&[Vec3::NAN]), None);
+        let pts = [
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(f32::INFINITY, 0.0, 0.0),
+            Vec3::new(-1.0, 5.0, 0.0),
+        ];
+        assert_eq!(
+            points_aabb(&pts),
+            Some((Vec3::new(-1.0, 2.0, 0.0), Vec3::new(1.0, 5.0, 3.0)))
+        );
+    }
+
+    #[test]
+    fn arc_identity_comparison() {
+        let a = Some(Arc::new(vec![1u8]));
+        let b = Some(Arc::new(vec![1u8]));
+        assert!(same_arc(&a, &a.clone()));
+        assert!(!same_arc(&a, &b));
+        assert!(!same_arc(&a, &None));
+        assert!(same_arc::<Vec<u8>>(&None, &None));
     }
 }

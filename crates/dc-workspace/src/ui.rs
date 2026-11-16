@@ -48,10 +48,11 @@ impl Workspace {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if !dropped.is_empty() && self.confirm_exit.is_none() && !self.show_help {
+        let scanning = self.scan.ui.open;
+        if !dropped.is_empty() && self.confirm_exit.is_none() && !self.show_help && !scanning {
             self.import_dropped(dropped);
         }
-        if self.confirm_exit.is_none() && !self.show_help {
+        if self.confirm_exit.is_none() && !self.show_help && !scanning {
             self.keyboard(ui);
         }
         let c = *colors(ui);
@@ -100,6 +101,8 @@ impl Workspace {
             });
         CentralPanel::no_frame().show(ui, |ui| self.center_ui(ui));
 
+        // the scan popup (under the dialogs of the workspace)
+        self.scan_popup(ui);
         self.dialogs(ui);
         if !self.running.is_empty() {
             ui.ctx()

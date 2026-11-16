@@ -60,6 +60,62 @@ pub(crate) struct OutlineUniform {
     pub params: [f32; 4],
 }
 
+/// Uniform of one point cloud.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct PointsUniform {
+    /// Linear colour, multiplied with the per-point colour.
+    pub color: [f32; 4],
+    /// x: sprite diameter (pixels), y/z: target size (pixels), w: 1 with normals.
+    pub params: [f32; 4],
+}
+
+/// One point on the GPU (one instance of the sprite quad).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct PointVertex {
+    pub pos: [f32; 3],
+    /// Unit normal, snorm8 (w unused).
+    pub normal: [i8; 4],
+    /// sRGB bytes (a = 255).
+    pub color: [u8; 4],
+}
+
+/// Widest and narrowest point sprite (device pixels).
+const MIN_POINT_PX: f32 = 1.0;
+const MAX_POINT_PX: f32 = 64.0;
+
+/// A normal as snorm8 (zero stays zero).
+pub(crate) fn pack_normal(n: Vec3) -> [i8; 4] {
+    let n = n.normalize_or_zero() * 127.0;
+    [n.x.round() as i8, n.y.round() as i8, n.z.round() as i8, 0]
+}
+
+/// The uniform of a cloud: `color` (linear) multiplies the per-point colours,
+/// `size_px` is the sprite diameter in device pixels, `target` the size of
+/// the render target.
+pub(crate) fn points_uniform(
+    color: [f32; 4],
+    size_px: f32,
+    target: [u32; 2],
+    has_normals: bool,
+) -> PointsUniform {
+    let size = if size_px.is_finite() {
+        size_px.clamp(MIN_POINT_PX, MAX_POINT_PX)
+    } else {
+        MIN_POINT_PX
+    };
+    PointsUniform {
+        color,
+        params: [
+            size,
+            target[0].max(1) as f32,
+            target[1].max(1) as f32,
+            f32::from(u8::from(has_normals)),
+        ],
+    }
+}
+
 /// Colour mode values understood by the shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorMode {
@@ -159,6 +215,8 @@ pub(crate) struct Gpu {
     opaque: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     wire: wgpu::RenderPipeline,
+    points: wgpu::RenderPipeline,
+    points_bgl: wgpu::BindGroupLayout,
     /// The selected meshes where they are the front surface (mask red).
     mask_visible: wgpu::RenderPipeline,
     /// Their whole silhouette (mask green).
@@ -167,6 +225,14 @@ pub(crate) struct Gpu {
     outline: wgpu::RenderPipeline,
     outline_bgl: wgpu::BindGroupLayout,
     outline_buf: wgpu::Buffer,
+}
+
+/// A point cloud on the GPU: one instance buffer and its uniform.
+pub(crate) struct GpuPoints {
+    vertices: wgpu::Buffer,
+    count: u32,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 /// Geometry and per-mesh uniforms on the GPU.
@@ -357,6 +423,59 @@ impl Gpu {
                 cache: None,
             })
         };
+        let points_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("dc_viewport_points"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("points.wgsl").into()),
+        });
+        let points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dc_viewport_points"),
+            entries: &[uniform_entry(size_of::<PointsUniform>())],
+        });
+        let points_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("dc_viewport_points"),
+            bind_group_layouts: &[Some(&camera_bgl), Some(&points_bgl)],
+            immediate_size: 0,
+        });
+        let points_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4];
+        let points = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("dc_viewport_points"),
+            layout: Some(&points_layout),
+            vertex: wgpu::VertexState {
+                module: &points_module,
+                entry_point: Some("vs_points"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<PointVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &points_attrs,
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &points_module,
+                entry_point: Some("fs_points"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: alpha,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let outline_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dc_viewport_outline"),
             source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
@@ -440,6 +559,8 @@ impl Gpu {
                 alpha,
                 false,
             ),
+            points,
+            points_bgl,
             mask_visible: mask(
                 "dc_viewport_mask_visible",
                 wgpu::CompareFunction::LessEqual,
@@ -516,6 +637,51 @@ impl Gpu {
             indices: index_buf,
             index_count: indices.len() as u32,
             edges: OnceLock::new(),
+            uniform,
+            bind_group,
+        }
+    }
+
+    /// Uploads a point cloud as one instance per point. Normals and colours
+    /// shorter than the points are ignored by the caller.
+    pub fn upload_points(
+        &self,
+        points: &[Vec3],
+        normals: Option<&[Vec3]>,
+        colors: Option<&[[u8; 3]]>,
+    ) -> GpuPoints {
+        let max = (self.device.limits().max_buffer_size / size_of::<PointVertex>() as u64) as usize;
+        let data: Vec<PointVertex> = points
+            .iter()
+            .take(max)
+            .enumerate()
+            .map(|(i, p)| {
+                let c = colors.map_or([255; 3], |c| c[i]);
+                PointVertex {
+                    pos: p.to_array(),
+                    normal: normals.map_or([0; 4], |n| pack_normal(n[i])),
+                    color: [c[0], c[1], c[2], 255],
+                }
+            })
+            .collect();
+        let vertices = self.buffer_init("dc_viewport_points", &data, wgpu::BufferUsages::VERTEX);
+        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dc_viewport_points_uniform"),
+            size: size_of::<PointsUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dc_viewport_points"),
+            layout: &self.points_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+        GpuPoints {
+            vertices,
+            count: data.len() as u32,
             uniform,
             bind_group,
         }
@@ -753,11 +919,19 @@ pub(crate) fn scissor(bbox: Option<[f32; 4]>, pad: f32, size: [u32; 2]) -> [u32;
     ]
 }
 
+/// Points of one cloud drawn this frame.
+pub(crate) struct PointDraw {
+    pub cloud: Arc<GpuPoints>,
+    pub uniform: PointsUniform,
+}
+
 /// Everything the paint callback needs to render one frame.
 pub(crate) struct FrameCallback {
     pub gpu: Arc<Gpu>,
     pub targets: Arc<Targets>,
     pub camera: CameraUniform,
+    /// The point clouds of the frame.
+    pub points: Vec<PointDraw>,
     pub clear: Color,
     pub items: Vec<DrawItem>,
     /// The selection outline, if something is selected and shown.
@@ -772,6 +946,10 @@ impl FrameCallback {
         for it in &self.items {
             gpu.queue
                 .write_buffer(&it.mesh.uniform, 0, bytemuck::bytes_of(&it.uniform));
+        }
+        for p in &self.points {
+            gpu.queue
+                .write_buffer(&p.cloud.uniform, 0, bytemuck::bytes_of(&p.uniform));
         }
         let t = &self.targets;
         let (view, resolve_target) = match &t.msaa {
@@ -840,6 +1018,14 @@ impl FrameCallback {
         pass.set_pipeline(&gpu.wire);
         for it in self.items.iter().filter(|i| !i.transparent) {
             draw_wire(&mut pass, it);
+        }
+        if self.points.iter().any(|p| p.cloud.count > 0) {
+            pass.set_pipeline(&gpu.points);
+            for p in self.points.iter().filter(|p| p.cloud.count > 0) {
+                pass.set_bind_group(1, &p.cloud.bind_group, &[]);
+                pass.set_vertex_buffer(0, p.cloud.vertices.slice(..));
+                pass.draw(0..6, 0..p.cloud.count);
+            }
         }
         // transparent meshes back to front (more negative view z = farther)
         let mut order: Vec<&DrawItem> = self
@@ -1048,6 +1234,7 @@ mod tests {
                 ][..],
             ),
             (include_str!("outline.wgsl"), &["vs_full", "fs_outline"][..]),
+            (include_str!("points.wgsl"), &["vs_points", "fs_points"][..]),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
@@ -1080,5 +1267,20 @@ mod tests {
         let (lo, hi) = transform_box(Vec3::ZERO, Vec3::ONE, x);
         assert!((lo - Vec3::new(-1.0, 1.0, 0.0)).length() < 1e-5);
         assert!((hi - Vec3::new(0.0, 2.0, 1.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn point_uniform_and_packing() {
+        assert_eq!(size_of::<PointsUniform>() % 16, 0);
+        assert_eq!(size_of::<PointVertex>(), 20);
+        assert_eq!(pack_normal(Vec3::Z), [0, 0, 127, 0]);
+        assert_eq!(pack_normal(Vec3::new(0.0, -5.0, 0.0)), [0, -127, 0, 0]);
+        assert_eq!(pack_normal(Vec3::ZERO), [0; 4]);
+        let u = points_uniform([1.0; 4], 500.0, [0, 300], true);
+        assert_eq!(u.params, [MAX_POINT_PX, 1.0, 300.0, 1.0]);
+        assert_eq!(
+            points_uniform([1.0; 4], f32::NAN, [10, 10], false).params[0],
+            MIN_POINT_PX
+        );
     }
 }

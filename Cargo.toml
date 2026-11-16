@@ -26,6 +26,7 @@ dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git"
 dc-session = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
 dc-mcp = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
 dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
+dc-scanner = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }

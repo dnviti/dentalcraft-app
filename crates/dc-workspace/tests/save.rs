@@ -297,6 +297,17 @@ enum Plan {
 /// the case back as it got it: nothing of the case to save.
 const FILES: &str = "writes files only; the case it returns is the one it got";
 
+/// A command of the scan window that acts on the scanner or on the scan
+/// being edited, outside the case: nothing of the case to save.
+const SCANNER: &str = "acts on the scanner and the scan being edited, not on the case";
+/// A command of the scan window that acts on the turntable, outside the
+/// case: nothing of the case to save.
+const TURNTABLE: &str = "acts on the turntable, not on the case";
+/// The calibration of the rig is a file of the computer (scanner and
+/// turntable), not of the case.
+const RIG: &str =
+    "stores the calibration of the scanner and turntable on this computer, not in the case";
+
 /// The registration of a bite needs the bite scans of a patient that fit
 /// both arches; what it changes (a scan moved, the flag of the bite) is the
 /// same data the other steps change and the round trip compares.
@@ -711,6 +722,42 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.production.blockout", Skip(FILES)),
         ("aligners.production.trim-line", Skip(FILES)),
         ("aligners.production.stamp", Skip(FILES)),
+        // the scanner (the scan window, `scan.*`): its session and the scan
+        // being edited live outside the case until `scan.import`
+        ("scan.devices", Skip(SCANNER)),
+        ("scan.connect", Skip(SCANNER)),
+        ("scan.disconnect", Skip(SCANNER)),
+        ("scan.start", Skip(SCANNER)),
+        ("scan.pause", Skip(SCANNER)),
+        ("scan.resume", Skip(SCANNER)),
+        ("scan.stop", Skip(SCANNER)),
+        ("scan.reset", Skip(SCANNER)),
+        ("scan.status", Skip(SCANNER)),
+        ("scan.settings", Skip(SCANNER)),
+        ("scan.cloud", Skip(SCANNER)),
+        ("scan.mesh-build", Skip(SCANNER)),
+        ("scan.mesh", Skip(SCANNER)),
+        ("scan.undo", Skip(SCANNER)),
+        ("scan.redo", Skip(SCANNER)),
+        ("scan.export", Skip(FILES)),
+        ("scan.auto", Skip(SCANNER)),
+        // the turntable of the scan window (`turntable.*`)
+        ("turntable.devices", Skip(TURNTABLE)),
+        ("turntable.connect", Skip(TURNTABLE)),
+        ("turntable.disconnect", Skip(TURNTABLE)),
+        ("turntable.move", Skip(TURNTABLE)),
+        ("turntable.speed", Skip(TURNTABLE)),
+        ("turntable.stop", Skip(TURNTABLE)),
+        ("turntable.home", Skip(TURNTABLE)),
+        ("turntable.status", Skip(TURNTABLE)),
+        ("turntable.calibrate", Skip(RIG)),
+        ("turntable.calibration", Skip(RIG)),
+        (
+            "scan.import",
+            Skip(
+                "adds the scan with the import of the module (run above); tests/scan.rs runs it from a simulated scan, saves and reopens",
+            ),
+        ),
     ]
 }
 
@@ -719,9 +766,11 @@ fn every_command_that_can_change_the_case_is_in_the_round_trip() {
     let ws = Workspace::new_headless(module(), None, None);
     let mut registered: BTreeSet<&str> = ws.module().command_specs().iter().map(|s| s.id).collect();
     // the shell's commands the workspace runs on the case: the scan import
-    // (the module's own replaces it) and the role of a scan
+    // (the module's own replaces it), the role of a scan, and the commands
+    // of the scan window (the scanner, then the import of its scan)
     registered.insert("case.import");
     registered.insert("case.set-role");
+    registered.extend(dc_scanner::control::command_infos().iter().map(|i| i.id));
     let planned: BTreeSet<&str> = plan().iter().map(|(id, _)| *id).collect();
     let missing: Vec<_> = registered.difference(&planned).collect();
     let unknown: Vec<_> = planned.difference(&registered).collect();

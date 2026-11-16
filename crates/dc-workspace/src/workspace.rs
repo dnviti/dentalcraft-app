@@ -122,13 +122,16 @@ pub(crate) enum SpecKind {
     /// The command of a menu leaf (by its id): the output of some is shown
     /// ([`leaf::report`]).
     Leaf(&'static str),
+    /// The import of the surface of the scan popup (`scan.import`, by the
+    /// ticket of its scan command): an import, whose end the popup follows.
+    ScanImport(u64),
 }
 
 impl SpecKind {
     /// Title of the notification of a failure.
     fn error_key(self) -> &'static str {
         match self {
-            SpecKind::Import => "ws-toast-import-failed",
+            SpecKind::Import | SpecKind::ScanImport(_) => "ws-toast-import-failed",
             SpecKind::SetRole | SpecKind::Leaf(_) => "ws-toast-command-failed",
         }
     }
@@ -251,7 +254,7 @@ pub struct Workspace {
     thumbnail: Option<Vec<u8>>,
     pub(crate) path: Option<PathBuf>,
     pub(crate) read_only: bool,
-    jobs: JobSystem,
+    pub(crate) jobs: JobSystem,
     pub(crate) running: Vec<Running>,
     dialog: Option<mpsc::Receiver<DialogAnswer>>,
     native_dialogs: bool,
@@ -300,6 +303,8 @@ pub struct Workspace {
     pub(crate) toasts: Vec<ShownToast>,
     pub(crate) confirm_exit: Option<Exit>,
     pub(crate) show_help: bool,
+    /// The 3D scanner and its popup (`scan`).
+    pub(crate) scan: crate::scan::ScanHost,
     actions: VecDeque<WorkspaceAction>,
 }
 
@@ -315,6 +320,7 @@ impl Workspace {
     ) -> Self {
         let mut ws = Self::build(module, project, path);
         ws.view = ViewState::with_viewport(render_state);
+        ws.scan = crate::scan::ScanHost::new(Some(render_state.clone()));
         ws.native_dialogs = true;
         ws
     }
@@ -415,6 +421,7 @@ impl Workspace {
             toasts: Vec::new(),
             confirm_exit: None,
             show_help: false,
+            scan: crate::scan::ScanHost::default(),
             actions: VecDeque::new(),
         }
     }
@@ -835,6 +842,34 @@ impl Workspace {
             );
         }
         self.import_files(files);
+    }
+
+    /// Imports the surface the scan popup wrote to `path` (`scan.import`,
+    /// whose ticket is `ticket`) with the import of a file chosen by hand:
+    /// the same command, one undoable change, the import report. Refused
+    /// while another import or command runs.
+    pub(crate) fn import_scan_file(
+        &mut self,
+        path: PathBuf,
+        role: Option<ScanRole>,
+        ticket: u64,
+    ) -> Result<(), crate::scan::ScanFailure> {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return Err(crate::scan::ScanFailure {
+                code: "busy".into(),
+                detail: "another operation is still running on the case".into(),
+            });
+        }
+        let Some(spec) = self.import_spec else {
+            return Err(crate::scan::ScanFailure {
+                code: "import".into(),
+                detail: "no import command".into(),
+            });
+        };
+        let params = import::params(&[path], role);
+        self.run_spec(spec, params, SpecKind::ScanImport(ticket), "ws-job-import");
+        Ok(())
     }
 
     /// Gives scan `scan_id`, now `from`, the role `to` (`case.set-role`: a
@@ -1383,6 +1418,7 @@ impl Workspace {
         for r in done {
             self.finish(r.task);
         }
+        self.poll_scan();
     }
 
     fn finish(&mut self, task: Task) {
@@ -1391,30 +1427,19 @@ impl Workspace {
                 kind,
                 label,
                 handle,
-            } => match handle.try_take() {
-                Some(Ok(Ok((state, out)))) => {
-                    if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
-                        self.undo.push(Arc::new(state), label);
-                    }
-                    match kind {
-                        SpecKind::Import => {
-                            self.view.refit = true;
-                            self.show_import_report(&out);
-                        }
-                        SpecKind::SetRole => self.show_role_report(&out),
-                        SpecKind::Leaf(id) => self.show_leaf_report(id, &out),
-                    }
+            } => {
+                let taken = handle.try_take();
+                if let SpecKind::ScanImport(ticket) = kind {
+                    let r = match &taken {
+                        Some(Ok(Ok((_, out)))) => Ok(out.clone()),
+                        Some(Ok(Err(e))) => Err(e.to_string()),
+                        Some(Err(e)) => Err(e.to_string()),
+                        None => Err(crate::t("ws-scan-err-import")),
+                    };
+                    self.scan_import_finished(ticket, r);
                 }
-                Some(Ok(Err(CommandError::Cancelled))) => {
-                    self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
-                }
-                Some(Ok(Err(CommandError::NotAvailable(_)))) => {
-                    self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
-                }
-                Some(Ok(Err(e))) => self.job_error(kind.error_key(), error_text(e)),
-                Some(Err(e)) => self.job_panic(&e),
-                None => {}
-            },
+                self.finish_spec(kind, label, taken);
+            }
             Task::Command { label, handle } => match handle.try_take() {
                 Some(Ok(Ok(state))) => self.undo.push(Arc::new(state), label),
                 Some(Ok(Err(CommandError::Cancelled))) => {
@@ -1428,6 +1453,40 @@ impl Workspace {
                 None => {}
             },
             Task::Save(save) => self.finish_save(*save),
+        }
+    }
+
+    /// A registered command run as a job ended: its state lands as one undo
+    /// step and its output is reported, or its failure is shown.
+    fn finish_spec(
+        &mut self,
+        kind: SpecKind,
+        label: String,
+        taken: Option<Result<Result<CommandOutput, CommandError>, JobError>>,
+    ) {
+        match taken {
+            Some(Ok(Ok((state, out)))) => {
+                if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
+                    self.undo.push(Arc::new(state), label);
+                }
+                match kind {
+                    SpecKind::Import | SpecKind::ScanImport(_) => {
+                        self.view.refit = true;
+                        self.show_import_report(&out);
+                    }
+                    SpecKind::SetRole => self.show_role_report(&out),
+                    SpecKind::Leaf(id) => self.show_leaf_report(id, &out),
+                }
+            }
+            Some(Ok(Err(CommandError::Cancelled))) => {
+                self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
+            }
+            Some(Ok(Err(CommandError::NotAvailable(_)))) => {
+                self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
+            }
+            Some(Ok(Err(e))) => self.job_error(kind.error_key(), error_text(e)),
+            Some(Err(e)) => self.job_panic(&e),
+            None => {}
         }
     }
 
