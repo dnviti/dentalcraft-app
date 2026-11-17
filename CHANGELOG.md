@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0-alpha.6](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.5...v0.2.0-alpha.6) (2026-11-17)
+
+
+### Bug Fixes
+
+* **deps:** move to aligners v0.2.0-alpha.7 (days of wear validated, calendar edge cases guarded, order-independent seed change) ([68ae570](https://github.com/dnviti-personal-org/dentalcraft-app/commit/68ae570f901171b3b070a3d7dc4606d445c48668))
+* **timeline:** compute the week of a stage without overflow ([68ae570](https://github.com/dnviti-personal-org/dentalcraft-app/commit/68ae570f901171b3b070a3d7dc4606d445c48668))
+
 ## [0.2.0-alpha.5](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.4...v0.2.0-alpha.5) (2026-11-17)
 
 
