@@ -60,6 +60,11 @@ impl Dirs {
     pub fn logs(&self) -> PathBuf {
         self.data.join("logs")
     }
+
+    /// The sign-in token file, used only where the OS keyring cannot be reached.
+    pub fn auth_tokens(&self) -> PathBuf {
+        self.config.join("auth-tokens.json")
+    }
 }
 
 /// Theme preference.
