@@ -259,7 +259,7 @@ impl AuthClient {
         self.inner.refresh(true)
     }
 
-    /// A non-fatal problem of the last operation (the keyring could not store
+    /// A non-fatal problem of the last operation (the token store could not keep
     /// the refresh token: the session works but will not survive a restart).
     pub fn storage_warning(&self) -> Option<AuthErrorCode> {
         lock(&self.inner.shared).warning

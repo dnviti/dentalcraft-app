@@ -11,7 +11,9 @@
 //!    entitlements.
 //! 3. The refresh token goes to the OS keyring (service `dentalcraft`, account
 //!    = issuer) through a [`TokenStore`]; the access token stays in memory.
-//!    Refresh tokens rotate, so refreshes are strictly single-flight.
+//!    Where the keyring cannot be reached, [`FallbackTokenStore`] keeps it in
+//!    a file only the user can read. Refresh tokens rotate, so refreshes are
+//!    strictly single-flight.
 //!
 //! The API is blocking-free for the UI thread: poll [`AuthClient::poll`] each
 //! frame (or register [`AuthClient::on_change`] to request a repaint) and map
@@ -44,4 +46,7 @@ pub use client::{
 };
 pub use error::{AuthError, AuthErrorCode, Result};
 pub use oidc::Lang;
-pub use store::{KEYRING_SERVICE, KeyringTokenStore, MemoryTokenStore, TokenStore};
+pub use store::{
+    FallbackTokenStore, FileTokenStore, KEYRING_SERVICE, KeyringTokenStore, MemoryTokenStore,
+    TokenStore,
+};

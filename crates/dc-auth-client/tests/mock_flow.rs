@@ -12,7 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use dc_auth_client::pkce::challenge_s256;
-use dc_auth_client::{AuthClient, AuthErrorCode, AuthState, Lang, MemoryTokenStore, TokenStore};
+use dc_auth_client::{
+    AuthClient, AuthErrorCode, AuthState, FallbackTokenStore, FileTokenStore, Lang,
+    MemoryTokenStore, TokenStore,
+};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
 
@@ -428,6 +431,105 @@ fn restore_rotates_the_stored_token() {
     // and the rotated token restores again
     let c = client(&mock, store.clone(), Browser::Idle);
     assert!(matches!(c.restore_blocking(), AuthState::SignedIn(_)));
+}
+
+/// An OS keyring that cannot be reached, as in a Flatpak sandbox without
+/// access to the Secret Service.
+struct NoKeyring;
+
+impl TokenStore for NoKeyring {
+    fn load(&self, _: &str) -> dc_auth_client::Result<Option<String>> {
+        Err(dc_auth_client::AuthError::new(
+            AuthErrorCode::StorageUnavailable,
+            "keyring open: no secret service",
+        ))
+    }
+    fn save(&self, account: &str, _: &str) -> dc_auth_client::Result<()> {
+        self.load(account).map(|_| ())
+    }
+    fn delete(&self, account: &str) -> dc_auth_client::Result<()> {
+        self.load(account).map(|_| ())
+    }
+}
+
+/// A unique scratch folder under the system temp dir, removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Self(std::env::temp_dir().join(format!("dc-auth-it-{name}-{}-{nanos}", std::process::id())))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The app's store: the keyring, then a private file in the config folder.
+fn keyring_or_file(path: &std::path::Path) -> Arc<dyn TokenStore> {
+    Arc::new(FallbackTokenStore::new(
+        Arc::new(NoKeyring),
+        Arc::new(FileTokenStore::new(path)),
+    ))
+}
+
+#[test]
+fn session_survives_a_restart_without_a_keyring() {
+    let mock = Mock::start();
+    mock.with(|m| m.signin_expires_in = 10); // the access token is stale before any restart
+
+    // Keyring alone (the bug): the token is lost and the restart is signed out.
+    let c = client(&mock, Arc::new(NoKeyring), Browser::Good);
+    assert!(matches!(sign_in(&c), AuthState::SignedIn(_)));
+    assert_eq!(c.storage_warning(), Some(AuthErrorCode::StorageUnavailable));
+    drop(c);
+    let c = client(&mock, Arc::new(NoKeyring), Browser::Idle);
+    assert_eq!(c.restore_blocking(), AuthState::SignedOut);
+
+    // Keyring then file: every "process" builds its own store over the same file.
+    let tmp = Scratch::new("restart");
+    let path = tmp.0.join("config").join("auth-tokens.json");
+    let c = client(&mock, keyring_or_file(&path), Browser::Good);
+    let AuthState::SignedIn(user) = sign_in(&c) else {
+        panic!("not signed in: {:?}", c.state())
+    };
+    assert_eq!(c.storage_warning(), None);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file must be private, got {mode:o}");
+    }
+    drop(c);
+
+    for _ in 0..2 {
+        let refreshes = mock.with(|m| m.refresh_calls);
+        let c = client(&mock, keyring_or_file(&path), Browser::Idle);
+        assert_eq!(c.restore_blocking(), AuthState::SignedIn(user.clone()));
+        assert!(c.access_token().is_some());
+        assert_eq!(
+            mock.with(|m| m.refresh_calls),
+            refreshes + 1,
+            "silent refresh"
+        );
+        // a later refresh in the session rotates again, and the file follows
+        c.refresh_now().unwrap();
+        assert_eq!(mock.with(|m| m.refresh_calls), refreshes + 2);
+    }
+
+    // Sign-out removes the file; the next start is signed out.
+    let c = client(&mock, keyring_or_file(&path), Browser::Idle);
+    assert!(matches!(c.restore_blocking(), AuthState::SignedIn(_)));
+    let _ = c.sign_out_blocking(); // the keyring part reports StorageUnavailable
+    assert!(!path.exists());
+    let c = client(&mock, keyring_or_file(&path), Browser::Idle);
+    assert_eq!(c.restore_blocking(), AuthState::SignedOut);
 }
 
 #[test]

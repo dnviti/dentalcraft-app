@@ -14,6 +14,8 @@ finish-args:
   - --share=ipc
   # Sign-in, support and the update check
   - --share=network
+  # The sign-in session (refresh token) is kept in the OS keyring (Secret Service)
+  - --talk-name=org.freedesktop.secrets
   # Projects live in ~/DentalCraft; scans are opened from anywhere in the home folder
   - --filesystem=home
 modules:

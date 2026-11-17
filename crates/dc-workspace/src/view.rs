@@ -215,7 +215,7 @@ impl ViewState {
     }
 }
 
-fn scene_color(c: Color32) -> Color {
+pub(crate) fn scene_color(c: Color32) -> Color {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     Color::rgba(
         f32::from(r) / 255.0,
@@ -1466,15 +1466,16 @@ impl Workspace {
 
     fn empty_state(&mut self, ui: &mut Ui, rect: Rect) {
         let c = *colors(ui);
-        let card = Rect::from_center_size(rect.center(), vec2(360.0, 180.0));
+        let card = Rect::from_center_size(rect.center(), vec2(400.0, 180.0));
         let mut child = ui.new_child(
             UiBuilder::new()
                 .max_rect(card)
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
         let mut import = false;
+        let mut scan = false;
         widgets::card_frame(&child).show(&mut child, |ui| {
-            ui.set_width(320.0);
+            ui.set_width(360.0);
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(ic::UPLOAD_SIMPLE)
@@ -1500,13 +1501,36 @@ impl Workspace {
                     );
                 }
                 ui.add_space(10.0);
-                if widgets::Button::primary(t("ws-import-scans"))
-                    .icon(ic::UPLOAD_SIMPLE)
-                    .show(ui)
-                    .clicked()
-                {
-                    import = true;
-                }
+                // the files, and beside them the scan with a scanner (alpha)
+                let import_label = t("ws-import-scans");
+                let import_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        import_label.clone(),
+                        fonts::semibold(13.0),
+                        Color32::PLACEHOLDER,
+                    )
+                    .size()
+                    .x
+                    + 16.0
+                    + 8.0
+                    + 32.0;
+                let row = import_w + 8.0 + crate::scan::scan_button_width(ui);
+                ui.allocate_ui_with_layout(
+                    vec2(row, 36.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if widgets::Button::primary(import_label)
+                            .icon(ic::UPLOAD_SIMPLE)
+                            .show(ui)
+                            .clicked()
+                        {
+                            import = true;
+                        }
+                        scan = crate::scan::scan_button(ui, true);
+                    },
+                );
             });
         });
         // the button of the empty state runs the import: the file dialog, with
@@ -1519,6 +1543,12 @@ impl Workspace {
                 }
                 None => self.run_leaf(dc_module_api::IMPORT_SCANS_SUFFIX),
             }
+        }
+        if scan {
+            if let Some(id) = self.import_command_id() {
+                self.select_command(id);
+            }
+            self.open_scan();
         }
     }
 

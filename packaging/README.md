@@ -111,7 +111,7 @@ The desktop entry, the AppStream metadata (`packaging/linux/com.dentalcraft.Dent
 
 - **Manifest:** `packaging/flatpak/com.dentalcraft.DentalCraft.yml`.
 - **Runtime:** `org.freedesktop.Platform` 25.08, from Flathub. The 24.08 runtime is end of life.
-- **Permissions:** `--device=dri` (wgpu), Wayland with X11 fallback, IPC, network (sign-in, support, update check), and the home folder (projects in `~/DentalCraft`, scans opened from anywhere in it).
+- **Permissions:** `--device=dri` (wgpu), Wayland with X11 fallback, IPC, network (sign-in, support, update check), the Secret Service `org.freedesktop.secrets` (the sign-in session in the OS keyring, so it survives a restart), and the home folder (projects in `~/DentalCraft`, scans opened from anywhere in it).
 - **Branch:** `stable`.
 - **Bundle:** `flatpak build-bundle` writes it with the repository URL `https://dentalcraft.app/linux/flatpak/`, the Flathub runtime repository and the release key. The commit is signed with the same key.
 - **Install:** `flatpak install --user DentalCraft-<V>.flatpak` (or system-wide) adds a remote for that repository, so `flatpak update` updates DentalCraft from then on.

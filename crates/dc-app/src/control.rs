@@ -39,6 +39,14 @@
 //! in it, and with `restart: true` the app then saves the project, closes
 //! and opens the new version (the connection ends).
 //!
+//! `list` also has the scanner's commands `scan.*` and the turntable's
+//! `turntable.*` (`dc_scanner::control`): they run on the scan controller
+//! of the open workspace, the one its scan window shows, in the same queue
+//! as the window's buttons; an agent's command that acts on the scanner or
+//! the turntable opens that window. `scan.import` writes the surface to a
+//! temporary file and imports it with the workspace's import (one undoable
+//! change); it answers with the import report.
+//!
 //! Requests travel through a channel to the UI thread, which runs them in
 //! [`ControlServer::pump`] at the start of a frame against the open
 //! workspace: case commands go through the workspace's command path
@@ -64,7 +72,7 @@ use dc_module_api::CommandSpec;
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::builtins;
-use dc_workspace::Workspace;
+use dc_workspace::{ScanTicket, Workspace};
 use egui::Ui;
 use serde_json::{Map, Value, json};
 
@@ -380,12 +388,15 @@ impl Bridge {
         }
     }
 
-    /// The commands: the session built-ins, then the workspace module's (or
-    /// the installed Aligners module's when no workspace is open), then the
-    /// app's update commands (`app.update.check`, `app.update.apply`).
+    /// The commands: the session built-ins, the scanner's (`scan.*`, run on
+    /// the workspace's scan controller, the one its scan window shows), then
+    /// the workspace module's (or the installed Aligners module's when no
+    /// workspace is open), then the app's update commands
+    /// (`app.update.check`, `app.update.apply`).
     fn specs(&self) -> Vec<(&'static str, CommandSpec)> {
         let mut out: Vec<(&'static str, CommandSpec)> = builtins::specs()
             .into_iter()
+            .chain(builtins::scan_specs())
             .map(|s| (dc_session::SESSION_SOURCE, s))
             .collect();
         let module = match self.app.workspace() {
@@ -488,6 +499,9 @@ impl Bridge {
             Ok((_, s)) => s,
             Err(e) => return Step::Done(Err(e)),
         };
+        if dc_scanner::control::is_scan_command(spec.id) {
+            return Self::execute_scan(spec.id, params);
+        }
         let mut running: Option<Wait> = None;
         Step::Wait(Box::new(move |b: &mut Bridge| {
             if running.is_none() {
@@ -500,6 +514,38 @@ impl Bridge {
                 }
             }
             running.as_mut().and_then(|w| w(b))
+        }))
+    }
+
+    /// Runs the scan command `id` on the workspace's scan controller once
+    /// the jobs already running are done (a workspace opens if none is):
+    /// the same commands, in the same queue, as the scan window's buttons,
+    /// so the user sees what the agent does. `scan.import` answers with the
+    /// import report once the scan is in the case.
+    fn execute_scan(id: &'static str, params: Value) -> Step {
+        let mut ticket: Option<ScanTicket> = None;
+        Step::Wait(Box::new(move |b: &mut Bridge| {
+            let t = match ticket {
+                Some(t) => t,
+                None => {
+                    if !b.ready() {
+                        return None;
+                    }
+                    let ws = match b.workspace() {
+                        Ok(ws) => ws,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    match ws.start_scan_command(id, params.clone()) {
+                        Ok(t) => *ticket.insert(t),
+                        Err(e) => return Some(Err(RpcError::new(codes::INVALID_PARAMS, e))),
+                    }
+                }
+            };
+            let Some(ws) = b.app.workspace_mut() else {
+                return Some(Err(RpcError::host("the workspace was closed")));
+            };
+            ws.scan_result(t)
+                .map(|r| r.map_err(|e| RpcError::host(format!("{id}: {e}"))))
         }))
     }
 

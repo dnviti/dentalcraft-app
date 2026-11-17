@@ -534,7 +534,14 @@ impl DentalCraftApp {
             && let Some(s) = a.poll()
         {
             match &s {
-                AuthState::SignedIn(u) => tracing::info!("signed in as {}", u.email),
+                AuthState::SignedIn(u) => {
+                    tracing::info!("signed in as {}", u.email);
+                    if let Some(w) = a.storage_warning() {
+                        tracing::warn!(
+                            "the session cannot be saved ({w}): it will not survive a restart"
+                        );
+                    }
+                }
                 AuthState::Error(e) => tracing::warn!("sign-in error ({}): {e}", a.issuer()),
                 _ => {}
             }

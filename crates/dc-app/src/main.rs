@@ -55,7 +55,16 @@ fn main() -> eframe::Result {
     let store = Store::new(dirs);
     let updates = Updates::standard(store.dirs());
     let issuer = store.load_settings().issuer();
-    let auth = match dc_auth_client::AuthClient::new(&issuer, dc_auth_client::DEFAULT_CLIENT_ID) {
+    // The refresh token goes to the OS keyring; a private file in the config folder
+    // takes over where the keyring cannot be reached, so the session survives a restart.
+    let tokens = dc_auth_client::FallbackTokenStore::keyring_or_file(store.dirs().auth_tokens())
+        .on_primary_error(|e| tracing::warn!("OS keyring unavailable, using the token file: {e}"));
+    let auth = match dc_auth_client::AuthClient::with_parts(
+        &issuer,
+        dc_auth_client::DEFAULT_CLIENT_ID,
+        std::sync::Arc::new(tokens),
+        std::sync::Arc::new(dc_auth_client::SystemBrowser),
+    ) {
         Ok(a) => Some(a),
         Err(e) => {
             tracing::error!("invalid sign-in server {issuer}: {e}");

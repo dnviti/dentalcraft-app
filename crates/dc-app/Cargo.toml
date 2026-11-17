@@ -27,6 +27,7 @@ dc-module-api.workspace = true
 dc-project.workspace = true
 dc-raster.workspace = true
 dc-scene.workspace = true
+dc-scanner.workspace = true
 dc-session.workspace = true
 # aligners module
 dca-model.workspace = true

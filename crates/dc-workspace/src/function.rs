@@ -263,18 +263,48 @@ impl Workspace {
             ui.add_space(8.0);
         }
         let label = t(leaf::button_key(id, item.input, done));
+        let label_w = ui
+            .painter()
+            .layout_no_wrap(
+                label.clone(),
+                fonts::semibold(13.0),
+                egui::Color32::PLACEHOLDER,
+            )
+            .size()
+            .x
+            + 32.0;
         // once done, running again is not the main action of the page
         let button = if done && item.input.is_none() && !is_import_scans_command(id) {
             Button::secondary(label)
         } else {
             Button::primary(label)
         };
-        if button
-            .enabled(!self.is_busy())
-            .full_width(true)
-            .show(ui)
-            .clicked()
-        {
+        let enabled = !self.is_busy();
+        if is_import_scans_command(id) {
+            // the files, and beside them the scan with a scanner (alpha): its
+            // button only opens the scan window, which starts nothing by itself
+            // (under it when the two do not fit on one line)
+            let scan_w = crate::scan::scan_button_width(ui);
+            let run_w = ui.available_width() - scan_w - 8.0;
+            let (run, scan) = if label_w <= run_w {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let run = button.enabled(enabled).min_width(run_w).show(ui).clicked();
+                    (run, crate::scan::scan_button(ui, enabled))
+                })
+                .inner
+            } else {
+                let run = button.enabled(enabled).full_width(true).show(ui).clicked();
+                ui.add_space(6.0);
+                (run, crate::scan::scan_button(ui, enabled))
+            };
+            if run {
+                self.run_leaf(id);
+            }
+            if scan {
+                self.open_scan();
+            }
+        } else if button.enabled(enabled).full_width(true).show(ui).clicked() {
             self.run_leaf(id);
         }
         if let Some((_, line)) = leaf::long_notice(id) {

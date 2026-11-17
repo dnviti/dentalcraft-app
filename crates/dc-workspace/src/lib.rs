@@ -11,6 +11,11 @@
 //! ([`autosave`], driven by [`Workspace::tick`], which [`Workspace::show`]
 //! calls every frame).
 //!
+//! The "Scan" button of "Import scans" opens the scan window (alpha, `scan`):
+//! a 3D scanner driven by the `scan.*` commands of [`dc_scanner::control`],
+//! the same ones an agent runs with [`Workspace::start_scan_command`]; its
+//! surface joins the case through the import, as one undoable change.
+//!
 //! ```ignore
 //! let mut ws = Workspace::new(Box::new(AlignersModule::new()), None, None, render_state);
 //! // every frame
@@ -44,6 +49,7 @@ mod production;
 mod project;
 mod region;
 mod review;
+mod scan;
 mod select;
 mod setup;
 mod staging;
@@ -54,6 +60,7 @@ mod workspace;
 
 pub use menu::filter_ids;
 pub use project::{now_rfc3339, project_codecs};
+pub use scan::ScanTicket;
 pub use workspace::{Workspace, WorkspaceAction};
 
 dc_i18n::bundle!(pub(crate) fn loader);
