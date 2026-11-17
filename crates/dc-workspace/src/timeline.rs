@@ -41,9 +41,11 @@ impl TimelineModel {
         self.last.is_none()
     }
 
-    /// Week of treatment at which `stage` starts.
+    /// Week of treatment at which `stage` starts (`u32::MAX` past it: the
+    /// days of wear come from the case file, unchecked).
     pub fn week(&self, stage: u32) -> u32 {
-        stage * self.interval_days / 7
+        let week = u64::from(stage) * u64::from(self.interval_days) / 7;
+        u32::try_from(week).unwrap_or(u32::MAX)
     }
 }
 
@@ -306,6 +308,17 @@ mod tests {
     }
 
     #[test]
+    fn the_week_of_a_huge_interval_does_not_overflow() {
+        let m = TimelineModel {
+            last: Some(2),
+            interval_days: u32::MAX,
+        };
+        assert_eq!(m.week(1), u32::MAX / 7);
+        assert_eq!(m.week(7), u32::MAX);
+        assert_eq!(m.week(8), u32::MAX);
+    }
+
+    #[test]
     fn stepping_and_playing() {
         let mut s = TimelineState::default();
         s.step(3, 5);
@@ -321,5 +334,69 @@ mod tests {
         s.tick(3.0, 2);
         assert!(!s.playing);
         assert_eq!(s.current, 2);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    // The week of a stage never overflows, whatever the days of wear the case file holds: it
+    // is the whole weeks of `stage * interval_days` days, or `u32::MAX` when they do not fit.
+    #[kani::proof]
+    fn week_never_overflows() {
+        let m = TimelineModel {
+            last: kani::any(),
+            interval_days: kani::any(),
+        };
+        let stage: u32 = kani::any();
+        let week = m.week(stage);
+        let days = u64::from(stage) * u64::from(m.interval_days);
+        if days / 7 <= u64::from(u32::MAX) {
+            assert_eq!(u64::from(week), days / 7);
+        } else {
+            assert_eq!(week, u32::MAX);
+        }
+    }
+
+    // Stepping by up to 5 stages (the keys move by 1, Shift by 5) never overflows, always
+    // lands in 0..=last, and from a stage in that range moves by at most the step.
+    #[kani::proof]
+    fn step_stays_in_the_timeline() {
+        let mut s = TimelineState {
+            current: kani::any(),
+            ..TimelineState::default()
+        };
+        let delta: i64 = kani::any();
+        kani::assume((-5..=5).contains(&delta));
+        let last: u32 = kani::any();
+        let before = s.current;
+        s.step(delta, last);
+        assert!(s.current <= last);
+        if before <= last {
+            assert!(u64::from(s.current.abs_diff(before)) <= delta.unsigned_abs());
+        }
+    }
+
+    // Playing never moves past the last stage and never overflows: a due step moves one stage
+    // on, or stops the playing at the last stage.
+    #[kani::proof]
+    fn tick_stops_at_the_last_stage() {
+        let mut s = TimelineState {
+            current: kani::any(),
+            playing: kani::any(),
+            ..TimelineState::default()
+        };
+        let last: u32 = kani::any();
+        kani::assume(s.current <= last);
+        let now: f64 = kani::any();
+        kani::assume(now.is_finite());
+        let (before, was_playing) = (s.current, s.playing);
+        s.tick(now, last);
+        assert!(s.current <= last);
+        assert!(s.current == before || s.current == before + 1);
+        if was_playing && now >= 0.6 && before == last {
+            assert!(!s.playing);
+        }
     }
 }
