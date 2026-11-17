@@ -13,20 +13,20 @@ publish = false
 
 [workspace.dependencies]
 # dentalcraft-core crates
-dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-project = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-session = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-mcp = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
-dc-scanner = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.2" }
+dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-project = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-session = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-mcp = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
+dc-scanner = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.3" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }
@@ -61,9 +61,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
-dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
-dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.5" }
+dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.6" }
+dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.6" }
+dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.6" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"
