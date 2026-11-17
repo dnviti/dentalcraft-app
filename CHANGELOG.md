@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-alpha.5](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.4...v0.2.0-alpha.5) (2026-11-17)
+
+
+### Features
+
+* add the alpha in-app scan popup with turntable control ([54a54f0](https://github.com/dnviti-personal-org/dentalcraft-app/commit/54a54f091d70e5539ebf95fe767505797341808a))
+
+
+### Bug Fixes
+
+* **auth:** keep the sign-in session across restarts ([54a54f0](https://github.com/dnviti-personal-org/dentalcraft-app/commit/54a54f091d70e5539ebf95fe767505797341808a))
+* **project:** keep decimal numbers exact through save and reopen ([54a54f0](https://github.com/dnviti-personal-org/dentalcraft-app/commit/54a54f091d70e5539ebf95fe767505797341808a))
+
 ## [0.2.0-alpha.4](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.3...v0.2.0-alpha.4) (2026-11-15)
 
 
