@@ -17,6 +17,7 @@ scan-state-stopped = Fermata
 scan-fps = { $n } fotogrammi/s
 scan-fused = { $n } fotogrammi uniti
 scan-points = { $n } punti
+scan-scanner-pose = Scanner inclinato di { $tilt }° in basso, { $yaw }° di lato
 scan-triangles = { $n } triangoli
 scan-tracking-ok = Scanner seguito
 scan-tracking-lost = Posizione persa: torna su una parte già scansionata

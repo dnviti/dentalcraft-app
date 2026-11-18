@@ -48,7 +48,7 @@ use framing::Follow;
 use glam::Vec3;
 use serde_json::{Value, json};
 pub(crate) use turntable::OPEN_SEARCH_S;
-use turntable::{CalSnap, JobSnap, TableSnap, TableUi, matching};
+use turntable::{CalSnap, JobSnap, TableSnap, TableUi};
 
 use crate::{
     ImportWords, ScanFailure, ScanPopup, ScanTarget, caption, scene_color, select, t, tr_n,
@@ -196,20 +196,16 @@ fn addr<T>(a: &Arc<T>) -> usize {
 }
 
 /// What the live view frames: the cylinder of the region of interest when
-/// the rig is calibrated, else the robust bounds of the fused cloud (the
-/// points of the latest frame only when there is no cloud yet).
+/// the scan world is the calibrated rig frame (+Z the turntable axis), else
+/// the robust bounds of the fused cloud (the points of the latest frame
+/// only when there is no cloud yet).
 fn live_box(snap: &Snapshot) -> Option<(Vec3, Vec3)> {
     let preview = snap.preview.as_ref()?;
-    if snap.settings.use_roi
-        && let Some(cal) = matching(snap)
-        && let Some([_, tilt]) = snap.status.world_angles_deg
-        && let Some(b) = cal.roi_box(
+    if snap.settings.use_roi && snap.status.rig_world {
+        return Some(turntable::roi_box(
             snap.settings.roi_radius_mm,
             snap.settings.roi_height_mm,
-            tilt,
-        )
-    {
-        return Some(b);
+        ));
     }
     framing::robust_box(&preview.cloud.points).or_else(|| framing::bounds(&preview.frame_points))
 }
@@ -737,6 +733,18 @@ impl ScanUi {
             };
             if points > 0 {
                 text(ui, tr_n("scan-points", points.to_string()));
+            }
+            if let Some([tilt, yaw]) = s.status.scanner_deg {
+                text(
+                    ui,
+                    dc_i18n::tr_args(
+                        "scan-scanner-pose",
+                        &[
+                            ("tilt", &turntable::deg(tilt)),
+                            ("yaw", &turntable::deg(yaw)),
+                        ],
+                    ),
+                );
             }
             if let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
                 text(ui, tr_n("scan-triangles", m.face_count().to_string()));

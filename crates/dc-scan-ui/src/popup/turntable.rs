@@ -19,7 +19,7 @@ use dc_ui::icons as ic;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use egui::{Align, Layout, RichText, Sense, Stroke, Ui, vec2};
-use glam::{Quat, Vec3};
+use glam::Vec3;
 use serde_json::{Value, json};
 
 use super::{Act, ScanUi, Snapshot};
@@ -69,15 +69,6 @@ pub(super) struct TableSnap {
 
 fn num(v: &Value) -> Option<f32> {
     v.as_f64().map(|x| x as f32)
-}
-
-/// A vector of three numbers.
-fn vec3(v: &Value) -> Option<Vec3> {
-    let a = v.as_array()?;
-    match a.as_slice() {
-        [x, y, z] => Some(Vec3::new(num(x)?, num(y)?, num(z)?)),
-        _ => None,
-    }
 }
 
 impl TableSnap {
@@ -253,12 +244,6 @@ pub(super) struct CalSnap {
     pub scanner_serial: Option<String>,
     /// When it was made, in seconds since 1970.
     pub created: Option<u64>,
-    /// A point of the axis on the platter, and the platter's normal
-    /// towards the scanner (camera frame, mm).
-    pub axis_point: Option<Vec3>,
-    pub platter_up: Option<Vec3>,
-    /// A point and the direction of the tilt axis, when the table tilts.
-    pub tilt_axis: Option<(Vec3, Vec3)>,
     /// Errors of the fit: the turn in degrees, the axis position in mm
     /// (both 0 when the calibration did not store them).
     pub fit_rms_deg: f32,
@@ -278,9 +263,6 @@ impl CalSnap {
                 Value::String(s) => rfc3339_secs(s),
                 _ => None,
             },
-            axis_point: vec3(&v["axis_point"]),
-            platter_up: vec3(&v["platter_up"]),
-            tilt_axis: vec3(&v["tilt_axis_point"]).zip(vec3(&v["tilt_axis_dir"])),
             fit_rms_deg: num(&v["fit_rms_deg"]).unwrap_or(0.0),
             fit_rms_mm: num(&v["fit_rms_mm"]).unwrap_or(0.0),
         })
@@ -348,36 +330,23 @@ impl CalSnap {
         let (deg, mm) = (self.fit_rms_deg, self.fit_rms_mm);
         (deg != 0.0 || mm != 0.0).then(|| (CalQuality::of(deg, mm), deg, mm))
     }
+}
 
-    /// Box around the cylinder of the region of interest (`radius_mm`
-    /// around the axis, from the platter to `height_mm` above it) in the
-    /// frame of a scan that began with the table tilted by `tilt_deg`.
-    pub fn roi_box(&self, radius_mm: f32, height_mm: f32, tilt_deg: f32) -> Option<(Vec3, Vec3)> {
-        const AROUND: usize = 32;
-        let (point, up) = (self.axis_point?, self.platter_up?.try_normalize()?);
-        let e1 = up.any_orthonormal_vector();
-        let e2 = up.cross(e1);
-        let tilt = self.tilt_axis.and_then(|(p, d)| {
-            Some((
-                p,
-                Quat::from_axis_angle(d.try_normalize()?, tilt_deg.to_radians()),
-            ))
-        });
-        let mut lo = Vec3::splat(f32::INFINITY);
-        let mut hi = Vec3::splat(f32::NEG_INFINITY);
-        for h in [-ROI_BELOW_PLATTER_MM, height_mm] {
-            for i in 0..AROUND {
-                let a = std::f32::consts::TAU * i as f32 / AROUND as f32;
-                let mut p = point + up * h + (e1 * a.cos() + e2 * a.sin()) * radius_mm;
-                if let Some((axis_point, q)) = tilt {
-                    p = axis_point + q * (p - axis_point);
-                }
-                lo = lo.min(p);
-                hi = hi.max(p);
-            }
-        }
-        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
-    }
+/// Box around the cylinder of the region of interest (`radius_mm` around
+/// the axis, from under the platter to `height_mm` above it) in the scan
+/// world of a calibrated rig (+Z the axis, origin on the platter).
+pub(super) fn roi_box(radius_mm: f32, height_mm: f32) -> (Vec3, Vec3) {
+    (
+        Vec3::new(-radius_mm, -radius_mm, -ROI_BELOW_PLATTER_MM),
+        Vec3::new(radius_mm, radius_mm, height_mm),
+    )
+}
+
+/// The turntable rotation as an orientation (degrees in (−180, 180]): the
+/// table counts whole turns (a full turn reads 360), the platter does not.
+fn wrapped(deg: f32) -> f32 {
+    let w = deg.rem_euclid(360.0);
+    if w > 180.0 { w - 360.0 } else { w }
 }
 
 /// The turning speed the popup starts with (°/s): slow enough for the
@@ -498,7 +467,7 @@ fn backend_name(id: &str) -> String {
 }
 
 /// A signed angle as the popup shows it (`+12.5`, `−3.0`).
-fn deg(v: f32) -> String {
+pub(super) fn deg(v: f32) -> String {
     let v = if v.abs() < 0.05 { 0.0 } else { v };
     if v < 0.0 {
         format!("−{:.1}", -v)
@@ -942,7 +911,7 @@ impl ScanUi {
                 );
             };
             if let Some(r) = table.rotate_deg {
-                text(ui, tr_n("turntable-rotation", deg(r)));
+                text(ui, tr_n("turntable-rotation", deg(wrapped(r))));
             }
             if table.tilt.is_some()
                 && let Some(v) = table.tilt_deg
@@ -1475,35 +1444,23 @@ mod tests {
 
     #[test]
     fn box_of_the_region_of_interest() {
-        // the platter faces the scanner: its normal is -Y here, the axis
-        // is 200 mm away along Z
-        let (lo, hi) = calibration(json!({})).roi_box(45.0, 60.0, 0.0).unwrap();
-        assert!(
-            (lo.x + 45.0).abs() < 0.1 && (hi.x - 45.0).abs() < 0.1,
-            "{lo} {hi}"
-        );
-        assert!((lo.z - 155.0).abs() < 0.1 && (hi.z - 245.0).abs() < 0.1);
-        assert!((hi.y - ROI_BELOW_PLATTER_MM).abs() < 1e-4 && (lo.y + 60.0).abs() < 1e-4);
-        // tilting the table about the X axis through the axis point moves
-        // the cylinder with it
-        let tilted = calibration(json!({
-            "tilt_axis_point": [0.0, 0.0, 200.0],
-            "tilt_axis_dir": [1.0, 0.0, 0.0],
-        }));
-        let (tlo, thi) = tilted.roi_box(45.0, 60.0, 90.0).unwrap();
-        assert!((tlo.x + 45.0).abs() < 0.1 && (thi.x - 45.0).abs() < 0.1);
-        // the platter normal -Y turned to -Z: the height runs from Z 201 to
-        // Z 140 and the disk lies in the XY plane
-        assert!(
-            (tlo.z - 140.0).abs() < 0.1 && (thi.z - 201.0).abs() < 0.1,
-            "{tlo} {thi}"
-        );
-        assert!((thi.y - 45.0).abs() < 0.1 && (tlo.y + 45.0).abs() < 0.1);
-        let flat = tilted.roi_box(45.0, 60.0, 0.0).unwrap();
-        assert_eq!(flat, (lo, hi), "no tilt, no move");
-        // without an axis there is no box
-        let bare = CalSnap::from_json(&json!({ "turntable_id": "t" })).unwrap();
-        assert_eq!(bare.roi_box(45.0, 60.0, 0.0), None);
+        // the scan world of a calibrated rig: +Z the axis, origin on the
+        // platter, so the cylinder stands on the XY plane
+        let (lo, hi) = roi_box(45.0, 60.0);
+        assert_eq!(lo, Vec3::new(-45.0, -45.0, -ROI_BELOW_PLATTER_MM));
+        assert_eq!(hi, Vec3::new(45.0, 45.0, 60.0));
+    }
+
+    #[test]
+    fn the_rotation_shows_as_an_orientation() {
+        // homing by a full turn leaves the table counter at 360: the
+        // platter is back where it started
+        assert!((wrapped(360.1) - 0.1).abs() < 1e-3);
+        assert!((wrapped(-370.0) + 10.0).abs() < 1e-3);
+        assert_eq!(wrapped(180.0), 180.0);
+        assert_eq!(wrapped(-180.0), 180.0);
+        assert!((wrapped(190.0) + 170.0).abs() < 1e-3);
+        assert_eq!(deg(wrapped(720.0)), "0.0");
     }
 
     #[test]

@@ -17,6 +17,7 @@ scan-state-stopped = Stopped
 scan-fps = { $n } frames/s
 scan-fused = { $n } frames joined
 scan-points = { $n } points
+scan-scanner-pose = Scanner { $tilt }° down, { $yaw }° to the side
 scan-triangles = { $n } triangles
 scan-tracking-ok = Following the scanner
 scan-tracking-lost = Position lost: go back over a part already scanned
