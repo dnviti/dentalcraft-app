@@ -280,23 +280,24 @@ impl Workspace {
             Button::primary(label)
         };
         let enabled = !self.is_busy();
-        if is_import_scans_command(id) {
-            // the files, and beside them the scan with a scanner (alpha): its
-            // button only opens the scan window, which starts nothing by itself
-            // (under it when the two do not fit on one line)
-            let scan_w = crate::scan::scan_button_width(ui);
+        if is_import_scans_command(id) && item.scanner.is_some() {
+            // the files, and beside them the scan with a scanner (alpha), as
+            // the module declares it: its button only opens the scan window,
+            // which starts nothing by itself (under it when the two do not
+            // fit on one line)
+            let scan_w = dc_scan_ui::scan_button_width(ui);
             let run_w = ui.available_width() - scan_w - 8.0;
             let (run, scan) = if label_w <= run_w {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let run = button.enabled(enabled).min_width(run_w).show(ui).clicked();
-                    (run, crate::scan::scan_button(ui, enabled))
+                    (run, dc_scan_ui::scan_button(ui, enabled))
                 })
                 .inner
             } else {
                 let run = button.enabled(enabled).full_width(true).show(ui).clicked();
                 ui.add_space(6.0);
-                (run, crate::scan::scan_button(ui, enabled))
+                (run, dc_scan_ui::scan_button(ui, enabled))
             };
             if run {
                 self.run_leaf(id);

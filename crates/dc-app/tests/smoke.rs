@@ -88,7 +88,7 @@ fn navigation_home_support_home() {
 }
 
 #[test]
-fn new_project_requires_case_alias_and_scans() {
+fn new_project_requires_case_alias_but_not_scans() {
     let _g = lock();
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path(), Lang::En);
@@ -96,14 +96,53 @@ fn new_project_requires_case_alias_and_scans() {
     h.run_steps(3);
     assert_eq!(h.state().screen(), Screen::NewProject);
     assert!(h.query_by_label_contains("Required").is_none());
+    // step 3 says the scans are optional from the start
+    assert!(h.query_by_label_contains("Scans are optional").is_some());
     h.get_by_label("Create project").click();
     h.run_steps(3);
-    // still here, with the errors shown
+    // still here, with the errors shown for the two fields; scans are not one
     assert_eq!(h.state().screen(), Screen::NewProject);
     assert_eq!(h.query_all_by_label_contains("Required").count(), 2);
-    assert!(h.query_by_label_contains("Add at least one scan").is_some());
+    assert!(h.query_by_label_contains("Add at least one scan").is_none());
     // coming-soon modules cannot be picked
     assert!(h.query_all_by_label("Implant").count() >= 1);
+}
+
+#[test]
+fn new_project_offers_scan_beside_browse_and_the_button_only_opens_the_window() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path(), Lang::En);
+    h.get_by_label("New project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().screen(), Screen::NewProject);
+    // both ways to bring scans in, side by side (the aligners module takes
+    // scans from the scanner)
+    assert!(h.query_by_label("Browse files…").is_some());
+    assert!(h.query_by_label("ALPHA").is_some());
+    assert!(h.query_by_label("Scan (alpha)").is_none());
+    h.get_by_role_and_label(egui::Role::Button, "Scan").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Scan (alpha)").is_some(),
+        "the window opens"
+    );
+    // it lists the scanners and starts nothing: no scanner is connected
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while h.query_by_label("Not connected").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the scanners are not listed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    // the form behind it is untouched: no scan row was added
+    assert!(h.query_by_label_contains("Scans are optional").is_some());
+    h.get_by_label("Close the scan window").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Scan (alpha)").is_none());
+    assert_eq!(h.state().screen(), Screen::NewProject);
 }
 
 #[test]

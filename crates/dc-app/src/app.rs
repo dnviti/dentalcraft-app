@@ -11,6 +11,7 @@ use dc_auth_client::{AuthClient, AuthState, MemoryTokenStore, UserInfo};
 use dc_i18n::Lang;
 use dc_module_api::ModuleRegistry;
 use dc_project::LoadOutcome;
+use dc_scan_ui::ScanPopup;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_ui::{fonts, icons, theme, tokens};
 use dc_workspace::{Workspace, WorkspaceAction};
@@ -130,6 +131,9 @@ pub struct DentalCraftApp {
     pub(crate) sign_in: SignInState,
     pub(crate) support: SupportState,
     pub(crate) new_project: NewProjectState,
+    /// The scan window of the New project screen (the generic scan popup);
+    /// the surfaces it hands over join `new_project.scans`.
+    pub(crate) new_project_scan: ScanPopup,
     pub(crate) show_all_recent: bool,
     pub(crate) show_shortcuts: bool,
     /// The "Licence and notices" dialog, when open.
@@ -169,6 +173,7 @@ impl DentalCraftApp {
             .as_ref()
             .map_or(AuthState::SignedOut, AuthClient::state);
         let new_project = NewProjectState::new(&deps.store.dirs().projects);
+        let new_project_scan = ScanPopup::new(deps.render_state.clone());
         Self {
             store: deps.store,
             settings,
@@ -185,6 +190,7 @@ impl DentalCraftApp {
             sign_in: SignInState::default(),
             support: SupportState::default(),
             new_project,
+            new_project_scan,
             show_all_recent: false,
             show_shortcuts: false,
             about: None,
@@ -255,6 +261,11 @@ impl DentalCraftApp {
             self.start_updates();
         }
         self.poll_background(&ctx);
+        // leaving the form closes its scan window and drops the surfaces of
+        // the scanner with their files
+        if self.screen != Screen::NewProject {
+            self.leave_new_project_scan();
+        }
         self.guard_close(&ctx);
         self.keyboard(&ctx);
 
@@ -596,8 +607,10 @@ impl DentalCraftApp {
                     self.new_project = NewProjectState::new(&self.store.dirs().projects);
                     self.enter_workspace(&req.module_id, Some(project), Some(req.path), false);
                     // the scans are the base state of this project: nothing to
-                    // undo, so the report never says "Ctrl+Z"
-                    if let Some(ws) = &mut self.workspace {
+                    // undo, so the report never says "Ctrl+Z"; a project made
+                    // without scans has no report and the workspace shows its
+                    // empty state with Import and Scan
+                    if let (Some(ws), Some(report)) = (&mut self.workspace, report) {
                         ws.show_import_report(&base_state_report(report));
                     }
                 }
@@ -687,6 +700,8 @@ impl DentalCraftApp {
                 self.show_shortcuts = false;
             } else if self.screen == Screen::SignIn {
                 self.sign_in_escape();
+            } else if self.new_project_scan.is_open() {
+                // the scan window closes itself on Esc
             } else if self.screen != Screen::Home && self.create_job.is_none() {
                 self.screen = Screen::Home;
             }

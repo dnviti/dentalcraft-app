@@ -38,8 +38,9 @@ pub struct NewProjectRequest {
 pub struct Created {
     /// The saved project.
     pub project: Project,
-    /// The serialised import report (what failed, warnings).
-    pub report: Value,
+    /// The serialised import report (what failed, warnings); `None` when no
+    /// scan was picked, so there was nothing to import.
+    pub report: Option<Value>,
 }
 
 /// Why no project was created.
@@ -207,32 +208,39 @@ pub fn run(
     if ctx.is_cancelled() {
         return Err(CreateError::Cancelled);
     }
-    let report = import(&mut state, req, ctx);
-    if report.cancelled {
-        return Err(CreateError::Cancelled);
-    }
-    for f in &report.failed {
-        tracing::warn!(
-            "not imported: {} ({}): {:?}",
-            f.path.display(),
-            f.code,
-            f.detail
-        );
-    }
-    if report.imported.is_empty() {
-        let reasons = report.failed.iter().map(|f| f.reason.clone()).collect();
-        return Err(CreateError::NothingImported(reasons));
-    }
-    for s in &report.imported {
-        tracing::info!(
-            "imported {}: {} faces, role {:?} ({:?}), source units {:?}",
-            s.source_name,
-            s.faces,
-            s.role,
-            s.role_source,
-            s.source_units
-        );
-    }
+    // no scans picked: the project starts empty and the workspace offers the
+    // import and the scan; picked files that all fail are a real error
+    let report = if req.scans.is_empty() {
+        None
+    } else {
+        let report = import(&mut state, req, ctx);
+        if report.cancelled {
+            return Err(CreateError::Cancelled);
+        }
+        for f in &report.failed {
+            tracing::warn!(
+                "not imported: {} ({}): {:?}",
+                f.path.display(),
+                f.code,
+                f.detail
+            );
+        }
+        if report.imported.is_empty() {
+            let reasons = report.failed.iter().map(|f| f.reason.clone()).collect();
+            return Err(CreateError::NothingImported(reasons));
+        }
+        for s in &report.imported {
+            tracing::info!(
+                "imported {}: {} faces, role {:?} ({:?}), source units {:?}",
+                s.source_name,
+                s.faces,
+                s.role,
+                s.role_source,
+                s.source_units
+            );
+        }
+        Some(report)
+    };
     // the import of the module may have written its data already (the bases
     // it closed the scans with): a new case starts from it
     if req.module_id == "aligners" && state.module("aligners").is_none() {
@@ -248,7 +256,7 @@ pub fn run(
             .map_err(|e| CreateError::Failed(format!("{}: {e}", dir.display())))?;
     }
     dc_project::save(&req.path, &project).map_err(|e| CreateError::Failed(e.to_string()))?;
-    let report = serde_json::to_value(&report).unwrap_or(Value::Null);
+    let report = report.map(|r| serde_json::to_value(&r).unwrap_or(Value::Null));
     Ok(Created { project, report })
 }
 
@@ -339,8 +347,37 @@ mod tests {
         assert!(p.case_state.module("aligners").is_some());
         assert!(req.path.exists());
         assert_eq!(msgs.borrow().len(), 1, "only the saving message");
-        assert_eq!(created.report["imported"].as_array().unwrap().len(), 1);
-        assert!(created.report["failed"].as_array().unwrap().is_empty());
+        let report = created.report.as_ref().unwrap();
+        assert_eq!(report["imported"].as_array().unwrap().len(), 1);
+        assert!(report["failed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_project_without_scans_is_created_saved_and_reopens_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = request(dir.path(), Vec::new());
+        let created = run_quiet(&req).unwrap();
+        assert!(created.report.is_none(), "nothing was imported");
+        let p = &created.project;
+        assert_eq!(p.case_state.case.patient_code, "BIA-07");
+        assert_eq!(p.case_state.case.case_id, "AL-1");
+        assert_eq!(p.case_state.case.notes, "check the 12");
+        assert!(p.case_state.case.scans.is_empty());
+        assert!(p.case_state.module("aligners").is_some());
+        assert!(req.path.exists());
+
+        // the saved file loads again, still without scans
+        let module = dca_module::AlignersModule::new();
+        let loaded = dc_project::load(&req.path, &dc_workspace::project_codecs(&module)).unwrap();
+        let case = &loaded.project.case_state.case;
+        assert!(case.scans.is_empty());
+        assert_eq!(case.patient_code, "BIA-07");
+        assert!(loaded.project.case_state.module("aligners").is_some());
+
+        // and the workspace opens on it
+        let ws =
+            dc_workspace::Workspace::new_headless(Box::new(module), Some(loaded.project), None);
+        assert!(ws.state().case.scans.is_empty());
     }
 
     #[test]
@@ -409,7 +446,9 @@ mod tests {
         let created = run_quiet(&req).unwrap();
         assert!(req.path.exists());
         assert_eq!(created.project.case_state.case.scans.len(), 1);
-        let failed = created.report["failed"].as_array().unwrap();
+        let failed = created.report.as_ref().unwrap()["failed"]
+            .as_array()
+            .unwrap();
         assert_eq!(failed.len(), 1);
         assert!(failed[0]["path"].as_str().unwrap().ends_with("empty.stl"));
         assert!(!failed[0]["reason"].as_str().unwrap().is_empty());
@@ -505,7 +544,7 @@ mod tests {
         );
 
         // the app shows the report of the base state: the arch warning stays
-        let report = base_state_report(created.report);
+        let report = base_state_report(created.report.unwrap());
         let mut ws = Workspace::new_headless(
             Box::new(dca_module::AlignersModule::new()),
             Some(created.project),

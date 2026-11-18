@@ -1,0 +1,33 @@
+[package]
+name = "dc-scan-ui"
+description = "Scan popup (alpha): drives a 3D scanner and a turntable, cleans and builds the surface, hands it to the screen that opened it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+# core crates
+dc-case.workspace = true
+dc-i18n.workspace = true
+dc-jobs.workspace = true
+dc-mesh.workspace = true
+dc-scanner.workspace = true
+dc-scene.workspace = true
+# app crates
+dc-ui.workspace = true
+dc-viewport.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+
+[lints]
+workspace = true

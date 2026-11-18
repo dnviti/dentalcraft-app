@@ -1474,6 +1474,7 @@ impl Workspace {
         );
         let mut import = false;
         let mut scan = false;
+        let offers_scanner = self.offers_scanner();
         widgets::card_frame(&child).show(&mut child, |ui| {
             ui.set_width(360.0);
             ui.vertical_centered(|ui| {
@@ -1502,6 +1503,7 @@ impl Workspace {
                 }
                 ui.add_space(10.0);
                 // the files, and beside them the scan with a scanner (alpha)
+                // when the module lets the scans come from one
                 let import_label = t("ws-import-scans");
                 let import_w = ui
                     .painter()
@@ -1515,7 +1517,11 @@ impl Workspace {
                     + 16.0
                     + 8.0
                     + 32.0;
-                let row = import_w + 8.0 + crate::scan::scan_button_width(ui);
+                let row = if offers_scanner {
+                    import_w + 8.0 + dc_scan_ui::scan_button_width(ui)
+                } else {
+                    import_w
+                };
                 ui.allocate_ui_with_layout(
                     vec2(row, 36.0),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -1528,7 +1534,9 @@ impl Workspace {
                         {
                             import = true;
                         }
-                        scan = crate::scan::scan_button(ui, true);
+                        if offers_scanner {
+                            scan = dc_scan_ui::scan_button(ui, true);
+                        }
                     },
                 );
             });
