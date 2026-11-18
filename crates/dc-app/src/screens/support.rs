@@ -106,6 +106,9 @@ pub struct SupportState {
     pub outcome: Option<TicketOutcome>,
     /// Show validation errors.
     pub show_errors: bool,
+    /// "Show what is sent": the next anonymous diagnostics report, as it
+    /// was when the user opened it.
+    pub(crate) diagnostics_preview: Option<String>,
 }
 
 impl SupportState {
@@ -824,5 +827,31 @@ impl DentalCraftApp {
                 self.check_for_updates();
             }
         });
+        ui.add_space(12.0);
+        let state = match self.settings.diagnostics {
+            Some(true) => t!("support-diagnostics-on"),
+            Some(false) => t!("support-diagnostics-off"),
+            None => t!("support-diagnostics-unset"),
+        };
+        text(ui, state, fonts::ui(12.0), c.text_secondary);
+        if widgets::link(ui, t!("support-diagnostics-show")).clicked() {
+            self.support.diagnostics_preview = match self.support.diagnostics_preview.take() {
+                Some(_) => None,
+                None => Some(self.diagnostics_preview_text()),
+            };
+        }
+        if let Some(preview) = &self.support.diagnostics_preview {
+            egui::ScrollArea::vertical()
+                .id_salt("dc-diagnostics-preview")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .fill(c.bg_sunken)
+                        .inner_margin(Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(preview.as_str()).font(fonts::mono(11.0)));
+                        });
+                });
+        }
     }
 }

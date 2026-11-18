@@ -1,0 +1,32 @@
+[package]
+name = "dc-diagnostics"
+description = "DentalCraft anonymous diagnostics: crash, error and session reports, cleaned of personal data, queued on disk and sent to the DentalCraft server only with the user's consent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+dc-case.workspace = true
+dc-command.workspace = true
+dc-i18n.workspace = true
+dc-module-api.workspace = true
+dc-update.workspace = true
+
+chrono.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

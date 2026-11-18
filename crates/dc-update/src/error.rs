@@ -60,6 +60,20 @@ impl UpdateError {
         }
     }
 
+    /// Stable code for the diagnostics reports (`update.offline`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Offline(_) => "update.offline",
+            Self::Server(_) => "update.server",
+            Self::NotGenuine => "update.not-genuine",
+            Self::Damaged => "update.damaged",
+            Self::Cancelled => "update.cancelled",
+            Self::NotWritable(_) => "update.not-writable",
+            Self::NoDownload => "update.no-download",
+            Self::Install(_) => "update.install",
+        }
+    }
+
     /// The message for the user, in the UI language.
     pub fn message(&self) -> String {
         crate::loader();

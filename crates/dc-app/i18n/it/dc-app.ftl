@@ -340,3 +340,26 @@ update-restart-now = Riavvia ora
 update-failed-title = L'aggiornamento non è stato installato
 update-try-again = Riprova
 update-close = Chiudi
+
+## Diagnostica anonima (domanda al primo avvio, menu account, pagina di assistenza)
+diagnostics-consent-title = Aiuta a correggere gli errori di DentalCraft
+diagnostics-consent-body = Quando qualcosa va storto, DentalCraft può inviare un rapporto anonimo al suo sviluppatore, così i problemi si trovano e si correggono prima. Non viene inviato nulla se non spunti la casella.
+diagnostics-sent-title = Cosa viene inviato
+diagnostics-sent-problems = Rapporti su arresti ed errori, con le ultime righe del registro
+diagnostics-sent-system = La versione di DentalCraft, il sistema operativo, la scheda grafica e la memoria
+diagnostics-sent-id = Un numero casuale per questa installazione, non collegato al tuo account
+diagnostics-never-title = Cosa non viene mai inviato
+diagnostics-never-data = Scansioni, progetti o dati dei pazienti
+diagnostics-never-account = Il tuo account, il nome o l'indirizzo e-mail
+diagnostics-never-files = I nomi dei tuoi file e delle tue cartelle
+diagnostics-details-link = Dettagli
+diagnostics-details-body = Un rapporto dice di che tipo di problema si tratta (arresto, errore o avviso), in quale parte di DentalCraft è successo, un breve messaggio tecnico e, per un arresto, i passi che il programma stava facendo. Prima di conservare qualsiasi cosa, dal testo si tolgono nomi di file e cartelle, nomi utente, codici dei pazienti, indirizzi e-mail e codici di accesso. I rapporti restano su questo computer finché non arrivano al server di DentalCraft; la pagina di assistenza mostra il prossimo.
+diagnostics-consent-check = Invia dati diagnostici anonimi per aiutare a correggere gli errori
+diagnostics-consent-later = Puoi cambiare questa scelta in qualsiasi momento dal menu account.
+diagnostics-consent-continue = Continua
+diagnostics-setting = Invia dati diagnostici anonimi
+diagnostics-preview-empty = Non c'è nulla in attesa di invio.
+support-diagnostics-on = La diagnostica anonima è attiva. Puoi disattivarla dal menu account.
+support-diagnostics-off = La diagnostica anonima è disattivata. Puoi attivarla dal menu account.
+support-diagnostics-unset = Diagnostica anonima: non hai ancora scelto. Scegli dal menu account.
+support-diagnostics-show = Mostra cosa viene inviato

@@ -135,6 +135,15 @@ impl SpecKind {
             SpecKind::SetRole | SpecKind::Leaf(_) => "ws-toast-command-failed",
         }
     }
+
+    /// Where a failure is reported in the anonymous diagnostics.
+    fn source(self, command: &str) -> &'static str {
+        match self {
+            SpecKind::Import | SpecKind::ScanImport(_) => "import",
+            SpecKind::Leaf(_) if command.contains("export") => "export",
+            SpecKind::SetRole | SpecKind::Leaf(_) => "command",
+        }
+    }
 }
 
 pub(crate) enum Task {
@@ -143,6 +152,8 @@ pub(crate) enum Task {
     /// undo step and the output is reported.
     Spec {
         kind: SpecKind,
+        /// The command id (`aligners.planning.setup`).
+        command: &'static str,
         label: String,
         handle: JobHandle<Result<CommandOutput, CommandError>>,
     },
@@ -732,6 +743,13 @@ impl Workspace {
                 .iter()
                 .any(|c| c.id == command_id && c.status == MenuStatus::Stub);
             if !stub {
+                tracing::error!(
+                    code = "command-failed",
+                    source = "command",
+                    command = command_id,
+                    module = self.module.id(),
+                    "{command_id} did not start: {e}"
+                );
                 self.toast(
                     Toast::new(ToastLevel::Error, "ws-toast-command-failed")
                         .with_detail(e.to_string()),
@@ -1004,7 +1022,7 @@ impl Workspace {
         kind: SpecKind,
         name_key: &'static str,
     ) {
-        let label = spec.label_key.to_owned();
+        let (command, label) = (spec.id, spec.label_key.to_owned());
         let state = self.undo.current().clone();
         let handle = self
             .jobs
@@ -1013,6 +1031,7 @@ impl Workspace {
             name_key,
             task: Task::Spec {
                 kind,
+                command,
                 label,
                 handle,
             },
@@ -1426,6 +1445,7 @@ impl Workspace {
         match task {
             Task::Spec {
                 kind,
+                command,
                 label,
                 handle,
             } => {
@@ -1439,7 +1459,7 @@ impl Workspace {
                     };
                     self.scan_import_finished(id, r);
                 }
-                self.finish_spec(kind, label, taken);
+                self.finish_spec(kind, command, label, taken);
             }
             Task::Command { label, handle } => match handle.try_take() {
                 Some(Ok(Ok(state))) => self.undo.push(Arc::new(state), label),
@@ -1449,8 +1469,11 @@ impl Workspace {
                 Some(Ok(Err(CommandError::NotAvailable(_)))) => {
                     self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 }
-                Some(Ok(Err(e))) => self.job_error("ws-toast-command-failed", error_text(e)),
-                Some(Err(e)) => self.job_panic(&e),
+                Some(Ok(Err(e))) => {
+                    self.log_failure("command", None, &label, &e);
+                    self.job_error("ws-toast-command-failed", error_text(e));
+                }
+                Some(Err(e)) => self.job_panic(None, &label, &e),
                 None => {}
             },
             Task::Save(save) => self.finish_save(*save),
@@ -1462,6 +1485,7 @@ impl Workspace {
     fn finish_spec(
         &mut self,
         kind: SpecKind,
+        command: &'static str,
         label: String,
         taken: Option<Result<Result<CommandOutput, CommandError>, JobError>>,
     ) {
@@ -1485,8 +1509,11 @@ impl Workspace {
             Some(Ok(Err(CommandError::NotAvailable(_)))) => {
                 self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
             }
-            Some(Ok(Err(e))) => self.job_error(kind.error_key(), error_text(e)),
-            Some(Err(e)) => self.job_panic(&e),
+            Some(Ok(Err(e))) => {
+                self.log_failure(kind.source(command), Some(command), &label, &e);
+                self.job_error(kind.error_key(), error_text(e));
+            }
+            Some(Err(e)) => self.job_panic(Some(command), &label, &e),
             None => {}
         }
     }
@@ -1538,6 +1565,16 @@ impl Workspace {
                 } else {
                     "ws-toast-autosave-failed"
                 };
+                tracing::error!(
+                    code = if explicit {
+                        "save-failed"
+                    } else {
+                        "autosave-failed"
+                    },
+                    source = "save",
+                    module = self.module.id(),
+                    "the project was not saved: {detail}"
+                );
                 self.job_error(key, detail);
                 if let Some(exit) = then {
                     self.confirm_exit = Some(exit);
@@ -1653,8 +1690,40 @@ impl Workspace {
         self.toast(Toast::new(ToastLevel::Error, key).with_detail(detail));
     }
 
-    fn job_panic(&mut self, e: &JobError) {
+    fn job_panic(&mut self, command: Option<&str>, label: &str, e: &JobError) {
+        tracing::error!(
+            code = "job-panicked",
+            source = "job",
+            command = command.unwrap_or_default(),
+            module = self.module.id(),
+            "{label}: {e}"
+        );
         self.job_error("ws-toast-job-failed", e.to_string());
+    }
+
+    /// Logs a failed command for the log file and the anonymous
+    /// diagnostics: a failure as an error, refused parameters as a flagged
+    /// warning.
+    fn log_failure(&self, source: &str, command: Option<&str>, label: &str, e: &CommandError) {
+        let command = command.unwrap_or_default();
+        let module = self.module.id();
+        match e {
+            CommandError::Invalid(m) => tracing::warn!(
+                diag = true,
+                code = "command-invalid",
+                source,
+                command,
+                module,
+                "{label}: {m}"
+            ),
+            e => tracing::error!(
+                code = %format!("{source}-failed"),
+                source,
+                command,
+                module,
+                "{label}: {e}"
+            ),
+        }
     }
 
     pub(crate) fn next_action(&mut self) -> WorkspaceAction {

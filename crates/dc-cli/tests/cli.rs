@@ -619,3 +619,163 @@ fn update_without_the_website_fails_plainly_and_changes_nothing() {
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("unknown parameter `force`"));
 }
+
+#[test]
+fn the_diagnostics_commands_are_listed_and_described() {
+    let list = ok_json(&["commands", "--json"]);
+    for id in [
+        "app.diagnostics.status",
+        "app.diagnostics.set",
+        "app.diagnostics.preview",
+        "app.diagnostics.send",
+    ] {
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} not listed"));
+        assert_eq!(entry["source"], "app");
+    }
+    let d = ok_json(&["describe", "app.diagnostics.set", "--json"]);
+    assert_eq!(d["label"], "Turn diagnostics on or off");
+    assert_eq!(
+        d["params_schema"]["properties"]["enabled"]["type"],
+        "boolean"
+    );
+    assert!(d["doc"].as_str().unwrap().contains("installation number"));
+}
+
+/// `dentalcraft-cli` with the app's folders under `root` (XDG) and the
+/// sign-in server `issuer`.
+#[cfg(target_os = "linux")]
+fn cli_in(root: &Path, issuer: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dentalcraft-cli"))
+        .args(args)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("DC_AUTH_ISSUER", issuer)
+        .output()
+        .expect("run dentalcraft-cli")
+}
+
+/// The output of the one command of `run --cmd`.
+#[cfg(target_os = "linux")]
+fn run_in(root: &Path, issuer: &str, cmd: &str) -> Result<Value, String> {
+    let out = cli_in(root, issuer, &["run", "--cmd", cmd]);
+    if !out.status.success() {
+        return Err(stderr_of(&out));
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    Ok(v["results"][0]["output"].clone())
+}
+
+/// A loopback server that answers one `POST` with `202`; its base URL and
+/// the request it received.
+#[cfg(target_os = "linux")]
+fn one_report_server() -> (String, std::thread::JoinHandle<String>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (mut head, mut length) = (String::new(), 0usize);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = v.trim().parse().unwrap_or(0);
+            }
+            head.push_str(&line);
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let reply = r#"{"accepted":1,"duplicates":0}"#;
+        write!(
+            stream,
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        )
+        .unwrap();
+        format!("{head}\r\n{}", String::from_utf8_lossy(&body))
+    });
+    (base, handle)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn diagnostics_from_the_command_line_follow_the_app_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let closed = "http://127.0.0.1:9";
+    // not asked yet: nothing is collected or sent
+    let st = run_in(root, closed, "app.diagnostics.status").unwrap();
+    assert_eq!(st["enabled"], Value::Null);
+    assert_eq!(
+        st["endpoint"],
+        "http://127.0.0.1:9/api/v1/diagnostics/reports"
+    );
+    let err = run_in(root, closed, "app.diagnostics.send").unwrap_err();
+    assert!(err.contains("diagnostics are off"), "{err}");
+    let err = run_in(root, closed, r#"app.diagnostics.set={"enabled":"yes"}"#).unwrap_err();
+    assert!(err.contains("true or false"), "{err}");
+    // on: the app's settings file says so
+    let on = run_in(root, closed, r#"app.diagnostics.set={"enabled":true}"#).unwrap();
+    let id = on["install_id"].as_str().unwrap().to_owned();
+    let settings: Value = serde_json::from_slice(
+        &std::fs::read(root.join("config/dentalcraft/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            settings["diagnostics"].clone(),
+            settings["install_id"].clone()
+        ),
+        (json!(true), json!(id))
+    );
+    // an event the app queued
+    let queue = root.join("data/dentalcraft/diagnostics/queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    let event = json!({
+        "id": "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", "kind": "error",
+        "at": "2026-11-18T15:59:58Z", "source": "save", "code": "save-failed",
+        "message": "the project was not saved", "command": null, "module": "aligners",
+        "backtrace": null, "log_tail": null, "context": null
+    });
+    std::fs::write(
+        queue.join("0000000000000001-000000-x.json"),
+        event.to_string(),
+    )
+    .unwrap();
+    let preview = run_in(root, closed, "app.diagnostics.preview").unwrap();
+    assert_eq!(preview["pending"], 1);
+    assert_eq!(preview["report"]["install_id"], id);
+    assert_eq!(preview["report"]["events"][0]["code"], "save-failed");
+    // no server: the event stays
+    let err = run_in(root, closed, "app.diagnostics.send").unwrap_err();
+    assert!(err.contains("sent later"), "{err}");
+    // a server takes it
+    let (base, server) = one_report_server();
+    let sent = run_in(root, &base, "app.diagnostics.send").unwrap();
+    assert_eq!(
+        (sent["sent"].clone(), sent["remaining"].clone()),
+        (json!(1), json!(0))
+    );
+    let request = server.join().unwrap();
+    assert!(
+        request.starts_with("POST /api/v1/diagnostics/reports"),
+        "{request}"
+    );
+    assert!(!request.to_ascii_lowercase().contains("authorization"));
+    assert!(request.contains(&id));
+    // off: the number goes
+    let off = run_in(root, closed, r#"app.diagnostics.set={"enabled":false}"#).unwrap();
+    assert_eq!(
+        (off["enabled"].clone(), off["install_id"].clone()),
+        (json!(false), Value::Null)
+    );
+}

@@ -39,6 +39,12 @@
 //! in it, and with `restart: true` the app then saves the project, closes
 //! and opens the new version (the connection ends).
 //!
+//! `list` also has the anonymous diagnostics commands
+//! `app.diagnostics.status`, `.set`, `.preview` and `.send` (source `app`,
+//! see `dc_diagnostics::commands`): `set` is the account menu's checkbox
+//! (the first-start question is answered), `send` sends the waiting
+//! reports now and answers when the server did.
+//!
 //! `list` also has the scanner's commands `scan.*` and the turntable's
 //! `turntable.*` (`dc_scanner::control`): they run on the scan controller
 //! of the open workspace, the one its scan window shows, in the same queue
@@ -392,7 +398,8 @@ impl Bridge {
     /// the workspace's scan controller, the one its scan window shows), then
     /// the workspace module's (or the installed Aligners module's when no
     /// workspace is open), then the app's update commands
-    /// (`app.update.check`, `app.update.apply`).
+    /// (`app.update.check`, `app.update.apply`) and diagnostics commands
+    /// (`app.diagnostics.*`).
     fn specs(&self) -> Vec<(&'static str, CommandSpec)> {
         let mut out: Vec<(&'static str, CommandSpec)> = builtins::specs()
             .into_iter()
@@ -410,6 +417,11 @@ impl Bridge {
             dc_update::commands::specs()
                 .into_iter()
                 .map(|s| (dc_update::commands::SOURCE, s)),
+        );
+        out.extend(
+            dc_diagnostics::commands::specs()
+                .into_iter()
+                .map(|s| (dc_diagnostics::commands::SOURCE, s)),
         );
         out
     }
@@ -695,6 +707,40 @@ impl Bridge {
                         .agent_update_apply_poll()
                         .map(|r| r.map_err(RpcError::host))
                 }));
+            }
+            // the installation, not the case: the consent of the account menu
+            dc_diagnostics::commands::SET => {
+                match dc_diagnostics::commands::enabled_param(params) {
+                    Ok(on) => {
+                        self.app.set_diagnostics(on);
+                        Ok(self.app.diagnostics_status())
+                    }
+                    Err(e) => Err(invalid(e)),
+                }
+            }
+            dc_diagnostics::commands::STATUS
+            | dc_diagnostics::commands::PREVIEW
+            | dc_diagnostics::commands::SEND => {
+                if let Err(e) = dc_diagnostics::commands::no_params_given(params) {
+                    return Step::Done(Err(invalid(e)));
+                }
+                match spec.id {
+                    dc_diagnostics::commands::STATUS => Ok(self.app.diagnostics_status()),
+                    dc_diagnostics::commands::PREVIEW => Ok(self.app.diagnostics_preview()),
+                    _ => {
+                        let rx = match self.app.agent_diagnostics_send() {
+                            Ok(rx) => rx,
+                            Err(e) => return Step::Done(Err(RpcError::host(e))),
+                        };
+                        return Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
+                            Ok(r) => Some(r.map_err(RpcError::host)),
+                            Err(mpsc::TryRecvError::Empty) => None,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                Some(Err(RpcError::host("the send stopped")))
+                            }
+                        }));
+                    }
+                }
             }
             // case commands (case.import, module commands): the
             // workspace's command path, so they land on its undo stack
