@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0-alpha.9](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.8...v0.2.0-alpha.9) (2026-11-18)
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.5 and aligners v0.2.0-alpha.9 ([e0d239d](https://github.com/dnviti-personal-org/dentalcraft-app/commit/e0d239d7b842b13788349625e3e34bdbb2f5896e))
+* **scanner:** keep the scanner's motion data and timestamps (core v0.3.0-alpha.5) ([e0d239d](https://github.com/dnviti-personal-org/dentalcraft-app/commit/e0d239d7b842b13788349625e3e34bdbb2f5896e))
+* **scanner:** see the Revopoint MINI 2 on Windows (Media Foundation capture, core v0.3.0-alpha.5) ([e0d239d](https://github.com/dnviti-personal-org/dentalcraft-app/commit/e0d239d7b842b13788349625e3e34bdbb2f5896e))
+
 ## [0.2.0-alpha.8](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.7...v0.2.0-alpha.8) (2026-11-18)
 
 
