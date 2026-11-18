@@ -18,6 +18,7 @@ macro_rules! t {
 pub mod about;
 mod app;
 pub mod config;
+mod consent;
 pub mod control;
 pub mod create_job;
 pub mod diagnostics;
@@ -43,6 +44,7 @@ pub fn register_bundles() {
     dc_ui::loader();
     dca_module::loader();
     dc_update::loader();
+    dc_diagnostics::loader();
 }
 
 /// Runtime i18n keys (looked up with `dc_i18n::tr`), listed so a test can
@@ -87,6 +89,7 @@ pub fn runtime_keys() -> Vec<&'static str> {
     );
     keys.extend(screens::home::NEWS.iter().filter_map(|n| n.link_key));
     keys.extend(app::WEEKDAY_KEYS);
+    keys.extend(consent::runtime_keys());
     keys.extend(app::MONTH_KEYS);
     keys
 }

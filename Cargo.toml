@@ -82,6 +82,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 
 # dc-update (update check, verification and install; app and dentalcraft-cli)
 dc-update = { path = "crates/dc-update" }
+# dc-diagnostics (anonymous diagnostics with consent; app and dentalcraft-cli)
+dc-diagnostics = { path = "crates/dc-diagnostics" }
 minisign-verify = "0.3.0" # signature of the update manifest (pure Rust, no dependencies)
 semver = "1.0.28"
 tar = { version = "0.4.46", default-features = false } # no xattr

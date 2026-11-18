@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use chrono::{Datelike, Timelike};
-use dc_auth_client::{AuthClient, AuthState, MemoryTokenStore, UserInfo};
+use dc_auth_client::{AuthClient, AuthErrorCode, AuthState, MemoryTokenStore, UserInfo};
+use dc_diagnostics::Diagnostics;
 use dc_i18n::Lang;
 use dc_module_api::ModuleRegistry;
 use dc_project::LoadOutcome;
@@ -22,6 +23,7 @@ use egui::{
 
 use crate::about::AboutView;
 use crate::config::{RecentList, Settings, Store, ThemePref};
+use crate::consent::ConsentDialog;
 use crate::create_job::{
     CreateError, CreateJob, Created, NewProjectRequest, Stage, base_state_report,
 };
@@ -79,6 +81,9 @@ pub struct AppDeps {
     /// Updates: where to look for a newer version; `None` turns them off
     /// (tests).
     pub updates: Option<Updates>,
+    /// Anonymous diagnostics (they ask for the consent at the first start);
+    /// `None` turns them off (tests).
+    pub diagnostics: Option<Diagnostics>,
 }
 
 impl AppDeps {
@@ -98,6 +103,7 @@ impl AppDeps {
             render_state: None,
             native_dialogs: false,
             updates: None,
+            diagnostics: None,
         }
     }
 }
@@ -142,6 +148,10 @@ pub struct DentalCraftApp {
     pub(crate) dialog: Option<PendingDialog>,
     /// The newer version: check, dialog, download, install at close.
     pub(crate) updater: Updater,
+    /// Anonymous diagnostics; `None` when off in this app (tests).
+    pub(crate) diagnostics: Option<Diagnostics>,
+    /// The first-start question about them.
+    pub(crate) consent: ConsentDialog,
     pub(crate) create_job: Option<CreateJob>,
     workspace: Option<Workspace>,
     open_job: Option<OpenJob>,
@@ -156,12 +166,20 @@ impl DentalCraftApp {
     /// language, starts the silent sign-in restore.
     pub fn new(deps: AppDeps) -> Self {
         crate::register_bundles();
-        let settings = deps.store.load_settings();
+        let mut settings = deps.store.load_settings();
         if let Err(e) = dc_i18n::set_language(settings.lang()) {
             tracing::warn!("cannot switch language: {e}");
         }
         let recent = deps.store.load_recent();
         let gpu = deps.render_state.as_ref().map(GpuInfo::from_render_state);
+        if let Some(d) = &deps.diagnostics {
+            d.set_gpu(gpu.as_ref().map(GpuInfo::to_report));
+            // a number made because the saved one was missing is kept
+            if settings.diagnostics == Some(true) && settings.install_id != d.install_id() {
+                settings.install_id = d.install_id();
+                deps.store.save_settings(&settings);
+            }
+        }
         let sysinfo = SystemInfo::collect(gpu.clone(), &deps.store.dirs().logs());
         let registry = modules::registry();
         let module_cards = modules::cards(&registry);
@@ -197,6 +215,8 @@ impl DentalCraftApp {
             toasts: Vec::new(),
             dialog: None,
             updater: Updater::new(deps.updates),
+            diagnostics: deps.diagnostics,
+            consent: ConsentDialog::default(),
             create_job: None,
             workspace: None,
             open_job: None,
@@ -259,6 +279,7 @@ impl DentalCraftApp {
             }
             self.ctx = Some(ctx.clone());
             self.start_updates();
+            self.start_diagnostics();
         }
         self.poll_background(&ctx);
         // leaving the form closes its scan window and drops the surfaces of
@@ -306,6 +327,7 @@ impl DentalCraftApp {
         }
         self.about_dialog(&ctx);
         self.update_dialog(&ctx);
+        self.consent_dialog(&ctx);
         self.overlays(&ctx);
     }
 
@@ -489,7 +511,14 @@ impl DentalCraftApp {
             });
         match spawned {
             Ok(_) => self.open_job = Some(OpenJob { path, rx }),
-            Err(e) => self.toast(BadgeKind::Danger, e.to_string()),
+            Err(e) => {
+                tracing::error!(
+                    code = "project-open-thread",
+                    source = "project",
+                    "cannot start loading a project: {e}"
+                );
+                self.toast(BadgeKind::Danger, e.to_string());
+            }
         }
     }
 
@@ -507,6 +536,11 @@ impl DentalCraftApp {
             );
             return;
         };
+        // the case's codes never reach a diagnostics report
+        if let (Some(d), Some(p)) = (&self.diagnostics, &project) {
+            d.redact(&p.case_state.case.patient_code);
+            d.redact(&p.case_state.case.case_id);
+        }
         let ws = match &self.render_state {
             Some(rs) => Workspace::new(module, project, path, rs),
             None => Workspace::new_headless(module, project, path),
@@ -519,6 +553,10 @@ impl DentalCraftApp {
 
     pub(crate) fn start_create(&mut self, request: NewProjectRequest) {
         let wake = self.wake();
+        if let Some(d) = &self.diagnostics {
+            d.redact(&request.alias);
+            d.redact(&request.case_id);
+        }
         self.create_job = Some(CreateJob::spawn(request, wake));
     }
 
@@ -553,7 +591,23 @@ impl DentalCraftApp {
                         );
                     }
                 }
-                AuthState::Error(e) => tracing::warn!("sign-in error ({}): {e}", a.issuer()),
+                AuthState::Error(e) => {
+                    // the user's own choices and an offline machine are no bugs
+                    let report = !matches!(
+                        e.code,
+                        AuthErrorCode::Cancelled
+                            | AuthErrorCode::AccessDenied
+                            | AuthErrorCode::Network
+                            | AuthErrorCode::Timeout
+                    );
+                    tracing::warn!(
+                        diag = report,
+                        code = %format!("auth.{}", e.code.as_str()),
+                        source = "auth",
+                        "sign-in error ({}): {e}",
+                        a.issuer()
+                    );
+                }
                 _ => {}
             }
             self.auth_state = s;
@@ -585,7 +639,11 @@ impl DentalCraftApp {
                 Ok(Err(e)) => {
                     let name = job.path.display().to_string();
                     self.open_job = None;
-                    tracing::warn!("cannot open {name}: {e}");
+                    tracing::error!(
+                        code = "project-open-failed",
+                        source = "project",
+                        "cannot open {name}: {e}"
+                    );
                     self.toast(
                         BadgeKind::Danger,
                         t!("open-failed", path = name, reason = e),
@@ -616,12 +674,21 @@ impl DentalCraftApp {
                 }
                 Err(CreateError::Cancelled) => {}
                 Err(CreateError::NothingImported(reasons)) => {
-                    tracing::warn!("no scan could be imported: {reasons:?}");
+                    tracing::warn!(
+                        diag = true,
+                        code = "import-nothing",
+                        source = "import",
+                        "no scan could be imported: {reasons:?}"
+                    );
                     self.new_project.error = None;
                     self.new_project.failures = reasons;
                 }
                 Err(CreateError::Failed(e)) => {
-                    tracing::warn!("cannot create the project: {e}");
+                    tracing::error!(
+                        code = "project-create-failed",
+                        source = "project",
+                        "cannot create the project: {e}"
+                    );
                     self.new_project.failures.clear();
                     self.new_project.error = Some(e);
                 }
@@ -662,7 +729,14 @@ impl DentalCraftApp {
                             path = path.display().to_string()
                         ),
                     ),
-                    Err(e) => self.toast(BadgeKind::Danger, e.to_string()),
+                    Err(e) => {
+                        tracing::error!(
+                            code = "diagnostics-export-failed",
+                            source = "export",
+                            "cannot write the diagnostics bundle: {e}"
+                        );
+                        self.toast(BadgeKind::Danger, e.to_string());
+                    }
                 }
             }
             Purpose::TicketAttachments => self.support.attachments.extend(paths),
@@ -692,7 +766,9 @@ impl DentalCraftApp {
             self.show_shortcuts = !self.show_shortcuts;
         }
         if esc {
-            if self.updater.open {
+            if self.consent.open {
+                // the diagnostics question closes itself on Esc
+            } else if self.updater.open {
                 // the update dialog closes itself on Esc
             } else if self.about.is_some() {
                 self.about = None;
@@ -832,6 +908,13 @@ impl DentalCraftApp {
             .changed()
         {
             self.set_check_updates(at_startup);
+        }
+        let mut diagnostics = self.settings.diagnostics == Some(true);
+        if ui
+            .checkbox(&mut diagnostics, t!("diagnostics-setting"))
+            .changed()
+        {
+            self.set_diagnostics(diagnostics);
         }
         ui.separator();
         if signed_in {

@@ -470,7 +470,10 @@ impl ScanPopup {
         };
         match &r {
             Ok(_) => self.ui.imported(a.mesh),
-            Err(f) => self.ui.failed(f.clone()),
+            Err(f) => {
+                log_failure(SCAN_IMPORT, f);
+                self.ui.failed(f.clone());
+            }
         }
         self.finish(a.ticket, a.origin, r);
         self.pump();
@@ -531,7 +534,9 @@ impl ScanPopup {
             match JobSystem::new(1) {
                 Ok(jobs) => self.jobs = Some(jobs),
                 Err(e) => {
-                    let r = Err(ScanFailure::new("device", e.to_string()));
+                    let f = ScanFailure::new("device", e.to_string());
+                    log_failure(&p.id, &f);
+                    let r = Err(f);
                     self.ui.after(&p.id, &r);
                     self.finish(p.ticket, p.origin, r);
                     return;
@@ -597,8 +602,61 @@ impl ScanPopup {
             }
             r => r.map(|(out, _)| out),
         };
+        if let Err(f) = &r {
+            log_failure(id, f);
+        }
         self.ui.after(id, &r);
         self.finish(ticket, origin, r);
+    }
+}
+
+/// Logs a failed scanner or turntable command for the log file and the
+/// anonymous diagnostics: a fault as an error, a missing or switched-off
+/// device as a flagged warning; a cancel or a busy device is no failure.
+fn log_failure(command: &str, f: &ScanFailure) {
+    const SETUP: [&str; 11] = [
+        "device-not-found",
+        "not-connected",
+        "turntable-not-connected",
+        "ble-no-adapter",
+        "ble-adapter-off",
+        "ble-not-found",
+        "sdk-missing",
+        "platform-unsupported",
+        "rig-uncalibrated",
+        "invalid-params",
+        "empty",
+    ];
+    let code = f.code.as_str();
+    if matches!(code, "cancelled" | "busy" | "turntable-busy") {
+        return;
+    }
+    let source = if ["turntable", "ble", "rig"]
+        .iter()
+        .any(|p| code.starts_with(p))
+        || command.starts_with("turntable.")
+    {
+        "turntable"
+    } else {
+        "scan"
+    };
+    if SETUP.contains(&code) {
+        tracing::warn!(
+            diag = true,
+            code = %format!("scan.{code}"),
+            source,
+            command,
+            "{command}: {}",
+            f.detail
+        );
+    } else {
+        tracing::error!(
+            code = %format!("scan.{code}"),
+            source,
+            command,
+            "{command}: {}",
+            f.detail
+        );
     }
 }
 

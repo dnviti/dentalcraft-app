@@ -1,11 +1,15 @@
 //! [`CliHost`]: the headless [`Session`] with the Aligners module, plus a
-//! CPU render (dc-raster) of the case and the app's update commands
-//! (`app.update.check`, `app.update.apply`, run on this installation).
+//! CPU render (dc-raster) of the case and the app's commands: updates
+//! (`app.update.check`, `app.update.apply`, run on this installation) and
+//! anonymous diagnostics (`app.diagnostics.*`, on the app's settings and
+//! queue).
 
 use std::collections::BTreeMap;
 
 use dc_case::{BlobRef, CaseState, ScanRole};
+use dc_diagnostics::commands::{self as diagnostics, is_diagnostics_command};
 use dc_mcp::{Host, HostError, HostResult};
+use dc_module_api::CommandSpec;
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::{CommandDescription, CommandInfo, Session};
@@ -40,10 +44,10 @@ impl CliHost {
     }
 
     /// Every command: the session's and the module's, then the app's
-    /// update commands.
+    /// update and diagnostics commands.
     pub fn list_commands(&self) -> Vec<CommandInfo> {
         let mut list = self.session.list_commands();
-        list.extend(update::specs().into_iter().map(|s| CommandInfo {
+        list.extend(app_specs().into_iter().map(|s| CommandInfo {
             id: s.id.to_owned(),
             source: update::SOURCE.to_owned(),
             label: dc_i18n::tr(s.label_key),
@@ -53,7 +57,7 @@ impl CliHost {
 
     /// Schema and documentation of command `id`.
     pub fn describe_command(&self, id: &str) -> Result<CommandDescription, String> {
-        let Some(s) = update::specs().into_iter().find(|s| s.id == id) else {
+        let Some(s) = app_specs().into_iter().find(|s| s.id == id) else {
             return self.session.describe(id).map_err(|e| e.to_string());
         };
         Ok(CommandDescription {
@@ -65,6 +69,14 @@ impl CliHost {
             doc: dc_i18n::tr(s.doc_key),
             params_schema: s.schema(),
         })
+    }
+
+    /// `app.diagnostics.*` on the app's settings file and queue (`send`
+    /// waits for the server).
+    fn run_diagnostics(&self, id: &str, params: &Value) -> HostResult {
+        diagnostics::Headless::standard()
+            .run(id, params)
+            .map_err(|e| HostError::new(format!("{id}: {e}")))
     }
 
     /// `app.update.check` / `app.update.apply` on the installation of this
@@ -107,6 +119,14 @@ impl CliHost {
         req.render_case_png_with(state, &aligner_labels(state), &entries)
             .map_err(HostError)
     }
+}
+
+/// The app's commands (source `app`): updates, then diagnostics.
+fn app_specs() -> Vec<CommandSpec> {
+    update::specs()
+        .into_iter()
+        .chain(diagnostics::specs())
+        .collect()
 }
 
 /// What the render draws of the modules' entries (the built teeth and
@@ -182,10 +202,14 @@ impl Host for CliHost {
         if is_update_command(id) {
             return self.run_update(id, &params);
         }
+        if is_diagnostics_command(id) {
+            return self.run_diagnostics(id, &params);
+        }
         Host::execute(&mut self.session, id, params)
     }
     fn batch(&mut self, commands: Vec<(String, Value)>) -> HostResult {
-        if !commands.iter().any(|(id, _)| is_update_command(id)) {
+        let app = |id: &str| is_update_command(id) || is_diagnostics_command(id);
+        if !commands.iter().any(|(id, _)| app(id)) {
             return Host::batch(&mut self.session, commands);
         }
         // one at a time, as the session does: the first failure stops it

@@ -48,13 +48,26 @@ fn main() -> eframe::Result {
         }
     };
     let dirs = Dirs::standard();
-    let _log_guard = dc_app::logging::init(&dirs.logs());
-    dc_app::logging::install_panic_hook(dirs.logs());
+    let store = Store::new(dirs);
+    let settings = store.load_settings();
+    let issuer = settings.issuer();
+    // anonymous diagnostics: nothing is collected or sent without the
+    // user's consent (asked at the first start)
+    let diagnostics = dc_diagnostics::Diagnostics::new(
+        dc_diagnostics::Config::standard(
+            &dc_diagnostics::settings::Paths {
+                config: store.dirs().config.clone(),
+                data: store.dirs().data.clone(),
+            },
+            &issuer,
+        ),
+        &settings.consent(),
+    );
+    let _log_guard = dc_app::logging::init(&store.dirs().logs(), Some(diagnostics.layer()));
+    dc_app::logging::install_panic_hook(store.dirs().logs(), Some(diagnostics.clone()));
     tracing::info!("DentalCraft {} starting", env!("CARGO_PKG_VERSION"));
 
-    let store = Store::new(dirs);
     let updates = Updates::standard(store.dirs());
-    let issuer = store.load_settings().issuer();
     // The refresh token goes to the OS keyring; a private file in the config folder
     // takes over where the keyring cannot be reached, so the session survives a restart.
     let tokens = dc_auth_client::FallbackTokenStore::keyring_or_file(store.dirs().auth_tokens())
@@ -67,7 +80,11 @@ fn main() -> eframe::Result {
     ) {
         Ok(a) => Some(a),
         Err(e) => {
-            tracing::error!("invalid sign-in server {issuer}: {e}");
+            tracing::error!(
+                code = "auth.invalid-issuer",
+                source = "auth",
+                "invalid sign-in server {issuer}: {e}"
+            );
             None
         }
     };
@@ -107,6 +124,7 @@ fn main() -> eframe::Result {
                 render_state,
                 native_dialogs: true,
                 updates: Some(updates),
+                diagnostics: Some(diagnostics),
             });
             Ok(match control {
                 Some(server) => Box::new(ControlledApp::new(app, server)),

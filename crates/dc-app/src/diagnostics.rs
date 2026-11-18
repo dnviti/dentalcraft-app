@@ -36,6 +36,15 @@ impl GpuInfo {
     pub fn short(&self) -> String {
         format!("wgpu {}, {}", self.backend, self.name)
     }
+
+    /// The adapter as the anonymous diagnostics report it.
+    pub fn to_report(&self) -> dc_diagnostics::Gpu {
+        dc_diagnostics::Gpu {
+            backend: self.backend.clone(),
+            name: self.name.clone(),
+            driver: self.driver.clone(),
+        }
+    }
 }
 
 /// What the support page and the diagnostics bundle show.
@@ -61,9 +70,13 @@ impl SystemInfo {
         Self {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             commit: option_env!("DC_GIT_COMMIT").unwrap_or("dev").to_owned(),
-            os: format!("{}, {}", os_name(), std::env::consts::ARCH),
+            os: format!(
+                "{}, {}",
+                dc_diagnostics::system::os_name(),
+                std::env::consts::ARCH
+            ),
             gpu,
-            memory: memory_gib(),
+            memory: dc_diagnostics::system::memory_gib(),
             log_dir: log_dir.to_path_buf(),
         }
     }
@@ -126,25 +139,6 @@ pub fn tilde(p: &Path) -> String {
     p.display().to_string()
 }
 
-fn os_name() -> String {
-    if let Ok(text) = std::fs::read_to_string("/etc/os-release")
-        && let Some(line) = text.lines().find(|l| l.starts_with("PRETTY_NAME="))
-    {
-        return line["PRETTY_NAME=".len()..].trim_matches('"').to_owned();
-    }
-    std::env::consts::OS.to_owned()
-}
-
-fn memory_gib() -> Option<(f64, f64)> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let field = |name: &str| -> Option<f64> {
-        let line = text.lines().find(|l| l.starts_with(name))?;
-        let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
-        Some(kb / 1024.0 / 1024.0)
-    };
-    Some((field("MemTotal:")?, field("MemAvailable:")?))
-}
-
 /// Writes the diagnostics zip: `system.txt` and `log-tail.txt` (last 500
 /// lines of the newest log).
 pub fn export_zip(path: &Path, info: &SystemInfo) -> std::io::Result<()> {
@@ -154,7 +148,7 @@ pub fn export_zip(path: &Path, info: &SystemInfo) -> std::io::Result<()> {
     zip.start_file("system.txt", opts)?;
     zip.write_all(info.to_text().as_bytes())?;
     zip.start_file("log-tail.txt", opts)?;
-    for line in crate::logging::last_lines(&info.log_dir, 500) {
+    for line in dc_diagnostics::logs::last_lines(&info.log_dir, 500) {
         zip.write_all(line.as_bytes())?;
         zip.write_all(b"\n")?;
     }

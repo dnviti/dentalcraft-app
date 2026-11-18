@@ -272,8 +272,18 @@ impl DentalCraftApp {
             .name("dc-update-download".into())
             .spawn(move || {
                 let r = dc_update::prepare(&c, &work, &|n, _| d.store(n, Ordering::Relaxed), &stop);
-                if let Err(e) = &r {
-                    tracing::warn!("update {} not prepared: {e}", c.latest());
+                match &r {
+                    Ok(_) | Err(UpdateError::Cancelled) => {}
+                    // no connection is no bug
+                    Err(e @ UpdateError::Offline(_)) => {
+                        tracing::warn!("update {} not prepared: {e}", c.latest());
+                    }
+                    Err(e) => tracing::error!(
+                        code = e.code(),
+                        source = "update",
+                        "update {} not prepared: {e}",
+                        c.latest()
+                    ),
                 }
                 let _ = tx.send(r);
                 wake();
@@ -367,7 +377,16 @@ impl DentalCraftApp {
                 self.updater.phase = Phase::UpToDate(Box::new(check));
             }
             Err(e) => {
-                tracing::info!("update check failed: {e}");
+                if matches!(e, UpdateError::Offline(_)) {
+                    tracing::info!("update check failed: {e}");
+                } else {
+                    tracing::warn!(
+                        diag = true,
+                        code = e.code(),
+                        source = "update",
+                        "update check failed: {e}"
+                    );
+                }
                 self.updater.open = origin == Origin::User;
                 self.updater.apply_after_check = false;
                 self.updater.phase = Phase::CheckFailed(e);
@@ -393,7 +412,12 @@ impl DentalCraftApp {
         match prepared.finish(relaunch) {
             Ok(()) => true,
             Err(error) => {
-                tracing::error!("update {} not installed: {error}", check.latest());
+                tracing::error!(
+                    code = error.code(),
+                    source = "update",
+                    "update {} not installed: {error}",
+                    check.latest()
+                );
                 if !restart {
                     // installed at close: the next start offers it again
                     return true;

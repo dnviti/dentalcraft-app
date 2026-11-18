@@ -340,3 +340,26 @@ update-restart-now = Restart now
 update-failed-title = The update was not installed
 update-try-again = Try again
 update-close = Close
+
+## Anonymous diagnostics (first-start question, account menu, support page)
+diagnostics-consent-title = Help fix bugs in DentalCraft
+diagnostics-consent-body = When something goes wrong, DentalCraft can send an anonymous report to its developer, so that problems are found and fixed sooner. Nothing is sent unless you tick the box.
+diagnostics-sent-title = What is sent
+diagnostics-sent-problems = Crash and error reports, with the last lines of the log
+diagnostics-sent-system = The DentalCraft version, the operating system, the graphics card and the memory
+diagnostics-sent-id = A random number for this installation, not linked to your account
+diagnostics-never-title = What is never sent
+diagnostics-never-data = Scans, projects or patient data
+diagnostics-never-account = Your account, name or e-mail address
+diagnostics-never-files = The names of your files and folders
+diagnostics-details-link = Details
+diagnostics-details-body = A report says what kind of problem it was (crash, error or warning), where in DentalCraft it happened, a short technical message and, for a crash, the steps the program was taking. Before anything is kept, file and folder names, user names, patient codes, e-mail addresses and access codes are taken out of the text. Reports wait on this computer until they reach the DentalCraft server; the support page shows the next one.
+diagnostics-consent-check = Send anonymous diagnostic data to help fix bugs
+diagnostics-consent-later = You can change this at any time in the account menu.
+diagnostics-consent-continue = Continue
+diagnostics-setting = Send anonymous diagnostic data
+diagnostics-preview-empty = Nothing is waiting to be sent.
+support-diagnostics-on = Anonymous diagnostics are on. You can turn them off in the account menu.
+support-diagnostics-off = Anonymous diagnostics are off. You can turn them on in the account menu.
+support-diagnostics-unset = Anonymous diagnostics: you have not chosen yet. Choose in the account menu.
+support-diagnostics-show = Show what is sent

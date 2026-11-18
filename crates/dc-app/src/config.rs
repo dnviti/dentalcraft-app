@@ -1,18 +1,17 @@
 //! Persisted settings and the recent projects list (JSON files in the
 //! platform config directory, e.g. `~/.config/dentalcraft/`).
+//!
+//! The sign-in server is the one of `dc_diagnostics::settings` (shared with
+//! `dentalcraft-cli`): `DC_AUTH_ISSUER`, else the saved setting, else the
+//! build default (`http://127.0.0.1:8787` in debug builds,
+//! `https://auth.dentalcraft.app` in release builds).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dc_diagnostics::settings::resolve_issuer;
 use serde::{Deserialize, Serialize};
 
-/// Default issuer in debug builds (`dentalcraft-server dev`).
-pub const DEV_ISSUER: &str = "http://127.0.0.1:8787";
-/// Default issuer in release builds: the production sign-in server
-/// (`dentalcraft-server`). `DC_AUTH_ISSUER` or the saved setting override it.
-pub const RELEASE_ISSUER: &str = "https://auth.dentalcraft.app";
-/// Environment variable overriding the issuer.
-pub const ISSUER_ENV: &str = "DC_AUTH_ISSUER";
 /// How many recent projects are kept.
 pub const MAX_RECENT: usize = 24;
 
@@ -99,13 +98,20 @@ pub struct Settings {
     pub theme: ThemePref,
     /// Language code (`en`, `it`); system language when absent.
     pub language: Option<String>,
-    /// Sign-in server; [`ISSUER_ENV`] wins, then this, then the build default.
+    /// Sign-in server; `DC_AUTH_ISSUER` wins, then this, then the build
+    /// default.
     pub auth_issuer: Option<String>,
     /// Look for a newer version at startup (on by default).
     pub check_updates: bool,
     /// A version the user chose to skip: the check at startup does not
     /// offer it again.
     pub skipped_update: Option<String>,
+    /// Send anonymous diagnostic data (`dc-diagnostics`); `None`: the user
+    /// was not asked yet (the app asks at start).
+    pub diagnostics: Option<bool>,
+    /// Random number of this installation while diagnostics are on, not
+    /// linked to the account; removed when they are turned off.
+    pub install_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -116,6 +122,8 @@ impl Default for Settings {
             auth_issuer: None,
             check_updates: true,
             skipped_update: None,
+            diagnostics: None,
+            install_id: None,
         }
     }
 }
@@ -123,11 +131,7 @@ impl Default for Settings {
 impl Settings {
     /// The issuer to use: `DC_AUTH_ISSUER`, the setting, the build default.
     pub fn issuer(&self) -> String {
-        std::env::var(ISSUER_ENV)
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.auth_issuer.clone())
-            .unwrap_or_else(|| default_issuer().to_owned())
+        resolve_issuer(self.auth_issuer.as_deref())
     }
 
     /// The UI language.
@@ -137,14 +141,13 @@ impl Settings {
             .and_then(dc_i18n::Lang::from_code)
             .unwrap_or_else(dc_i18n::Lang::from_system)
     }
-}
 
-/// Build default issuer.
-pub fn default_issuer() -> &'static str {
-    if cfg!(debug_assertions) {
-        DEV_ISSUER
-    } else {
-        RELEASE_ISSUER
+    /// The consent to anonymous diagnostics.
+    pub fn consent(&self) -> dc_diagnostics::Consent {
+        dc_diagnostics::Consent {
+            enabled: self.diagnostics,
+            install_id: self.install_id.clone(),
+        }
     }
 }
 
@@ -319,6 +322,7 @@ mod tests {
 
     #[test]
     fn issuer_default() {
+        use dc_diagnostics::settings::{ISSUER_ENV, default_issuer};
         let s = Settings {
             auth_issuer: Some("https://x.example".into()),
             ..Settings::default()
@@ -330,17 +334,38 @@ mod tests {
     }
 
     #[test]
-    fn issuer_constants() {
-        assert_eq!(RELEASE_ISSUER, "https://auth.dentalcraft.app");
-        assert_eq!(DEV_ISSUER, "http://127.0.0.1:8787");
-        assert!(RELEASE_ISSUER.starts_with("https://"));
+    fn diagnostics_are_not_asked_in_old_settings_and_the_cli_reads_them() {
+        // settings saved before the setting existed: the app asks
+        let old: Settings =
+            serde_json::from_str(r#"{"theme": "light", "check_updates": false}"#).unwrap();
+        assert_eq!((old.diagnostics, old.install_id.as_deref()), (None, None));
+        assert!(!old.check_updates);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(Dirs::under(dir.path()));
+        let s = Settings {
+            diagnostics: Some(true),
+            install_id: Some("8f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f".into()),
+            ..Settings::default()
+        };
+        store.save_settings(&s);
+        assert_eq!(store.load_settings(), s);
+        // dentalcraft-cli reads and writes the same keys of the same file
+        let file = store.dirs().config.join("settings.json");
+        assert_eq!(dc_diagnostics::settings::read_consent(&file), s.consent());
+        let off = dc_diagnostics::Consent {
+            enabled: Some(false),
+            install_id: None,
+        };
+        dc_diagnostics::settings::write_consent(&file, &off).unwrap();
+        let back = store.load_settings();
+        assert_eq!(back.consent(), off);
+        assert_eq!(back.theme, s.theme);
+        // the same folders as the CLI's
+        let paths = dc_diagnostics::settings::Paths::standard();
+        let dirs = Dirs::standard();
         assert_eq!(
-            default_issuer(),
-            if cfg!(debug_assertions) {
-                DEV_ISSUER
-            } else {
-                RELEASE_ISSUER
-            }
+            (dirs.logs(), dirs.config),
+            (paths.logs(), paths.config.clone())
         );
     }
 }

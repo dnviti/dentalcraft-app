@@ -34,6 +34,7 @@ dca-model.workspace = true
 dca-module.workspace = true
 # app crates
 dc-auth-client.workspace = true
+dc-diagnostics.workspace = true
 dc-scan-ui.workspace = true
 dc-ui.workspace = true
 dc-update.workspace = true
