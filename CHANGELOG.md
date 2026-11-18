@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.8](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.7...v0.2.0-alpha.8) (2026-11-18)
+
+
+### Features
+
+* **diagnostics:** opt-in anonymous diagnostics with consent at first start ([#24](https://github.com/dnviti-personal-org/dentalcraft-app/issues/24)) ([e7ee4fd](https://github.com/dnviti-personal-org/dentalcraft-app/commit/e7ee4fd34f5b8b1fd8750616cae6c986d6904ad3))
+
 ## [0.2.0-alpha.7](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.6...v0.2.0-alpha.7) (2026-11-18)
 
 
