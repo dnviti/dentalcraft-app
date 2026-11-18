@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-alpha.7](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.6...v0.2.0-alpha.7) (2026-11-18)
+
+
+### Features
+
+* **app:** projects can be created without scans ([dec2d50](https://github.com/dnviti-personal-org/dentalcraft-app/commit/dec2d500e44dfac285d70b2dea7c3077d0e87f2e))
+* **scan:** reusable scan popup and scanning at project start ([dec2d50](https://github.com/dnviti-personal-org/dentalcraft-app/commit/dec2d500e44dfac285d70b2dea7c3077d0e87f2e))
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.4 and aligners v0.2.0-alpha.8 ([dec2d50](https://github.com/dnviti-personal-org/dentalcraft-app/commit/dec2d500e44dfac285d70b2dea7c3077d0e87f2e))
+
 ## [0.2.0-alpha.6](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.5...v0.2.0-alpha.6) (2026-11-17)
 
 
