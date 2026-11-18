@@ -16,7 +16,11 @@ name: binaries
 #   (macOS universal .zip: DISABLED for now, see the build-macos job)
 # Secrets: DEPLOY_KEY_CORE, DEPLOY_KEY_ALIGNERS (private dependencies);
 # DENTALCRAFT_GPG_KEY (armored secret release key: signs the rpm and the Flatpak commit);
-# DENTALCRAFT_MINISIGN_KEY (minisign secret key file: signs update.json).
+# DENTALCRAFT_MINISIGN_KEY (minisign secret key file: signs update.json);
+# optional DENTALCRAFT_AUTHENTICODE_P12 (base64 of the .p12 of the self-signed code-signing
+# certificate) and DENTALCRAFT_AUTHENTICODE_PASSWORD (its password): the Authenticode
+# signature of the Windows programs and installers, packaging/windows/authenticode.sh;
+# without them the Windows files stay unsigned, with a warning.
 # Called by release-please.yml when a release is created; run it by hand
 # (Actions > binaries > Run workflow, or `gh workflow run binaries.yml -f tag=vX.Y.Z`)
 # to backfill a tag. The sources are always those of the tag.
@@ -36,6 +40,10 @@ on:
         required: true
       DENTALCRAFT_MINISIGN_KEY:
         required: true
+      DENTALCRAFT_AUTHENTICODE_P12:
+        required: false
+      DENTALCRAFT_AUTHENTICODE_PASSWORD:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -146,6 +154,23 @@ jobs:
         run: |
           export RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/src"
           cargo build -p dc-app -p dc-cli --release --target "$TARGET"
+      # The Authenticode signature of the two programs, before they are packed: the zip,
+      # setup.exe and the MSI all hold the signed programs. The secrets reach the script
+      # as 0600 files in a 0700 directory, removed at the end of the step.
+      - name: Sign the Windows programs
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        env:
+          TARGET: ${{ matrix.target }}
+          AUTHENTICODE_P12: ${{ secrets.DENTALCRAFT_AUTHENTICODE_P12 }}
+          AUTHENTICODE_PASSWORD: ${{ secrets.DENTALCRAFT_AUTHENTICODE_PASSWORD }}
+        run: |
+          keydir="$RUNNER_TEMP/authenticode"
+          trap 'rm -rf "$keydir"' EXIT
+          if [ -n "$AUTHENTICODE_P12$AUTHENTICODE_PASSWORD" ]; then
+            (umask 077 && mkdir -p "$keydir" && printf '%s' "$AUTHENTICODE_P12" | base64 -d > "$keydir/dentalcraft-selfsigned.p12" && printf '%s' "$AUTHENTICODE_PASSWORD" > "$keydir/storepass")
+            export AUTHENTICODE_KEY_DIR="$keydir"
+          fi
+          bash packaging/windows/authenticode.sh "target/$TARGET/release/dentalcraft.exe" "target/$TARGET/release/dentalcraft-cli.exe"
       - name: Package
         env:
           TAG: ${{ inputs.tag }}
@@ -225,6 +250,28 @@ jobs:
             -e TAG -e SOURCE_DATE_EPOCH \
             registry.fedoraproject.org/fedora:45 bash packaging/installers.sh
           ls -l installers
+      # The Authenticode signature of setup.exe and the MSI (they already hold the signed
+      # programs), in a throwaway container of the same image, before the release job
+      # hashes them for update.json and the checksums. Without the
+      # DENTALCRAFT_AUTHENTICODE_* secrets the script warns and leaves them unsigned.
+      - name: Sign the Windows installers
+        env:
+          TAG: ${{ inputs.tag }}
+          AUTHENTICODE_P12: ${{ secrets.DENTALCRAFT_AUTHENTICODE_P12 }}
+          AUTHENTICODE_PASSWORD: ${{ secrets.DENTALCRAFT_AUTHENTICODE_PASSWORD }}
+        run: |
+          VERSION="${TAG#v}"
+          keydir="$RUNNER_TEMP/authenticode"
+          trap 'rm -rf "$keydir"' EXIT
+          key=()
+          if [ -n "$AUTHENTICODE_P12$AUTHENTICODE_PASSWORD" ]; then
+            (umask 077 && mkdir -p "$keydir" && printf '%s' "$AUTHENTICODE_P12" | base64 -d > "$keydir/dentalcraft-selfsigned.p12" && printf '%s' "$AUTHENTICODE_PASSWORD" > "$keydir/storepass")
+            key=(-v "$keydir:/run/secrets/authenticode:ro" -e AUTHENTICODE_KEY_DIR=/run/secrets/authenticode)
+          fi
+          docker run --rm \
+            -v "$PWD:/work/dentalcraft-app" -w /work/dentalcraft-app "${key[@]}" \
+            registry.fedoraproject.org/fedora:45 bash packaging/windows/authenticode.sh \
+            "installers/DentalCraft-$VERSION-setup.exe" "installers/DentalCraft-$VERSION-x86_64.msi"
       - uses: actions/upload-artifact@v7
         with:
           name: installers
@@ -414,7 +461,14 @@ jobs:
               echo "- Updates: the \`.deb\` and the \`.rpm\` add the DentalCraft apt or dnf repository, the Flatpak updates from the DentalCraft Flatpak repository, the other versions check dentalcraft.app at startup."
               echo "- Each download also holds \`dentalcraft-cli\`: the command line and MCP server that drive DentalCraft headless or through a running app."
               echo "- Verify the downloads against \`dentalcraft_${VERSION}_SHA256SUMS.txt\`. The Linux packages and repositories are signed with the DentalCraft release key, https://dentalcraft.app/keys/dentalcraft.gpg."
-              echo "- **The Windows programs are not code-signed.** SmartScreen may warn."
+              # Signed or not: the certificate table (PE data directory 4) of setup.exe is empty when unsigned.
+              if python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); p=struct.unpack_from("<I",d,60)[0]; o=p+24+(96 if struct.unpack_from("<H",d,p+24)[0]==0x10b else 112); sys.exit(0 if struct.unpack_from("<I",d,o+36)[0] else 1)' "dist/DentalCraft-${VERSION}-setup.exe"; then
+                # The sha256 fingerprint of the pinned self-signed certificate (DER), the only key authenticode.sh accepts.
+                fpr=$(python3 -c 'import base64,hashlib,sys; t=open(sys.argv[1]).read(); print(hashlib.sha256(base64.b64decode(t.split("-----BEGIN CERTIFICATE-----")[1].split("-----END CERTIFICATE-----")[0])).hexdigest().upper())' packaging/windows/dentalcraft-selfsigned.crt.pem)
+                echo "- The Windows programs and installers carry a **self-signed** Authenticode signature (with an RFC 3161 timestamp). Windows does not trust a self-signed certificate, so SmartScreen still warns and shows an unknown publisher. Certificate SHA-256 fingerprint: \`${fpr}\`."
+              else
+                echo "- **The Windows programs are not code-signed.** SmartScreen may warn."
+              fi
             } >> notes.md
             gh release edit "$TAG" --notes-file notes.md
           fi

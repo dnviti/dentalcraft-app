@@ -120,7 +120,32 @@ The desktop entry, the AppStream metadata (`packaging/linux/com.dentalcraft.Dent
 
 ## Windows
 
-The binaries are not code-signed: SmartScreen warns on the first start of the setup, the MSI and the app.
+**Code signing (Authenticode):** `packaging/windows/authenticode.sh` signs with the DentalCraft **self-signed** certificate (`packaging/windows/dentalcraft-selfsigned.crt.pem`, SHA-256 fingerprint `24DD542E337BCEA99C793D57DE53B6D355DC015BF1270D20D1321D56DCF0AA26`), using jsign 7.6 and an RFC 3161 timestamp from `http://ts.ssl.com`. It then checks each file with `osslsigncode verify`: the signature against that certificate, the timestamp against the pinned SSL.com root (`packaging/windows/timestamp-root.pem`). `binaries.yml` runs it twice:
+- on `dentalcraft.exe` and `dentalcraft-cli.exe` before they are packed;
+- on setup.exe and the MSI after `installers.sh`.
+
+Both runs come before `update.json` and the checksums. The key, the order and the tests are in the script header and in the superproject's `docs/local-ci.md`.
+- **Windows does not trust a self-signed certificate.** SmartScreen still warns on the first start of the setup, the MSI and the app, and the publisher shows as unknown. The signature only lets users check which key signed the files: the release notes print the certificate's fingerprint.
+- Without the `DENTALCRAFT_AUTHENTICODE_*` secrets (or, locally, `~/.config/dentalcraft-release/authenticode`), the files stay unsigned with a warning.
+- The NSIS uninstaller (`uninstall.exe`, written by the setup at install time) is not signed.
+
+### Trusting the self-signed certificate on a Windows PC
+
+Untested on Windows: the steps follow Microsoft's documentation of `certutil` and `Import-Certificate`, and nobody has run them on a DentalCraft PC yet.
+
+- **File:** `dentalcraft-selfsigned.cer` (DER), from the release key directory `~/.config/dentalcraft-release/authenticode/`. It is the same certificate as `packaging/windows/dentalcraft-selfsigned.crt.pem`.
+- **Check the fingerprint first:** `certutil -hashfile dentalcraft-selfsigned.cer SHA256` must print `24dd542e337bcea99c793d57de53b6d355dc015bf1270d20d1321d56dcf0aa26` (upper or lower case). Do not install a file with any other value.
+- **Install**, in an elevated prompt (Run as administrator):
+
+  ```bat
+  certutil -addstore -f Root dentalcraft-selfsigned.cer
+  certutil -addstore -f TrustedPublisher dentalcraft-selfsigned.cer
+  ```
+
+  PowerShell equivalent: `Import-Certificate -FilePath dentalcraft-selfsigned.cer -CertStoreLocation Cert:\LocalMachine\Root`, then the same with `Cert:\LocalMachine\TrustedPublisher`.
+- **Remove:** `certutil -delstore Root 35ec884c9c5a0cfb30dd86e48071cfb0f3aa7f97` and `certutil -delstore TrustedPublisher 35ec884c9c5a0cfb30dd86e48071cfb0f3aa7f97` (the certificate's serial number).
+- **What trusting it allows:** the certificate is `CA:FALSE` with the code-signing EKU only, so it cannot issue other certificates. Trusting it only trusts what this key signs: the signature then shows as valid, with the publisher "DentalCraft (self-signed)".
+- **What it does not change:** SmartScreen reputation does not come from local trust. A downloaded file still carries the Mark of the Web and may still show "Windows protected your PC". `Unblock-File <file>` in PowerShell, or Properties > Unblock, removes the mark.
 
 ### setup.exe (NSIS)
 
