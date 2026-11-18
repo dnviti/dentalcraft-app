@@ -213,7 +213,7 @@ fn an_agent_runs_an_automatic_scan_on_the_simulated_turntable() {
     // consent of `allow_uncalibrated` (a calibration of this computer may
     // exist: then it starts at once)
     let auto =
-        json!({ "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 90.0, "settle_s": 0.1 });
+        json!({ "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 20.0, "settle_s": 0.1 });
     if let Err(e) = scan(&mut ws, "scan.auto", auto.clone()) {
         assert!(e.starts_with("rig-uncalibrated"), "{e}");
         let mut anyway = auto;

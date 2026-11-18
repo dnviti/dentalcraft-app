@@ -9,12 +9,6 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
-[features]
-# Stop-and-capture mode of the automatic scan (angle between the stops, frames
-# per stop). Off until `scan.auto` accepts `mode`, `step_deg` and
-# `frames_per_stop`; the popup then sends them.
-stop-capture = []
-
 [dependencies]
 # core crates
 dc-case.workspace = true

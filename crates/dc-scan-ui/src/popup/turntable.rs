@@ -119,6 +119,10 @@ pub(super) struct JobSnap {
     pub paused: bool,
     /// The code of the error of a failed job.
     pub error: Option<ScanFailure>,
+    /// `turntable.calibrate`: what the run measured.
+    pub calibration: Option<CalReport>,
+    /// `scan.auto`: how the views were registered and fused.
+    pub quality: Option<QualityReport>,
 }
 
 impl JobSnap {
@@ -138,6 +142,8 @@ impl JobSnap {
                     v["error_detail"].as_str().unwrap_or_default(),
                 )
             }),
+            calibration: v.get("calibration").and_then(CalReport::from_json),
+            quality: v.get("quality").and_then(QualityReport::from_json),
         })
     }
 
@@ -149,6 +155,94 @@ impl JobSnap {
     /// How far it is, `0..=1`.
     fn fraction(&self) -> f32 {
         self.step.saturating_sub(1) as f32 / self.steps.max(1) as f32
+    }
+}
+
+/// What a calibration run measured (`RigJobStatus::calibration`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CalReport {
+    pub rms_deg: Option<f32>,
+    pub rms_mm: Option<f32>,
+    /// Stop pairs registered, and tried.
+    pub pairs: u32,
+    pub pairs_expected: u32,
+    /// Measured over commanded turn.
+    pub angle_gain: Option<f32>,
+}
+
+impl CalReport {
+    fn from_json(v: &Value) -> Option<Self> {
+        v.is_object().then(|| Self {
+            rms_deg: num(&v["rms_deg"]),
+            rms_mm: num(&v["rms_mm"]),
+            pairs: v["pairs"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+            pairs_expected: v["pairs_expected"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+            angle_gain: num(&v["angle_gain"]),
+        })
+    }
+}
+
+/// How well an automatic scan registered and fused its views
+/// (`RigJobStatus::quality`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct QualityReport {
+    /// Stops captured (0 when turning continuously).
+    pub stops: u32,
+    /// Stops registered from the turntable pose only.
+    pub flagged_stops: u32,
+    /// Frames received while turning (continuous).
+    pub frames: u64,
+    /// Frames or stops fused.
+    pub fused: u64,
+    pub mean_rms_mm: Option<f32>,
+    /// The loop closure error of each full turn (degrees).
+    pub loop_error_deg: Vec<f32>,
+    /// The code of the warning of a weak scan.
+    pub warning: Option<String>,
+}
+
+impl QualityReport {
+    fn from_json(v: &Value) -> Option<Self> {
+        if !v.is_object() {
+            return None;
+        }
+        let count = |k: &str| v[k].as_u64().unwrap_or(0);
+        Some(Self {
+            stops: u32::try_from(count("stops")).unwrap_or(u32::MAX),
+            flagged_stops: u32::try_from(count("flagged_stops")).unwrap_or(u32::MAX),
+            frames: count("frames"),
+            fused: count("fused"),
+            mean_rms_mm: num(&v["mean_rms_mm"]),
+            loop_error_deg: v["loop_error_deg"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(num)
+                .collect(),
+            warning: v["warning"].as_str().map(str::to_owned),
+        })
+    }
+
+    /// The largest loop closure error (degrees), when a full turn was made.
+    fn loop_error(&self) -> Option<f32> {
+        self.loop_error_deg
+            .iter()
+            .map(|e| e.abs())
+            .max_by(f32::total_cmp)
+    }
+}
+
+/// The sentence of the warning code of a weak scan.
+fn warning_key(code: &str) -> &'static str {
+    match code {
+        "scan-quality-weak" => "scan-warn-scan-quality-weak",
+        _ => "scan-warn-other",
     }
 }
 
@@ -214,9 +308,10 @@ pub(super) enum CalQuality {
 
 impl CalQuality {
     /// Errors (turn in degrees, axis position in mm) up to which the fit
-    /// is good, then fair; beyond them the scan does not hold together.
-    const GOOD: (f32, f32) = (0.5, 0.5);
-    const FAIR: (f32, f32) = (1.0, 1.0);
+    /// is good, then fair. The calibration itself refuses a fit beyond
+    /// 2.5° or 2 mm per stop pair, so beyond FAIR is an older calibration.
+    const GOOD: (f32, f32) = (1.0, 1.0);
+    const FAIR: (f32, f32) = (2.5, 2.0);
 
     fn of(deg: f32, mm: f32) -> Self {
         let within = |(d, m): (f32, f32)| deg <= d && mm <= m;
@@ -291,9 +386,13 @@ const DEFAULT_SPEED_DEG_S: f32 = 8.0;
 /// Degrees the turntable may turn between two frames before tracking
 /// is at risk.
 const MAX_DEG_PER_FRAME: f32 = 2.5;
-/// Stop and capture, in [`TableUi::capture`].
-#[cfg(feature = "stop-capture")]
-const CAPTURE_STOP: usize = 1;
+/// Stop and capture, the first of the two choices (the other is continuous
+/// turning), in [`TableUi::capture`].
+const CAPTURE_STOP: usize = 0;
+/// Degrees between stops and frames taken at each stop, as `scan.auto`
+/// defaults to.
+const DEFAULT_STOP_STEP_DEG: f32 = 10.0;
+const DEFAULT_FRAMES_PER_STOP: f32 = 3.0;
 
 /// Degrees turned between two frames and the speed (°/s) that keeps it near
 /// 2°, when `speed` (°/s) turns the object too far between two frames at
@@ -429,14 +528,11 @@ pub(super) struct TableUi {
     /// "Calibrate first" was chosen: the calibration control comes into
     /// view with the focus on the next frame.
     pub focus_calibrate: bool,
-    /// Continuous turning (0) or stop and capture (1).
-    #[cfg(feature = "stop-capture")]
+    /// Stop and capture ([`CAPTURE_STOP`]) or continuous turning.
     pub capture: usize,
     /// Degrees between the stops of stop and capture.
-    #[cfg(feature = "stop-capture")]
     pub stop_step_deg: f32,
     /// Frames taken at each stop (a whole number).
-    #[cfg(feature = "stop-capture")]
     pub frames_per_stop: f32,
 }
 
@@ -455,12 +551,9 @@ impl Default for TableUi {
             expanded: true,
             confirm_auto: None,
             focus_calibrate: false,
-            #[cfg(feature = "stop-capture")]
-            capture: 0,
-            #[cfg(feature = "stop-capture")]
-            stop_step_deg: 10.0,
-            #[cfg(feature = "stop-capture")]
-            frames_per_stop: 3.0,
+            capture: CAPTURE_STOP,
+            stop_step_deg: DEFAULT_STOP_STEP_DEG,
+            frames_per_stop: DEFAULT_FRAMES_PER_STOP,
         }
     }
 }
@@ -517,30 +610,35 @@ impl TableUi {
         }
     }
 
-    /// The parameters of `scan.auto` from the controls.
-    fn auto_params(&self, tilts: Vec<f32>) -> Value {
-        let params = json!({
+    /// The parameters of `scan.auto`: with a calibration of the rig stop and
+    /// capture (the turntable moves between the stops at its own pace) unless
+    /// continuous turning is chosen; without one, continuous turning.
+    fn auto_params(&self, tilts: Vec<f32>, calibrated: bool) -> Value {
+        let mut params = json!({
             "tilts_deg": tilts,
             "rotation_deg": self.rotation_deg,
-            "deg_per_s": self.speed,
         });
-        #[cfg(feature = "stop-capture")]
-        if self.capture == CAPTURE_STOP {
-            let mut params = params;
+        if calibrated && self.capture == CAPTURE_STOP {
             params["mode"] = json!("stop-and-capture");
             params["step_deg"] = json!(self.stop_step_deg);
             params["frames_per_stop"] = json!(self.frames_per_stop.round() as u32);
-            return params;
+        } else {
+            params["mode"] = json!("continuous");
+            params["deg_per_s"] = json!(self.speed);
         }
         params
     }
 
-    /// Continuous turning or stop and capture, the angle between the stops
-    /// and the frames taken at each.
-    #[cfg(feature = "stop-capture")]
-    fn stop_capture_ui(&mut self, ui: &mut Ui) {
+    /// Stop and capture or continuous turning, the angle between the stops
+    /// and the frames taken at each. Without a calibration only continuous
+    /// turning works: the control says so.
+    fn capture_ui(&mut self, ui: &mut Ui, calibrated: bool) {
         ui.add_space(6.0);
-        let labels = [t("scan-auto-mode-continuous"), t("scan-auto-mode-stop")];
+        if !calibrated {
+            caption(ui, t("scan-auto-uncalibrated-hint"));
+            return;
+        }
+        let labels = [t("scan-auto-mode-stop"), t("scan-auto-mode-continuous")];
         widgets::segmented_fill(ui, &mut self.capture, &labels, 32.0);
         if self.capture == CAPTURE_STOP {
             ui.add_space(6.0);
@@ -548,11 +646,11 @@ impl TableUi {
                 ui,
                 &t("scan-auto-stop-step"),
                 &mut self.stop_step_deg,
-                5.0..=15.0,
+                2.0..=45.0,
                 1.0,
                 0,
                 "°",
-                10.0,
+                DEFAULT_STOP_STEP_DEG,
             );
             ui.add_space(6.0);
             widgets::labeled_slider(
@@ -563,7 +661,7 @@ impl TableUi {
                 1.0,
                 0,
                 "",
-                3.0,
+                DEFAULT_FRAMES_PER_STOP,
             );
             ui.add_space(4.0);
             caption(ui, t("scan-auto-stop-hint"));
@@ -646,6 +744,85 @@ fn progress(ui: &mut Ui, text: &str, job: &JobSnap) {
     ui.add_space(4.0);
     let width = ui.available_width();
     widgets::progress_bar(ui, Some(job.fraction()), width);
+}
+
+/// What a calibration run measured: the errors of the fit, the stop pairs
+/// registered and the angle gain.
+fn calibration_report(ui: &mut Ui, r: &CalReport) {
+    if let (Some(deg), Some(mm)) = (r.rms_deg, r.rms_mm) {
+        caption(
+            ui,
+            dc_i18n::tr_args(
+                "turntable-cal-residuals",
+                &[("deg", &format!("{deg:.2}")), ("mm", &format!("{mm:.2}"))],
+            ),
+        );
+    }
+    if r.pairs_expected > 0 {
+        caption(
+            ui,
+            dc_i18n::tr_args(
+                "turntable-cal-pairs",
+                &[
+                    ("pairs", &r.pairs.to_string()),
+                    ("expected", &r.pairs_expected.to_string()),
+                ],
+            ),
+        );
+    }
+    if let Some(gain) = r.angle_gain {
+        caption(
+            ui,
+            dc_i18n::tr_args("turntable-cal-gain", &[("gain", &format!("{gain:.3}"))]),
+        );
+    }
+}
+
+/// How the latest automatic scan went: the views fused and flagged, the
+/// residual, the loop closure error and the warning of a weak scan.
+fn quality_report(ui: &mut Ui, q: &QualityReport) {
+    let c = *colors(ui);
+    ui.add_space(8.0);
+    sub_heading(ui, "scan-quality-title");
+    let line = if q.stops > 0 {
+        dc_i18n::tr_args(
+            "scan-quality-stops",
+            &[
+                ("fused", &q.fused.to_string()),
+                ("stops", &q.stops.to_string()),
+                ("flagged", &q.flagged_stops.to_string()),
+            ],
+        )
+    } else {
+        dc_i18n::tr_args(
+            "scan-quality-frames",
+            &[
+                ("fused", &q.fused.to_string()),
+                ("frames", &q.frames.to_string()),
+            ],
+        )
+    };
+    caption(ui, line);
+    if let Some(mm) = q.mean_rms_mm {
+        caption(
+            ui,
+            dc_i18n::tr_args("scan-quality-residual", &[("mm", &format!("{mm:.2}"))]),
+        );
+    }
+    if let Some(deg) = q.loop_error() {
+        caption(
+            ui,
+            dc_i18n::tr_args("scan-quality-loop", &[("deg", &format!("{deg:.2}"))]),
+        );
+    }
+    if let Some(code) = &q.warning {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!("{} {}", ic::WARNING, t(warning_key(code))))
+                .font(fonts::ui(12.0))
+                .color(c.status_warning),
+        );
+    }
 }
 
 impl ScanUi {
@@ -895,6 +1072,12 @@ impl ScanUi {
         sub_heading(ui, "turntable-cal-title");
         caption(ui, t("turntable-cal-hint"));
         ui.add_space(6.0);
+        // what the latest calibration run measured, also when it failed
+        let report = snap
+            .calibrating
+            .as_ref()
+            .filter(|j| !j.active)
+            .and_then(|j| j.calibration.as_ref());
         match &snap.calibration {
             Some(cal) => {
                 let now = SystemTime::now()
@@ -920,14 +1103,16 @@ impl ScanUi {
                         }
                     });
                     if let Some((quality, deg, mm)) = fit {
-                        ui.add_space(4.0);
-                        caption(
-                            ui,
-                            dc_i18n::tr_args(
-                                "turntable-cal-residuals",
-                                &[("deg", &format!("{deg:.2}")), ("mm", &format!("{mm:.2}"))],
-                            ),
-                        );
+                        if report.is_none() {
+                            ui.add_space(4.0);
+                            caption(
+                                ui,
+                                dc_i18n::tr_args(
+                                    "turntable-cal-residuals",
+                                    &[("deg", &format!("{deg:.2}")), ("mm", &format!("{mm:.2}"))],
+                                ),
+                            );
+                        }
                         if quality == CalQuality::Poor {
                             ui.add_space(4.0);
                             ui.label(
@@ -946,6 +1131,10 @@ impl ScanUi {
             None => {
                 widgets::badge(ui, BadgeKind::Neutral, t("turntable-cal-none"));
             }
+        }
+        if let Some(r) = report {
+            ui.add_space(4.0);
+            calibration_report(ui, r);
         }
         ui.add_space(6.0);
         if let Some(j) = JobSnap::running(snap.calibrating.as_ref()) {
@@ -1059,8 +1248,7 @@ impl ScanUi {
                     "°",
                     360.0,
                 );
-                #[cfg(feature = "stop-capture")]
-                self.table.stop_capture_ui(ui);
+                self.table.capture_ui(ui, matching(snap).is_some());
                 tilts
             })
             .inner;
@@ -1077,7 +1265,7 @@ impl ScanUi {
             .clicked()
             && let Some(tilts) = tilts
         {
-            let params = self.table.auto_params(tilts);
+            let params = self.table.auto_params(tilts, matching(snap).is_some());
             if matching(snap).is_some() {
                 out.push(Act::Run(SCAN_AUTO, params));
             } else {
@@ -1090,6 +1278,9 @@ impl ScanUi {
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             caption(ui, t("scan-auto-hint"));
         });
+        if !busy && let Some(q) = snap.auto.as_ref().and_then(|j| j.quality.as_ref()) {
+            quality_report(ui, q);
+        }
     }
 
     /// The confirmation of an automatic scan without a calibration of this
@@ -1268,8 +1459,9 @@ mod tests {
     fn quality_of_the_fit() {
         let q = |d, m| calibration(json!({ "fit_rms_deg": d, "fit_rms_mm": m })).fit();
         assert_eq!(q(0.1, 0.05).unwrap().0, CalQuality::Good);
-        assert_eq!(q(0.8, 0.2).unwrap().0, CalQuality::Fair);
-        assert_eq!(q(0.2, 0.9).unwrap().0, CalQuality::Fair);
+        assert_eq!(q(0.9, 0.9).unwrap().0, CalQuality::Good);
+        assert_eq!(q(1.7, 1.3).unwrap().0, CalQuality::Fair);
+        assert_eq!(q(0.2, 1.5).unwrap().0, CalQuality::Fair);
         assert_eq!(q(0.2, 2.5).unwrap().0, CalQuality::Poor);
         let (_, deg, mm) = q(0.12, 0.34).unwrap();
         assert!((deg - 0.12).abs() < 1e-6 && (mm - 0.34).abs() < 1e-6);
@@ -1331,24 +1523,79 @@ mod tests {
 
     #[test]
     fn automatic_scan_parameters() {
-        let ui = TableUi::default();
+        let mut ui = TableUi::default();
+        assert_eq!(ui.capture, CAPTURE_STOP);
+        assert_eq!((ui.stop_step_deg, ui.frames_per_stop), (10.0, 3.0));
+        // calibrated: stop and capture, the table moves at its own pace
+        let p = ui.auto_params(vec![0.0, 20.0], true);
         assert_eq!(
-            ui.auto_params(vec![0.0]),
-            json!({ "tilts_deg": [0.0], "rotation_deg": 360.0, "deg_per_s": DEFAULT_SPEED_DEG_S })
+            p,
+            json!({
+                "tilts_deg": [0.0, 20.0], "rotation_deg": 360.0,
+                "mode": "stop-and-capture", "step_deg": 10.0, "frames_per_stop": 3,
+            })
+        );
+        // not calibrated: only continuous turning works
+        assert_eq!(
+            ui.auto_params(vec![0.0], false),
+            json!({
+                "tilts_deg": [0.0], "rotation_deg": 360.0,
+                "mode": "continuous", "deg_per_s": DEFAULT_SPEED_DEG_S,
+            })
+        );
+        // calibrated, continuous chosen
+        ui.capture = 1;
+        assert_eq!(ui.auto_params(vec![0.0], true)["mode"], "continuous");
+        ui.capture = CAPTURE_STOP;
+        ui.stop_step_deg = 15.0;
+        ui.frames_per_stop = 4.2;
+        let p = ui.auto_params(vec![0.0], true);
+        assert_eq!(
+            (&p["step_deg"], &p["frames_per_stop"]),
+            (&json!(15.0), &json!(4))
         );
     }
 
-    #[cfg(feature = "stop-capture")]
     #[test]
-    fn stop_and_capture_parameters() {
-        let mut ui = TableUi::default();
-        assert_eq!((ui.stop_step_deg, ui.frames_per_stop), (10.0, 3.0));
-        assert_eq!(ui.auto_params(vec![0.0])["mode"], Value::Null);
-        ui.capture = CAPTURE_STOP;
-        let p = ui.auto_params(vec![0.0, 20.0]);
-        assert_eq!(p["mode"], "stop-and-capture");
-        assert_eq!(p["step_deg"], 10.0);
-        assert_eq!(p["frames_per_stop"], 3);
-        assert_eq!(p["tilts_deg"], json!([0.0, 20.0]));
+    fn what_a_job_reports() {
+        let c = JobSnap::from_json(&json!({
+            "kind": "calibrate", "state": "failed", "step": 24, "steps": 24,
+            "error": "calibration-inaccurate",
+            "calibration": {
+                "rms_deg": 3.1, "rms_mm": 0.9, "pairs": 22, "pairs_expected": 24,
+                "angle_gain": 0.947, "loop_verified": false,
+            },
+        }))
+        .unwrap();
+        let r = c.calibration.unwrap();
+        assert_eq!((r.pairs, r.pairs_expected), (22, 24));
+        assert_eq!(
+            (r.rms_deg, r.rms_mm, r.angle_gain),
+            (Some(3.1), Some(0.9), Some(0.947))
+        );
+        assert_eq!(c.quality, None);
+        let a = JobSnap::from_json(&json!({
+            "kind": "auto", "state": "done", "step": 4, "steps": 4,
+            "quality": {
+                "stops": 36, "flagged_stops": 3, "frames": 0, "fused": 36,
+                "mean_rms_mm": 0.27, "loop_error_deg": [0.4, -1.2],
+                "warning": "scan-quality-weak",
+            },
+        }))
+        .unwrap();
+        let q = a.quality.unwrap();
+        assert_eq!((q.stops, q.flagged_stops, q.fused), (36, 3, 36));
+        assert_eq!(q.mean_rms_mm, Some(0.27));
+        assert_eq!(q.loop_error(), Some(1.2));
+        assert_eq!(q.warning.as_deref(), Some("scan-quality-weak"));
+        assert_eq!(
+            warning_key("scan-quality-weak"),
+            "scan-warn-scan-quality-weak"
+        );
+        assert_eq!(warning_key("other"), "scan-warn-other");
+        assert_eq!(a.calibration, None);
+        // a null report is no report
+        let n = JobSnap::from_json(&json!({ "state": "done", "steps": 1, "quality": null }));
+        assert_eq!(n.unwrap().quality, None);
     }
 }

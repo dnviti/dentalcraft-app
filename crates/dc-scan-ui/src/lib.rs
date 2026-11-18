@@ -161,6 +161,12 @@ const KNOWN_CODES: &[&str] = &[
     "ble-disconnected",
     "ble-platform",
     "rig-uncalibrated",
+    "calibration",
+    "calibration-no-object",
+    "calibration-tracking",
+    "calibration-inaccurate",
+    "calibration-implausible",
+    "scan-quality-low",
 ];
 
 impl ScanFailure {
@@ -614,7 +620,7 @@ impl ScanPopup {
 /// anonymous diagnostics: a fault as an error, a missing or switched-off
 /// device as a flagged warning; a cancel or a busy device is no failure.
 fn log_failure(command: &str, f: &ScanFailure) {
-    const SETUP: [&str; 11] = [
+    const SETUP: [&str; 12] = [
         "device-not-found",
         "not-connected",
         "turntable-not-connected",
@@ -624,6 +630,7 @@ fn log_failure(command: &str, f: &ScanFailure) {
         "sdk-missing",
         "platform-unsupported",
         "rig-uncalibrated",
+        "calibration-no-object",
         "invalid-params",
         "empty",
     ];
