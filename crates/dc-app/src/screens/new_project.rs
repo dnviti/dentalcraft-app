@@ -13,6 +13,7 @@ use dc_case::ScanRole;
 use dc_case::import::{ImportError, PrepareOptions, WarningCode, prepare_with};
 use dc_command::{CancelToken, JobCtx};
 use dc_mesh::Units;
+use dc_scan_ui::{ImportWords, ScanOutput, ScanTarget};
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_ui::{Palette, fonts, icons, tokens};
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
@@ -168,6 +169,10 @@ pub struct ScanEntry {
     /// `true` when the probe reads the file the way a bite is read (units
     /// kept): what the import will do when the row's role is bite.
     probed_as_bite: bool,
+    /// The surface the scanner handed over, when this row is one: it owns
+    /// the temporary file, which goes when the row does (after the project
+    /// is created, or when the row is removed or the screen left).
+    output: Option<ScanOutput>,
     cancel: CancelToken,
 }
 
@@ -179,6 +184,12 @@ impl Drop for ScanEntry {
 }
 
 impl ScanEntry {
+    /// `true` when the scanner made this row (its file is the scanner's
+    /// temporary surface, not a file of the user's).
+    pub fn is_scanned(&self) -> bool {
+        self.output.is_some()
+    }
+
     /// The role the badge shows: the user's choice, else the name's hint,
     /// else none (auto).
     pub fn shown(&self) -> Option<ScanRole> {
@@ -248,14 +259,12 @@ pub struct Problems {
     pub case_id: bool,
     /// Alias missing.
     pub alias: bool,
-    /// No scans.
-    pub scans: bool,
 }
 
 impl Problems {
-    /// Nothing wrong.
+    /// Nothing wrong. Scans are optional: they can be added in the workspace.
     pub fn ok(&self) -> bool {
-        !(self.case_id || self.alias || self.scans)
+        !(self.case_id || self.alias)
     }
 }
 
@@ -303,9 +312,35 @@ impl NewProjectState {
                 choice: None,
                 probe,
                 probed_as_bite: as_bite,
+                output: None,
                 cancel,
             });
         }
+    }
+
+    /// Adds a surface the scanner handed over. The row keeps the
+    /// [`ScanOutput`], so its temporary file lives until the row goes; the
+    /// role chosen in the scan window is the row's role (a choice, so it is
+    /// shown in blue and can still be changed with the badge).
+    pub fn add_scan_output(&mut self, out: ScanOutput) {
+        let role = out.role();
+        let (id, cancel, probe) = self.prober.start(out.path(), options_for(role));
+        self.scans.push(ScanEntry {
+            id,
+            path: out.path().to_path_buf(),
+            hint: None,
+            choice: role,
+            probe,
+            probed_as_bite: role == Some(ScanRole::Bite),
+            output: Some(out),
+            cancel,
+        });
+    }
+
+    /// Drops the rows the scanner made (their temporary files go). Done when
+    /// the screen is left: the scans of the scanner do not outlive the form.
+    pub fn drop_scanned(&mut self) {
+        self.scans.retain(|s| !s.is_scanned());
     }
 
     /// Gives row `index` the next value of its badge. When that makes it a
@@ -374,7 +409,6 @@ impl NewProjectState {
         Problems {
             case_id: self.case_id.trim().is_empty(),
             alias: self.alias.trim().is_empty(),
-            scans: self.scans.is_empty(),
         }
     }
 
@@ -400,6 +434,18 @@ impl NewProjectState {
 
 fn text(ui: &mut Ui, s: impl Into<String>, font: egui::FontId, color: egui::Color32) {
     ui.add(egui::Label::new(RichText::new(s).font(font).color(color)).wrap());
+}
+
+/// The name of a row: the file name, or for a surface the scanner made
+/// (whose file name is a temporary one) what it is: `Scan – Upper jaw`.
+fn entry_name(s: &ScanEntry) -> String {
+    if !s.is_scanned() {
+        return file_name(&s.path);
+    }
+    match s.shown() {
+        Some(r) => t!("np-scan-name", role = role_key(r)),
+        None => t!("np-scan-name-auto"),
+    }
 }
 
 fn role_key(r: ScanRole) -> String {
@@ -592,6 +638,72 @@ impl DentalCraftApp {
         );
     }
 
+    /// The roles the selected module accepts from the scanner (the
+    /// `scanner` of its import-scans leaf); `None` when it takes none, and
+    /// then the screen has no Scan button.
+    pub(crate) fn scanner_roles(&self) -> Option<Vec<ScanRole>> {
+        let menu = self.registry.get(&self.new_project.module)?.menu();
+        let id = menu
+            .command_ids()
+            .into_iter()
+            .find(|c| dc_module_api::is_import_scans_command(c))?;
+        menu.find(id)?.scanner.map(|s| s.roles.to_vec())
+    }
+
+    /// The Scan button: opens the scan window for the roles of the module.
+    /// It starts nothing; the acquisition starts there.
+    pub(crate) fn open_new_project_scan(&mut self) {
+        let Some(roles) = self.scanner_roles() else {
+            return;
+        };
+        let alias = self.new_project.alias.trim();
+        let context = if alias.is_empty() {
+            t!("np-title")
+        } else {
+            alias.to_owned()
+        };
+        let words = ImportWords {
+            button: t!("np-scan-add"),
+            hint: t!("np-scan-hint"),
+            done: t!("np-scan-done"),
+            unsaved: t!("np-scan-unsaved"),
+        };
+        self.new_project_scan.open(
+            ScanTarget::new(roles)
+                .with_context(context)
+                .with_words(words),
+        );
+    }
+
+    /// Moves the scan window on and adds each surface it hands over to the
+    /// list of scans, then tells the window it is in the project.
+    pub(crate) fn poll_new_project_scan(&mut self) {
+        self.new_project_scan.poll();
+        for out in self.new_project_scan.take_outputs() {
+            let id = out.id();
+            self.new_project.add_scan_output(out);
+            let answer = serde_json::json!({
+                "added": "new-project",
+                "scans": self.new_project.scans.len(),
+            });
+            self.new_project_scan.output_done(id, Ok(answer));
+        }
+    }
+
+    /// The form is left (any other screen): the scan window closes and the
+    /// surfaces of the scanner are dropped with their files. Not while the
+    /// project is being created: that job still reads them.
+    pub(crate) fn leave_new_project_scan(&mut self) {
+        if self.create_job.is_some() {
+            return;
+        }
+        if self.new_project_scan.is_open() {
+            self.new_project_scan.close();
+        }
+        drop(self.new_project_scan.take_outputs());
+        self.new_project.drop_scanned();
+    }
+
     /// The text of the red banner: the creation error, or the reasons no scan
     /// could be imported.
     fn np_error_text(&self) -> Option<String> {
@@ -612,6 +724,7 @@ impl DentalCraftApp {
 
     pub(crate) fn new_project_ui(&mut self, ui: &mut Ui) {
         self.new_project.poll_probes();
+        self.poll_new_project_scan();
         if self.new_project.probing() {
             ui.ctx().request_repaint_after(PROBE_POLL);
         }
@@ -704,6 +817,8 @@ impl DentalCraftApp {
                         });
                     });
             });
+        // under the form's own dialogs; draws nothing while closed
+        self.new_project_scan.show(ui);
     }
 
     fn np_modules(&mut self, ui: &mut Ui, c: &Palette) {
@@ -851,7 +966,7 @@ impl DentalCraftApp {
     fn np_scans(&mut self, ui: &mut Ui, c: &Palette) {
         // drop zone
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(w, 180.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(w, 190.0), Sense::hover());
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         paint::dashed_rect(
             ui.painter(),
@@ -887,12 +1002,48 @@ impl DentalCraftApp {
                 .color(c.text_secondary),
         );
         z.add_space(4.0);
-        if Button::secondary(t!("np-browse"))
-            .icon(icons::FOLDER_OPEN)
-            .show(&mut z)
-            .clicked()
-        {
+        // the files, and beside them the scan with a scanner (alpha) when the
+        // module lets the scans come from one
+        let offers_scanner = self.scanner_roles().is_some();
+        let browse_label = t!("np-browse");
+        let browse_w = z
+            .painter()
+            .layout_no_wrap(
+                browse_label.clone(),
+                fonts::semibold(13.0),
+                egui::Color32::PLACEHOLDER,
+            )
+            .size()
+            .x
+            + 16.0
+            + 8.0
+            + 32.0;
+        let row_w = if offers_scanner {
+            browse_w + 8.0 + dc_scan_ui::scan_button_width(&z)
+        } else {
+            browse_w
+        };
+        let (mut browse, mut scan) = (false, false);
+        let can_scan = self.create_job.is_none();
+        z.allocate_ui_with_layout(
+            vec2(row_w, 36.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                browse = Button::secondary(browse_label)
+                    .icon(icons::FOLDER_OPEN)
+                    .show(ui)
+                    .clicked();
+                if offers_scanner {
+                    scan = dc_scan_ui::scan_button(ui, can_scan);
+                }
+            },
+        );
+        if browse {
             self.pick_scans();
+        }
+        if scan {
+            self.open_new_project_scan();
         }
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
             i.raw
@@ -905,15 +1056,13 @@ impl DentalCraftApp {
             self.new_project.add_scans(dropped);
         }
         ui.add_space(14.0);
-        if self.new_project.show_errors && self.new_project.problems().scans {
+        // scans are optional: a project may start empty and get its scans
+        // later (import or scan in the workspace)
+        if self.new_project.scans.is_empty() {
             ui.label(
-                RichText::new(format!(
-                    "{}  {}",
-                    icons::WARNING_CIRCLE,
-                    t!("np-scans-required")
-                ))
-                .font(fonts::ui(12.0))
-                .color(c.status_danger),
+                RichText::new(format!("{}  {}", icons::INFO, t!("np-scans-optional")))
+                    .font(fonts::ui(12.0))
+                    .color(c.text_secondary),
             );
         }
         let mut remove = None;
@@ -933,9 +1082,13 @@ impl DentalCraftApp {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(icons::CUBE)
-                                .font(fonts::icon(18.0))
-                                .color(c.text_secondary),
+                            RichText::new(if s.is_scanned() {
+                                icons::SCAN
+                            } else {
+                                icons::CUBE
+                            })
+                            .font(fonts::icon(18.0))
+                            .color(c.text_secondary),
                         );
                         // the buttons take their room at the right first; the name
                         // and the second line get what is left and wrap or cut there
@@ -954,7 +1107,7 @@ impl DentalCraftApp {
                                     ui.spacing_mut().item_spacing.y = 2.0;
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(file_name(&s.path))
+                                            RichText::new(entry_name(s))
                                                 .font(fonts::semibold(13.0))
                                                 .color(c.text_primary),
                                         )
@@ -988,7 +1141,7 @@ impl DentalCraftApp {
         );
         if let Some(first) = self.new_project.scans.first() {
             paint::arch(ui.painter(), c, rect.shrink2(vec2(40.0, 40.0)));
-            let name = file_name(&first.path);
+            let name = entry_name(first);
             ui.painter().text(
                 rect.center_bottom() - vec2(0.0, 14.0),
                 egui::Align2::CENTER_BOTTOM,
@@ -1093,6 +1246,17 @@ mod tests {
             s.poll_probes();
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn scans_are_optional() {
+        let mut s = state();
+        s.case_id = "AL-1".into();
+        s.alias = "BIA-07".into();
+        assert!(s.scans.is_empty());
+        assert!(s.problems().ok());
+        let r = s.request().expect("a request without scans");
+        assert!(r.scans.is_empty());
     }
 
     #[test]
@@ -1528,5 +1692,139 @@ mod tests {
         assert_eq!(units_text(Units::Millimeters), "mm");
         assert_eq!(units_text(Units::Centimeters), "cm \u{2192} mm");
         assert_eq!(units_text(Units::Micrometers), "\u{b5}m \u{2192} mm");
+    }
+
+    /// Runs the scan command `id` on `popup`, as a host does every frame
+    /// (takes the surfaces it hands over into `taken`), and waits for it.
+    fn scan_command(
+        popup: &mut dc_scan_ui::ScanPopup,
+        taken: &mut Vec<ScanOutput>,
+        id: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let ticket = popup.start_command(id, params).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            popup.poll();
+            for out in popup.take_outputs() {
+                popup.output_done(out.id(), Ok(serde_json::Value::Null));
+                taken.push(out);
+            }
+            if let Some(r) = popup.take_result(ticket) {
+                return r.unwrap_or_else(|e| panic!("{id}: {e}"));
+            }
+            assert!(Instant::now() < deadline, "{id} did not end");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A real surface from the simulated scanner of `role`, as the scan
+    /// window hands it over: a PLY file in a temporary folder the value owns.
+    fn simulated_scan(role: ScanRole) -> ScanOutput {
+        let device = match role {
+            ScanRole::Upper => dc_scanner::sim::UPPER_ID,
+            _ => dc_scanner::sim::LOWER_ID,
+        };
+        let mut popup = dc_scan_ui::ScanPopup::default();
+        popup.set_target(ScanTarget::new([role]));
+        let mut taken = Vec::new();
+        let frames = 30_u64;
+        let mut run = |id: &str, params| scan_command(&mut popup, &mut taken, id, params);
+        run(
+            "scan.connect",
+            serde_json::json!({
+                "backend": "sim",
+                "device": device,
+                "options": { "realtime": false, "frames": frames, "width": 160, "height": 100 },
+            }),
+        );
+        run("scan.start", serde_json::Value::Null);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while run("scan.status", serde_json::Value::Null)["frames"].as_u64() != Some(frames) {
+            assert!(Instant::now() < deadline, "the frames did not come");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        run("scan.stop", serde_json::Value::Null);
+        run(
+            "scan.mesh-build",
+            serde_json::json!({ "resolution_mm": 0.6 }),
+        );
+        run(
+            "scan.import",
+            serde_json::json!({ "role": if role == ScanRole::Upper { "upper" } else { "lower" } }),
+        );
+        taken.pop().expect("the popup handed a surface over")
+    }
+
+    #[test]
+    fn a_scanned_surface_is_a_row_with_its_role_and_its_file_goes_with_the_row() {
+        let mut s = state();
+        s.case_id = "AL-1".into();
+        s.alias = "BIA-07".into();
+        let out = simulated_scan(ScanRole::Lower);
+        let path = out.path().to_path_buf();
+        assert!(path.is_file(), "{}", path.display());
+        s.add_scan_output(out);
+        s.add_scans(vec![PathBuf::from("/x/other.stl")]);
+        assert_eq!(s.scans.len(), 2);
+        let row = &s.scans[0];
+        assert!(row.is_scanned());
+        assert!(!s.scans[1].is_scanned());
+        assert_eq!(
+            (row.shown(), row.choice),
+            (Some(ScanRole::Lower), Some(ScanRole::Lower))
+        );
+        // the request carries the file and the role chosen in the scan window
+        let r = s.request().unwrap();
+        assert_eq!(r.scans[0], (path.clone(), Some(ScanRole::Lower)));
+        assert_eq!(r.scans[1].1, None);
+        // the row reads like a scan, not like a temporary file
+        assert_ne!(entry_name(&s.scans[0]), file_name(&path));
+        assert_eq!(entry_name(&s.scans[1]), "other.stl");
+        // removing the row removes the file; the file of the user is not touched
+        s.remove_scan(0);
+        assert!(!path.exists(), "{} stayed", path.display());
+        assert_eq!(s.scans.len(), 1);
+    }
+
+    #[test]
+    fn leaving_the_form_drops_the_scanned_rows_and_keeps_the_files_of_the_user() {
+        let mut s = state();
+        let out = simulated_scan(ScanRole::Upper);
+        let path = out.path().to_path_buf();
+        s.add_scan_output(out);
+        s.add_scans(vec![PathBuf::from("/x/other.stl")]);
+        s.drop_scanned();
+        assert!(!path.exists());
+        assert_eq!(s.scans.len(), 1);
+        assert!(!s.scans[0].is_scanned());
+    }
+
+    #[test]
+    fn a_scanned_surface_is_imported_into_the_new_project_and_its_file_goes_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = NewProjectState::new(dir.path());
+        s.case_id = "AL-1".into();
+        s.alias = "BIA-07".into();
+        let out = simulated_scan(ScanRole::Lower);
+        let path = out.path().to_path_buf();
+        s.add_scan_output(out);
+        let req = s.request().unwrap();
+        let created = crate::create_job::run(&req, &JobCtx::detached(), &|_| {}).unwrap();
+        assert!(req.path.is_file(), "the project is saved");
+        let report = created.report.expect("an import report");
+        assert_eq!(
+            report["imported"].as_array().map(Vec::len),
+            Some(1),
+            "{report}"
+        );
+        assert!(
+            path.is_file(),
+            "the row still owns the file until the form goes"
+        );
+        // what the app does when the job is done: a fresh form
+        s = NewProjectState::new(dir.path());
+        assert!(s.scans.is_empty());
+        assert!(!path.exists(), "{} stayed", path.display());
     }
 }

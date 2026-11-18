@@ -11,16 +11,18 @@
 //! 3. Surface: its resolution (Fine 0.15, Standard 0.3, Fast 0.6 mm or a
 //!    custom value) and the button that builds it;
 //! 4. Surface tools: holes, smoothing, loose pieces, simplification;
-//! 5. Import: the arch, and the import into the case.
+//! 5. Import: one of the roles of the [`crate::ScanTarget`], and the
+//!    hand-over of the surface to the host (`scan.import`).
 //!
 //! Each control runs a `scan.*` or `turntable.*` command
-//! ([`Workspace::scan_command`]); the drawing only reads the controller.
+//! ([`ScanPopup::command`]); the drawing only reads the controller.
 
 mod turntable;
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use dc_case::ScanRole;
 use dc_mesh::TriMesh;
 use dc_scanner::control::{
     SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD, SCAN_PAUSE,
@@ -43,13 +45,12 @@ use egui::{
 };
 use glam::Vec3;
 use serde_json::{Value, json};
-pub(super) use turntable::OPEN_SEARCH_S;
+pub(crate) use turntable::OPEN_SEARCH_S;
 use turntable::{CalSnap, JobSnap, TableSnap, TableUi};
 
-use super::{ScanFailure, select};
-use crate::function::caption;
-use crate::t;
-use crate::workspace::Workspace;
+use crate::{
+    ImportWords, ScanFailure, ScanPopup, ScanTarget, caption, scene_color, select, t, tr_n,
+};
 
 /// Resolutions of the surface (mm): Fine, Standard, Fast; the fourth choice
 /// is the custom value.
@@ -232,10 +233,13 @@ pub(crate) struct ScanUi {
     passes: f32,
     island_pct: f32,
     keep_pct: f32,
+    /// The role chosen in the step "Import" (index in the target's roles).
     role: usize,
+    /// What the popup is opened for (kept when it closes).
+    target: ScanTarget,
     /// The turntable block and the automatic scan.
     table: TableUi,
-    /// The surface imported into the case last.
+    /// The surface handed over to the host last.
     imported: Option<Arc<TriMesh>>,
     shown: Option<ShownKey>,
     live: Option<(u64, Uploaded, Arc<Vec<Vec3>>)>,
@@ -277,6 +281,7 @@ impl ScanUi {
             island_pct: 10.0,
             keep_pct: 50.0,
             role: 0,
+            target: ScanTarget::default(),
             table: TableUi::default(),
             imported: None,
             shown: None,
@@ -286,9 +291,10 @@ impl ScanUi {
         }
     }
 
-    /// The popup closes: what belongs to this scan goes.
+    /// The popup closes: what belongs to this scan goes (not the target).
     pub fn close(&mut self) {
-        let keep = Self::new(self.render_state.take());
+        let mut keep = Self::new(self.render_state.take());
+        keep.target = std::mem::take(&mut self.target);
         let viewport = self.viewport.take();
         *self = keep;
         if let Some(mut vp) = viewport {
@@ -296,6 +302,23 @@ impl ScanUi {
             vp.set_meshes(Vec::new());
             self.viewport = Some(vp);
         }
+    }
+
+    /// What the popup is for; the chosen role starts over when the roles
+    /// change.
+    pub fn set_target(&mut self, target: ScanTarget) {
+        if target.offered() != self.target.offered() {
+            self.role = 0;
+        }
+        self.target = target;
+    }
+
+    /// A word of the step "Import": the host's, or the popup's own `key`.
+    fn word(&self, pick: fn(&ImportWords) -> &String, key: &str) -> String {
+        self.target
+            .words
+            .as_ref()
+            .map_or_else(|| t(key), |w| pick(w).clone())
     }
 
     /// The surface the view holds (what `scan.import` writes).
@@ -495,9 +518,10 @@ impl ScanUi {
             }
             Content::Surface => {
                 if let Some(m) = &snap.mesh {
-                    meshes.push(ViewMesh::new(1, Arc::clone(m)).with_coloring(
-                        MeshColoring::Uniform(crate::view::scene_color(c.model_enamel)),
-                    ));
+                    meshes.push(
+                        ViewMesh::new(1, Arc::clone(m))
+                            .with_coloring(MeshColoring::Uniform(scene_color(c.model_enamel))),
+                    );
                 }
             }
         }
@@ -544,14 +568,22 @@ impl ScanUi {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.label(
-                RichText::new(t("ws-scan-title"))
+                RichText::new(t("scan-title"))
                     .font(fonts::semibold(18.0))
                     .color(c.text_primary),
             );
-            widgets::badge_icon(ui, BadgeKind::Amber, None, t("ws-scan-alpha"));
+            widgets::badge_icon(ui, BadgeKind::Amber, None, t("scan-alpha"));
+            // what the host opened it for
+            if let Some(context) = &self.target.context {
+                ui.label(
+                    RichText::new(context)
+                        .font(fonts::ui(13.0))
+                        .color(c.text_secondary),
+                );
+            }
             ui.add_space(12.0);
             ui.label(
-                RichText::new(t("ws-scan-device"))
+                RichText::new(t("scan-device"))
                     .font(fonts::medium(12.0))
                     .color(c.text_secondary),
             );
@@ -565,7 +597,7 @@ impl ScanUi {
                 let shown = connected_name.unwrap_or_else(|| {
                     self.devices
                         .get(self.device)
-                        .map_or_else(|| t("ws-scan-no-device"), |d| d.name.clone())
+                        .map_or_else(|| t("scan-no-device"), |d| d.name.clone())
                 });
                 egui::ComboBox::from_id_salt("dc-scan-device")
                     .width(240.0)
@@ -576,7 +608,7 @@ impl ScanUi {
                         }
                     });
             });
-            let refresh = widgets::icon_button(ui, ic::ARROWS_CLOCKWISE, t("ws-scan-refresh"));
+            let refresh = widgets::icon_button(ui, ic::ARROWS_CLOCKWISE, t("scan-refresh"));
             // the kinds of scanner that cannot be used here, and why
             let refresh = if self.unavailable.is_empty() {
                 refresh
@@ -587,7 +619,7 @@ impl ScanUi {
                 out.push(Act::Run(SCAN_DEVICES, Value::Null));
             }
             if connected {
-                if Button::secondary(t("ws-scan-disconnect"))
+                if Button::secondary(t("scan-disconnect"))
                     .icon(ic::PLUG)
                     .enabled(!busy)
                     .show(ui)
@@ -602,9 +634,9 @@ impl ScanUi {
                 );
                 let primary = self.snap.as_ref().is_none_or(|s| s.cloud.is_none());
                 let b = if primary {
-                    Button::primary(t("ws-scan-connect"))
+                    Button::primary(t("scan-connect"))
                 } else {
-                    Button::secondary(t("ws-scan-connect"))
+                    Button::secondary(t("scan-connect"))
                 };
                 if b.icon(ic::PLUGS_CONNECTED)
                     .enabled(!busy)
@@ -615,7 +647,7 @@ impl ScanUi {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::icon_button(ui, ic::X, t("ws-scan-close")).clicked() {
+                if widgets::icon_button(ui, ic::X, t("scan-close")).clicked() {
                     out.push(Act::Close);
                 }
             });
@@ -628,11 +660,11 @@ impl ScanUi {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             let (kind, key) = match state {
-                ScanState::Idle => (BadgeKind::Neutral, "ws-scan-state-idle"),
-                ScanState::Connected => (BadgeKind::Info, "ws-scan-state-connected"),
-                ScanState::Scanning => (BadgeKind::Success, "ws-scan-state-scanning"),
-                ScanState::Paused => (BadgeKind::Warning, "ws-scan-state-paused"),
-                ScanState::Stopped => (BadgeKind::Neutral, "ws-scan-state-stopped"),
+                ScanState::Idle => (BadgeKind::Neutral, "scan-state-idle"),
+                ScanState::Connected => (BadgeKind::Info, "scan-state-connected"),
+                ScanState::Scanning => (BadgeKind::Success, "scan-state-scanning"),
+                ScanState::Paused => (BadgeKind::Warning, "scan-state-paused"),
+                ScanState::Stopped => (BadgeKind::Neutral, "scan-state-stopped"),
             };
             widgets::badge(ui, kind, t(key));
             let text = |ui: &mut Ui, s: String| {
@@ -644,10 +676,10 @@ impl ScanUi {
             };
             let Some(s) = &self.snap else { return };
             if s.live() {
-                text(ui, tr_n("ws-scan-fps", format!("{:.0}", s.status.fps)));
+                text(ui, tr_n("scan-fps", format!("{:.0}", s.status.fps)));
             }
             if s.status.frames > 0 {
-                text(ui, tr_n("ws-scan-fused", s.status.fused_frames.to_string()));
+                text(ui, tr_n("scan-fused", s.status.fused_frames.to_string()));
             }
             let points = if s.live() {
                 s.status.points
@@ -655,16 +687,16 @@ impl ScanUi {
                 s.cloud.as_ref().map_or(s.status.points, |c| c.len())
             };
             if points > 0 {
-                text(ui, tr_n("ws-scan-points", points.to_string()));
+                text(ui, tr_n("scan-points", points.to_string()));
             }
             if let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
-                text(ui, tr_n("ws-scan-triangles", m.face_count().to_string()));
+                text(ui, tr_n("scan-triangles", m.face_count().to_string()));
             }
             if s.live() {
                 let (dot, key) = if s.status.tracking_ok {
-                    (c.status_success, "ws-scan-tracking-ok")
+                    (c.status_success, "scan-tracking-ok")
                 } else {
-                    (c.status_danger, "ws-scan-tracking-lost")
+                    (c.status_danger, "scan-tracking-lost")
                 };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -709,17 +741,17 @@ impl ScanUi {
         self.sync_view(ui);
         let mut response = None;
         if let Some(vp) = self.viewport.as_mut() {
-            vp.settings.background = Some(crate::view::scene_color(c.bg_viewport));
+            vp.settings.background = Some(scene_color(c.bg_viewport));
             response = Some(vp.ui(ui).response);
         } else {
             ui.allocate_rect(rect, Sense::hover());
-            centered(ui, rect, &t("ws-scan-no-gpu"), c.text_disabled);
+            centered(ui, rect, &t("scan-no-gpu"), c.text_disabled);
         }
         if content == Content::Nothing {
             let key = if self.state() == ScanState::Idle {
-                "ws-scan-empty-idle"
+                "scan-empty-idle"
             } else {
-                "ws-scan-empty-connected"
+                "scan-empty-connected"
             };
             centered(ui, rect, &t(key), c.text_secondary);
         }
@@ -759,16 +791,16 @@ impl ScanUi {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if has_mesh {
                     let mut which = usize::from(self.show_surface);
-                    let labels = [t("ws-scan-view-points"), t("ws-scan-view-surface")];
+                    let labels = [t("scan-view-points"), t("scan-view-surface")];
                     if widgets::segmented(ui, &mut which, &labels, 28.0).changed() {
                         self.show_surface = which == 1;
                     }
                     if self.show_surface {
-                        widgets::toggle(ui, &mut self.wireframe, t("ws-scan-wireframe"));
+                        widgets::toggle(ui, &mut self.wireframe, t("scan-wireframe"));
                     }
                 }
                 if content != Content::Nothing
-                    && widgets::icon_button(ui, ic::CORNERS_OUT, t("ws-scan-fit")).clicked()
+                    && widgets::icon_button(ui, ic::CORNERS_OUT, t("scan-fit")).clicked()
                 {
                     self.fit = true;
                     self.shown = None;
@@ -859,7 +891,7 @@ impl ScanUi {
     fn steps(&mut self, ui: &mut Ui, busy: bool, out: &mut Vec<Act>) {
         let c = *colors(ui);
         let Some(snap) = self.snap.clone() else {
-            caption(ui, t("ws-scan-empty-idle"));
+            caption(ui, t("scan-empty-idle"));
             return;
         };
         let state = snap.status.state;
@@ -879,12 +911,12 @@ impl ScanUi {
             ui.horizontal(|ui| {
                 widgets::spinner(ui, 14.0);
                 ui.label(
-                    RichText::new(t("ws-scan-job"))
+                    RichText::new(t("scan-job"))
                         .font(fonts::medium(13.0))
                         .color(c.text_primary),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if Button::ghost(t("ws-scan-cancel")).show(ui).clicked() {
+                    if Button::ghost(t("scan-cancel")).show(ui).clicked() {
                         out.push(Act::Cancel);
                     }
                 });
@@ -894,7 +926,7 @@ impl ScanUi {
         if has_cloud {
             ui.horizontal(|ui| {
                 let edit = !busy;
-                if Button::ghost(t("ws-scan-undo"))
+                if Button::ghost(t("scan-undo"))
                     .icon(ic::ARROW_COUNTER_CLOCKWISE)
                     .enabled(edit && snap.can_undo)
                     .show(ui)
@@ -902,7 +934,7 @@ impl ScanUi {
                 {
                     out.push(Act::Run(SCAN_UNDO, Value::Null));
                 }
-                if Button::ghost(t("ws-scan-redo"))
+                if Button::ghost(t("scan-redo"))
                     .icon(ic::ARROW_CLOCKWISE)
                     .enabled(edit && snap.can_redo)
                     .show(ui)
@@ -916,14 +948,14 @@ impl ScanUi {
         self.turntable_ui(ui, &snap, busy, out);
 
         // 1 acquisition
-        step(ui, 1, "ws-scan-step-acquire");
+        step(ui, 1, "scan-step-acquire");
         // with a turntable connected, the automatic scan is the next thing
         let table = snap.table.connected;
         ui.horizontal_wrapped(|ui| {
             let (start_key, can_start) = match state {
-                ScanState::Stopped => ("ws-scan-continue", true),
-                ScanState::Connected => ("ws-scan-start", true),
-                _ => ("ws-scan-start", false),
+                ScanState::Stopped => ("scan-continue", true),
+                ScanState::Connected => ("scan-start", true),
+                _ => ("scan-start", false),
             };
             let start = if next == 1 && !table {
                 Button::primary(t(start_key))
@@ -939,9 +971,9 @@ impl ScanUi {
                 out.push(Act::Run(SCAN_START, Value::Null));
             }
             let (pause_key, pause_id, icon) = if state == ScanState::Paused {
-                ("ws-scan-resume", SCAN_RESUME, ic::PLAY)
+                ("scan-resume", SCAN_RESUME, ic::PLAY)
             } else {
-                ("ws-scan-pause", SCAN_PAUSE, ic::PAUSE)
+                ("scan-pause", SCAN_PAUSE, ic::PAUSE)
             };
             if Button::secondary(t(pause_key))
                 .icon(icon)
@@ -951,7 +983,7 @@ impl ScanUi {
             {
                 out.push(Act::Run(pause_id, Value::Null));
             }
-            if Button::secondary(t("ws-scan-stop"))
+            if Button::secondary(t("scan-stop"))
                 .icon(ic::STOP)
                 .enabled(live && !busy)
                 .show(ui)
@@ -960,7 +992,7 @@ impl ScanUi {
                 out.push(Act::Run(SCAN_STOP, Value::Null));
             }
             let something = live || state == ScanState::Stopped || snap.cloud.is_some();
-            if Button::ghost(t("ws-scan-reset"))
+            if Button::ghost(t("scan-reset"))
                 .icon(ic::ARROW_COUNTER_CLOCKWISE)
                 .enabled(something && !busy)
                 .show(ui)
@@ -974,32 +1006,32 @@ impl ScanUi {
         self.settings_ui(ui, &snap, busy, out);
 
         // 2 point cloud
-        step(ui, 2, "ws-scan-step-cloud");
+        step(ui, 2, "scan-step-cloud");
         if !has_cloud {
-            caption(ui, t("ws-scan-needs-stop"));
+            caption(ui, t("scan-needs-stop"));
         }
         ui.add_enabled_ui(has_cloud && !busy, |ui| self.cloud_ui(ui, out));
 
         // 3 surface
-        step(ui, 3, "ws-scan-step-surface");
+        step(ui, 3, "scan-step-surface");
         ui.add_enabled_ui(has_cloud && !busy, |ui| {
             let labels = [
-                t("ws-scan-res-fine"),
-                t("ws-scan-res-standard"),
-                t("ws-scan-res-fast"),
-                t("ws-scan-res-custom"),
+                t("scan-res-fine"),
+                t("scan-res-standard"),
+                t("scan-res-fast"),
+                t("scan-res-custom"),
             ];
             widgets::segmented_fill(ui, &mut self.resolution, &labels, 32.0);
             ui.add_space(6.0);
             let mm = match RESOLUTIONS.get(self.resolution) {
                 Some(&mm) => {
-                    caption(ui, tr_n("ws-scan-resolution-mm", format!("{mm:.2}")));
+                    caption(ui, tr_n("scan-resolution-mm", format!("{mm:.2}")));
                     mm
                 }
                 None => {
                     widgets::labeled_slider(
                         ui,
-                        &t("ws-scan-resolution"),
+                        &t("scan-resolution"),
                         &mut self.custom_mm,
                         0.1..=2.0,
                         0.05,
@@ -1012,9 +1044,9 @@ impl ScanUi {
             };
             ui.add_space(6.0);
             let key = if has_mesh {
-                "ws-scan-rebuild"
+                "scan-rebuild"
             } else {
-                "ws-scan-build"
+                "scan-build"
             };
             let b = if next == 3 {
                 Button::primary(t(key))
@@ -1032,29 +1064,33 @@ impl ScanUi {
         });
 
         // 4 surface tools
-        step(ui, 4, "ws-scan-step-tools");
+        step(ui, 4, "scan-step-tools");
         if !has_mesh {
-            caption(ui, t("ws-scan-needs-surface"));
+            caption(ui, t("scan-needs-surface"));
         }
         ui.add_enabled_ui(has_mesh && !busy, |ui| {
             self.mesh_ui(ui, has_mesh && !busy, out)
         });
 
-        // 5 import
-        step(ui, 5, "ws-scan-step-import");
+        // 5 import: the scan goes to the host, with one of the roles it takes
+        step(ui, 5, "scan-step-import");
+        let roles = self.target.offered().to_vec();
+        let (button, hint) = (
+            self.word(|w| &w.button, "scan-import"),
+            self.word(|w| &w.hint, "scan-import-hint"),
+        );
         ui.add_enabled_ui(has_mesh && !busy, |ui| {
-            let labels = [
-                t("ws-scan-role-upper"),
-                t("ws-scan-role-lower"),
-                t("ws-scan-role-bite"),
-            ];
-            widgets::segmented_fill(ui, &mut self.role, &labels, 32.0);
-            ui.add_space(8.0);
-            let role = ["upper", "lower", "bite"][self.role.min(2)];
+            // one role: nothing to choose
+            if roles.len() > 1 {
+                let labels: Vec<String> = roles.iter().map(|&r| t(role_key(r))).collect();
+                widgets::segmented_fill(ui, &mut self.role, &labels, 32.0);
+                ui.add_space(8.0);
+            }
+            let role = roles[self.role.min(roles.len() - 1)];
             let b = if next == 5 {
-                Button::primary(t("ws-scan-import"))
+                Button::primary(button)
             } else {
-                Button::secondary(t("ws-scan-import"))
+                Button::secondary(button)
             };
             if b.icon(ic::DOWNLOAD_SIMPLE)
                 .enabled(has_mesh && !busy)
@@ -1062,16 +1098,20 @@ impl ScanUi {
                 .show(ui)
                 .clicked()
             {
-                out.push(Act::Run(SCAN_IMPORT, json!({ "role": role })));
+                out.push(Act::Run(
+                    SCAN_IMPORT,
+                    json!({ "role": crate::role_id(role) }),
+                ));
             }
             ui.add_space(6.0);
-            caption(ui, t("ws-scan-import-hint"));
+            caption(ui, hint);
         });
         if let (Some(m), Some(i)) = (&snap.mesh, &self.imported)
             && Arc::ptr_eq(m, i)
         {
             ui.add_space(6.0);
-            widgets::badge(ui, BadgeKind::Success, t("ws-scan-imported"));
+            let done = self.word(|w| &w.done, "scan-imported");
+            widgets::badge(ui, BadgeKind::Success, done);
         }
         ui.add_space(12.0);
     }
@@ -1093,7 +1133,7 @@ impl ScanUi {
             .unwrap_or_else(|| snap.settings.clone());
         let editable = !snap.live() && !busy;
         if snap.live() {
-            caption(ui, t("ws-scan-settings-locked"));
+            caption(ui, t("scan-settings-locked"));
             ui.add_space(4.0);
         }
         let mut apply = false;
@@ -1104,7 +1144,7 @@ impl ScanUi {
             };
             released(widgets::labeled_slider(
                 ui,
-                &t("ws-scan-detail"),
+                &t("scan-detail"),
                 &mut s.live_voxel_mm,
                 0.1..=2.0,
                 0.05,
@@ -1114,7 +1154,7 @@ impl ScanUi {
             ));
             released(widgets::labeled_slider(
                 ui,
-                &t("ws-scan-depth-min"),
+                &t("scan-depth-min"),
                 &mut s.min_depth_mm,
                 0.0..=500.0,
                 5.0,
@@ -1124,7 +1164,7 @@ impl ScanUi {
             ));
             released(widgets::labeled_slider(
                 ui,
-                &t("ws-scan-depth-max"),
+                &t("scan-depth-max"),
                 &mut s.max_depth_mm,
                 20.0..=1000.0,
                 5.0,
@@ -1133,7 +1173,7 @@ impl ScanUi {
                 300.0,
             ));
             ui.add_space(4.0);
-            if widgets::toggle(ui, &mut self.exposure_auto, t("ws-scan-exposure-auto")).changed() {
+            if widgets::toggle(ui, &mut self.exposure_auto, t("scan-exposure-auto")).changed() {
                 apply = true;
             }
             if !self.exposure_auto {
@@ -1143,7 +1183,7 @@ impl ScanUi {
                 };
                 released(widgets::labeled_slider(
                     ui,
-                    &t("ws-scan-exposure"),
+                    &t("scan-exposure"),
                     &mut self.exposure_us,
                     100.0..=30000.0,
                     100.0,
@@ -1155,11 +1195,11 @@ impl ScanUi {
             // the region of the turntable, once the rig is calibrated
             if snap.calibration.is_some() {
                 ui.add_space(8.0);
-                if widgets::toggle(ui, &mut s.use_roi, t("ws-scan-roi")).changed() {
+                if widgets::toggle(ui, &mut s.use_roi, t("scan-roi")).changed() {
                     apply = true;
                 }
                 ui.add_space(4.0);
-                caption(ui, t("ws-scan-roi-hint"));
+                caption(ui, t("scan-roi-hint"));
                 if s.use_roi {
                     ui.add_space(4.0);
                     let mut released = |r: egui::Response| {
@@ -1167,7 +1207,7 @@ impl ScanUi {
                     };
                     released(widgets::labeled_slider(
                         ui,
-                        &t("ws-scan-roi-radius"),
+                        &t("scan-roi-radius"),
                         &mut s.roi_radius_mm,
                         10.0..=150.0,
                         1.0,
@@ -1177,7 +1217,7 @@ impl ScanUi {
                     ));
                     released(widgets::labeled_slider(
                         ui,
-                        &t("ws-scan-roi-height"),
+                        &t("scan-roi-height"),
                         &mut s.roi_height_mm,
                         10.0..=200.0,
                         1.0,
@@ -1216,7 +1256,7 @@ impl ScanUi {
             |out: &mut Vec<Act>, op: CloudOp| out.push(Act::Run(SCAN_CLOUD, json!({ "op": op })));
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-strictness"),
+            &t("scan-strictness"),
             &mut self.std_ratio,
             0.5..=5.0,
             0.1,
@@ -1224,7 +1264,7 @@ impl ScanUi {
             "",
             2.0,
         );
-        if Button::secondary(t("ws-scan-outliers"))
+        if Button::secondary(t("scan-outliers"))
             .icon(ic::BROOM)
             .full_width(true)
             .show(ui)
@@ -1241,12 +1281,12 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider_mm(
             ui,
-            &t("ws-scan-isolate-gap"),
+            &t("scan-isolate-gap"),
             &mut self.isolate_mm,
             0.2..=5.0,
             1.0,
         );
-        if Button::secondary(t("ws-scan-isolate"))
+        if Button::secondary(t("scan-isolate"))
             .icon(ic::SELECTION)
             .full_width(true)
             .show(ui)
@@ -1262,7 +1302,7 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-strength"),
+            &t("scan-strength"),
             &mut self.smooth_strength,
             0.1..=1.0,
             0.05,
@@ -1270,7 +1310,7 @@ impl ScanUi {
             "",
             0.5,
         );
-        if Button::secondary(t("ws-scan-smooth-points"))
+        if Button::secondary(t("scan-smooth-points"))
             .icon(ic::WAVE_SINE)
             .full_width(true)
             .show(ui)
@@ -1288,12 +1328,12 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider_mm(
             ui,
-            &t("ws-scan-spacing"),
+            &t("scan-spacing"),
             &mut self.spacing_mm,
             0.05..=1.0,
             0.2,
         );
-        if Button::secondary(t("ws-scan-thin"))
+        if Button::secondary(t("scan-thin"))
             .icon(ic::DOTS_NINE)
             .full_width(true)
             .show(ui)
@@ -1307,19 +1347,17 @@ impl ScanUi {
             );
         }
         ui.add_space(10.0);
-        if widgets::toggle(ui, &mut self.selecting, t("ws-scan-select")).changed()
-            && !self.selecting
-        {
+        if widgets::toggle(ui, &mut self.selecting, t("scan-select")).changed() && !self.selecting {
             self.selection = None;
         }
         if self.selecting {
             ui.add_space(4.0);
-            caption(ui, t("ws-scan-select-hint"));
+            caption(ui, t("scan-select-hint"));
             let n = self.selection.as_ref().map_or(0, |s| s.indices.len());
             ui.add_space(4.0);
-            caption(ui, tr_n("ws-scan-selected", n.to_string()));
+            caption(ui, tr_n("scan-selected", n.to_string()));
             ui.horizontal(|ui| {
-                if Button::secondary(t("ws-scan-delete-selected"))
+                if Button::secondary(t("scan-delete-selected"))
                     .icon(ic::TRASH)
                     .enabled(n > 0)
                     .show(ui)
@@ -1333,7 +1371,7 @@ impl ScanUi {
                         },
                     );
                 }
-                if Button::ghost(t("ws-scan-clear-selection"))
+                if Button::ghost(t("scan-clear-selection"))
                     .enabled(n > 0)
                     .show(ui)
                     .clicked()
@@ -1343,19 +1381,19 @@ impl ScanUi {
             });
         }
         ui.add_space(10.0);
-        widgets::toggle(ui, &mut self.cutting, t("ws-scan-cut"));
+        widgets::toggle(ui, &mut self.cutting, t("scan-cut"));
         if self.cutting {
             ui.add_space(4.0);
-            caption(ui, t("ws-scan-cut-hint"));
+            caption(ui, t("scan-cut-hint"));
             let half = self.cut().map_or(50.0, |(_, _, h)| h);
             widgets::labeled_slider_mm(
                 ui,
-                &t("ws-scan-cut-level"),
+                &t("scan-cut-level"),
                 &mut self.cut_mm,
                 -half..=half,
                 0.0,
             );
-            if Button::secondary(t("ws-scan-cut-apply"))
+            if Button::secondary(t("scan-cut-apply"))
                 .icon(ic::SCISSORS)
                 .full_width(true)
                 .show(ui)
@@ -1386,7 +1424,7 @@ impl ScanUi {
         };
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-hole-size"),
+            &t("scan-hole-size"),
             &mut self.hole_edges,
             10.0..=2000.0,
             10.0,
@@ -1394,7 +1432,7 @@ impl ScanUi {
             "",
             200.0,
         );
-        if button(ui, "ws-scan-fill-holes", ic::BANDAIDS) {
+        if button(ui, "scan-fill-holes", ic::BANDAIDS) {
             run(
                 out,
                 MeshOp::FillHoles {
@@ -1405,7 +1443,7 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-passes"),
+            &t("scan-passes"),
             &mut self.passes,
             1.0..=20.0,
             1.0,
@@ -1413,7 +1451,7 @@ impl ScanUi {
             "",
             5.0,
         );
-        if button(ui, "ws-scan-smooth-surface", ic::WAVE_SINE) {
+        if button(ui, "scan-smooth-surface", ic::WAVE_SINE) {
             run(
                 out,
                 MeshOp::Smooth {
@@ -1426,7 +1464,7 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-island-size"),
+            &t("scan-island-size"),
             &mut self.island_pct,
             1.0..=50.0,
             1.0,
@@ -1434,7 +1472,7 @@ impl ScanUi {
             "%",
             10.0,
         );
-        if button(ui, "ws-scan-islands", ic::BROOM) {
+        if button(ui, "scan-islands", ic::BROOM) {
             run(
                 out,
                 MeshOp::RemoveIslands {
@@ -1445,7 +1483,7 @@ impl ScanUi {
         ui.add_space(8.0);
         widgets::labeled_slider(
             ui,
-            &t("ws-scan-keep"),
+            &t("scan-keep"),
             &mut self.keep_pct,
             10.0..=100.0,
             5.0,
@@ -1453,7 +1491,7 @@ impl ScanUi {
             "%",
             50.0,
         );
-        if button(ui, "ws-scan-simplify", ic::POLYGON) {
+        if button(ui, "scan-simplify", ic::POLYGON) {
             run(
                 out,
                 MeshOp::Decimate {
@@ -1500,11 +1538,6 @@ fn centered(ui: &Ui, rect: Rect, text: &str, color: Color32) {
     );
 }
 
-fn tr_n(key: &str, n: String) -> String {
-    crate::loader();
-    dc_i18n::tr_args(key, &[("n", &n)])
-}
-
 /// Linear RGBA of a token colour (the viewport's point colours).
 fn linear(c: Color32) -> [f32; 4] {
     let r = egui::Rgba::from(c);
@@ -1521,53 +1554,67 @@ fn cloud_points(u: &Uploaded, color: [f32; 4], size: f32) -> ViewPoints {
     p
 }
 
-/// The "Scan" button: secondary, with its alpha badge on its right.
-pub(crate) fn scan_button(ui: &mut Ui, enabled: bool) -> bool {
+/// The i18n key of the name of `role`.
+fn role_key(role: ScanRole) -> &'static str {
+    match role {
+        ScanRole::Upper => "scan-role-upper",
+        ScanRole::Lower => "scan-role-lower",
+        ScanRole::Bite => "scan-role-bite",
+    }
+}
+
+/// The "Scan" button: secondary, with its alpha badge on its right. It only
+/// says it was clicked: the host opens the popup ([`ScanPopup::open`]),
+/// which starts nothing by itself.
+pub fn scan_button(ui: &mut Ui, enabled: bool) -> bool {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let clicked = Button::secondary(t("ws-scan-button"))
+        let clicked = Button::secondary(t("scan-button"))
             .icon(ic::SCAN)
             .enabled(enabled)
             .show(ui)
-            .on_hover_text(t("ws-scan-button-tip"))
+            .on_hover_text(t("scan-button-tip"))
             .clicked();
-        widgets::badge_icon(ui, BadgeKind::Amber, None, t("ws-scan-alpha"));
+        widgets::badge_icon(ui, BadgeKind::Amber, None, t("scan-alpha"));
         clicked
     })
     .inner
 }
 
 /// Width of [`scan_button`], to lay it out beside another button.
-pub(crate) fn scan_button_width(ui: &Ui) -> f32 {
+pub fn scan_button_width(ui: &Ui) -> f32 {
     let w = |text: String, font| {
         ui.painter()
             .layout_no_wrap(text, font, Color32::PLACEHOLDER)
             .size()
             .x
     };
-    let button = 16.0 + 8.0 + w(t("ws-scan-button"), fonts::semibold(13.0)) + 32.0;
-    let badge = 8.0 + w(t("ws-scan-alpha"), fonts::medium(12.0)) + 8.0;
+    let button = 16.0 + 8.0 + w(t("scan-button"), fonts::semibold(13.0)) + 32.0;
+    let badge = 8.0 + w(t("scan-alpha"), fonts::medium(12.0)) + 8.0;
     button + 6.0 + badge
 }
 
-impl Workspace {
-    /// The scan popup, when open, and its close confirmation. Called every
-    /// frame (a running scan command asks for the next frame).
-    pub(crate) fn scan_popup(&mut self, ui: &mut Ui) {
+impl ScanPopup {
+    /// Draws the window, when open, and its close confirmation, and runs
+    /// what its controls ask for. Call it every frame, under the host's own
+    /// dialogs (a running command asks for the next frame). It polls too;
+    /// the host still takes the outputs ([`ScanPopup::take_outputs`]).
+    pub fn show(&mut self, ui: &mut Ui) {
+        self.poll();
         let ctx = ui.ctx().clone();
-        if self.scan.busy() {
+        if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        if !self.scan.ui.open {
+        if !self.ui.open {
             return;
         }
-        if let Some(s) = self.scan.try_with(Snapshot::read) {
-            self.scan.ui.snap = Some(s);
+        if let Some(s) = self.try_with(Snapshot::read) {
+            self.ui.snap = Some(s);
         }
-        if self.scan.ui.snap.as_ref().is_some_and(Snapshot::moving) {
+        if self.ui.snap.as_ref().is_some_and(Snapshot::moving) {
             ctx.request_repaint_after(LIVE_FRAME);
         }
-        let busy = self.scan.busy();
+        let busy = self.is_busy();
         let screen = ctx.content_rect();
         let size = vec2(screen.width() * 0.9, screen.height() * 0.9) - vec2(32.0, 32.0);
         let mut acts = Vec::new();
@@ -1576,11 +1623,11 @@ impl Workspace {
             .show(&ctx, |ui| {
                 ui.set_min_size(size);
                 ui.set_max_size(size);
-                self.scan.ui.contents(ui, busy, &mut acts);
+                self.ui.contents(ui, busy, &mut acts);
             });
         // keys of the popup: Escape closes, Ctrl+Z / Ctrl+Shift+Z undo and redo
         // the scan edits
-        if resp.is_top_modal && !resp.any_popup_open && !self.scan.ui.confirm_close {
+        if resp.is_top_modal && !resp.any_popup_open && !self.ui.confirm_close {
             let (esc, redo, undo) = ctx.input_mut(|i| {
                 let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
                 (
@@ -1598,46 +1645,44 @@ impl Workspace {
                 acts.push(Act::Run(SCAN_UNDO, Value::Null));
             }
         }
-        self.scan.ui.auto_confirm(ui, &mut acts);
+        self.ui.auto_confirm(ui, &mut acts);
         for act in acts {
             match act {
-                Act::Run(id, params) => self.scan_command(id, params),
-                Act::Cancel => self.scan.cancel(),
-                Act::Close if self.scan.ui.unimported() => self.scan.ui.confirm_close = true,
-                Act::Close => self.close_scan(),
+                Act::Run(id, params) => self.command(id, params),
+                Act::Cancel => self.cancel(),
+                Act::Close if self.ui.unimported() => self.ui.confirm_close = true,
+                Act::Close => self.close(),
             }
         }
-        if self.scan.ui.confirm_close {
-            self.scan_confirm_close(ui);
+        if self.ui.confirm_close {
+            self.confirm_close(ui);
         }
     }
 
-    fn scan_confirm_close(&mut self, ui: &mut Ui) {
+    fn confirm_close(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
+        let body = self.ui.word(|w| &w.unsaved, "scan-confirm-body");
         let resp = Modal::new(Id::unique("dc-scan-confirm-close"))
             .frame(widgets::card_frame(ui).inner_margin(Margin::same(24)))
             .show(ui.ctx(), |ui| {
                 ui.set_width(420.0);
                 ui.label(
-                    RichText::new(t("ws-scan-confirm-title"))
+                    RichText::new(t("scan-confirm-title"))
                         .font(fonts::semibold(18.0))
                         .color(c.text_primary),
                 );
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new(t("ws-scan-confirm-body"))
+                    RichText::new(body)
                         .font(fonts::ui(13.0))
                         .color(c.text_secondary),
                 );
                 ui.add_space(16.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if Button::primary(t("ws-scan-confirm-keep"))
-                        .show(ui)
-                        .clicked()
-                    {
+                    if Button::primary(t("scan-confirm-keep")).show(ui).clicked() {
                         return Some(false);
                     }
-                    if Button::secondary(t("ws-scan-confirm-discard"))
+                    if Button::secondary(t("scan-confirm-discard"))
                         .show(ui)
                         .clicked()
                     {
@@ -1648,9 +1693,9 @@ impl Workspace {
                 .inner
             });
         match resp.inner {
-            Some(true) => self.close_scan(),
-            Some(false) => self.scan.ui.confirm_close = false,
-            None if resp.should_close() => self.scan.ui.confirm_close = false,
+            Some(true) => self.close(),
+            Some(false) => self.ui.confirm_close = false,
+            None if resp.should_close() => self.ui.confirm_close = false,
             None => {}
         }
     }

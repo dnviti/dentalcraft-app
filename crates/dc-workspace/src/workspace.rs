@@ -122,9 +122,9 @@ pub(crate) enum SpecKind {
     /// The command of a menu leaf (by its id): the output of some is shown
     /// ([`leaf::report`]).
     Leaf(&'static str),
-    /// The import of the surface of the scan popup (`scan.import`, by the
-    /// ticket of its scan command): an import, whose end the popup follows.
-    ScanImport(u64),
+    /// The import of a surface of the scan popup (`scan.import`, by its
+    /// output): an import, whose end the popup follows.
+    ScanImport(dc_scan_ui::ScanOutputId),
 }
 
 impl SpecKind {
@@ -304,7 +304,10 @@ pub struct Workspace {
     pub(crate) confirm_exit: Option<Exit>,
     pub(crate) show_help: bool,
     /// The 3D scanner and its popup (`scan`).
-    pub(crate) scan: crate::scan::ScanHost,
+    pub(crate) scan: dc_scan_ui::ScanPopup,
+    /// The surface of the popup being imported: its file lives until the
+    /// import job has read it.
+    pub(crate) scan_output: Option<dc_scan_ui::ScanOutput>,
     actions: VecDeque<WorkspaceAction>,
 }
 
@@ -320,7 +323,7 @@ impl Workspace {
     ) -> Self {
         let mut ws = Self::build(module, project, path);
         ws.view = ViewState::with_viewport(render_state);
-        ws.scan = crate::scan::ScanHost::new(Some(render_state.clone()));
+        ws.scan = dc_scan_ui::ScanPopup::new(Some(render_state.clone()));
         ws.native_dialogs = true;
         ws
     }
@@ -421,7 +424,8 @@ impl Workspace {
             toasts: Vec::new(),
             confirm_exit: None,
             show_help: false,
-            scan: crate::scan::ScanHost::default(),
+            scan: dc_scan_ui::ScanPopup::default(),
+            scan_output: None,
             actions: VecDeque::new(),
         }
     }
@@ -845,30 +849,27 @@ impl Workspace {
     }
 
     /// Imports the surface the scan popup wrote to `path` (`scan.import`,
-    /// whose ticket is `ticket`) with the import of a file chosen by hand:
-    /// the same command, one undoable change, the import report. Refused
-    /// while another import or command runs.
+    /// its output `id`) with the import of a file chosen by hand: the same
+    /// command, one undoable change, the import report. Refused while
+    /// another import or command runs.
     pub(crate) fn import_scan_file(
         &mut self,
         path: PathBuf,
         role: Option<ScanRole>,
-        ticket: u64,
-    ) -> Result<(), crate::scan::ScanFailure> {
+        id: dc_scan_ui::ScanOutputId,
+    ) -> Result<(), dc_scan_ui::ScanFailure> {
         if self.command_running() {
             self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
-            return Err(crate::scan::ScanFailure {
-                code: "busy".into(),
-                detail: "another operation is still running on the case".into(),
-            });
+            return Err(dc_scan_ui::ScanFailure::new(
+                "busy",
+                "another operation is still running on the case",
+            ));
         }
         let Some(spec) = self.import_spec else {
-            return Err(crate::scan::ScanFailure {
-                code: "import".into(),
-                detail: "no import command".into(),
-            });
+            return Err(dc_scan_ui::ScanFailure::new("import", "no import command"));
         };
         let params = import::params(&[path], role);
-        self.run_spec(spec, params, SpecKind::ScanImport(ticket), "ws-job-import");
+        self.run_spec(spec, params, SpecKind::ScanImport(id), "ws-job-import");
         Ok(())
     }
 
@@ -1429,14 +1430,14 @@ impl Workspace {
                 handle,
             } => {
                 let taken = handle.try_take();
-                if let SpecKind::ScanImport(ticket) = kind {
+                if let SpecKind::ScanImport(id) = kind {
                     let r = match &taken {
                         Some(Ok(Ok((_, out)))) => Ok(out.clone()),
                         Some(Ok(Err(e))) => Err(e.to_string()),
                         Some(Err(e)) => Err(e.to_string()),
-                        None => Err(crate::t("ws-scan-err-import")),
+                        None => Err("the import did not finish".to_owned()),
                     };
-                    self.scan_import_finished(ticket, r);
+                    self.scan_import_finished(id, r);
                 }
                 self.finish_spec(kind, label, taken);
             }

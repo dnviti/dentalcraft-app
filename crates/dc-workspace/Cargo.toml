@@ -19,12 +19,12 @@ dc-mesh.workspace = true
 dc-module-api.workspace = true
 dc-project.workspace = true
 dc-scene.workspace = true
-dc-scanner.workspace = true
 dc-session.workspace = true
 # aligners data model (stage timeline) and algorithms (contact map overlay)
 dca-model.workspace = true
 dca-algo.workspace = true
 # app crates
+dc-scan-ui.workspace = true
 dc-ui.workspace = true
 dc-viewport.workspace = true
 egui.workspace = true
@@ -35,6 +35,8 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# the scan commands registered with the agent's surface (save round trip)
+dc-scanner.workspace = true
 dca-module.workspace = true
 egui_kittest.workspace = true
 tempfile.workspace = true

@@ -68,7 +68,7 @@ fn no_banned_word_in_the_text_of_the_shell() {
         .unwrap()
         .to_owned();
     let mut lines = 0;
-    for krate in ["dc-app", "dc-ui", "dc-workspace"] {
+    for krate in ["dc-app", "dc-ui", "dc-workspace", "dc-scan-ui"] {
         for lang in ["en", "it"] {
             let path = crates
                 .join(krate)

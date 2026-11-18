@@ -20,16 +20,14 @@ use dc_ui::widgets::{self, BadgeKind, Button};
 use egui::{Align, Layout, RichText, Sense, Stroke, Ui, vec2};
 use serde_json::{Value, json};
 
-use super::{Act, ScanUi, Snapshot, tr_n};
-use crate::function::caption;
-use crate::scan::ScanFailure;
-use crate::t;
+use super::{Act, ScanUi, Snapshot};
+use crate::{ScanFailure, caption, t, tr_n};
 
 /// Seconds the Refresh button looks for turntables (Bluetooth ones answer
 /// within a few seconds of their advertising).
 pub(super) const SEARCH_S: f32 = 5.0;
 /// Seconds the popup looks for turntables when it opens.
-pub(in crate::scan) const OPEN_SEARCH_S: f32 = 1.0;
+pub(crate) const OPEN_SEARCH_S: f32 = 1.0;
 
 /// Tilts of the presets of the automatic scan: Arch, Quick.
 const PRESETS: [&[f32]; 2] = [&[-20.0, 0.0, 20.0], &[0.0]];
@@ -230,10 +228,10 @@ fn rfc3339_secs(s: &str) -> Option<u64> {
 /// The sentence of a calibration made `secs` seconds ago.
 fn calibrated_ago(secs: u64) -> String {
     match secs {
-        0..60 => t("ws-tt-cal-now"),
-        60..3600 => tr_n("ws-tt-cal-minutes", (secs / 60).to_string()),
-        3600..172_800 => tr_n("ws-tt-cal-hours", (secs / 3600).to_string()),
-        _ => tr_n("ws-tt-cal-days", (secs / 86_400).to_string()),
+        0..60 => t("turntable-cal-now"),
+        60..3600 => tr_n("turntable-cal-minutes", (secs / 60).to_string()),
+        3600..172_800 => tr_n("turntable-cal-hours", (secs / 3600).to_string()),
+        _ => tr_n("turntable-cal-days", (secs / 86_400).to_string()),
     }
 }
 
@@ -257,7 +255,7 @@ pub(super) fn parse_tilts(text: &str, lo: f32, hi: f32) -> Option<Vec<f32>> {
 
 /// A user-facing name of a turntable backend (`revopoint-ble`, `sim`).
 fn backend_name(id: &str) -> String {
-    let key = format!("ws-tt-backend-{id}");
+    let key = format!("turntable-backend-{id}");
     let name = t(&key);
     if name == key { id.to_owned() } else { name }
 }
@@ -384,16 +382,16 @@ fn heading(ui: &mut Ui, expanded: &mut bool) {
             c.select_blue,
         );
         ui.label(
-            RichText::new(t("ws-tt-title"))
+            RichText::new(t("turntable-title"))
                 .font(fonts::semibold(14.0))
                 .color(c.text_primary),
         );
-        widgets::badge_icon(ui, BadgeKind::Amber, None, t("ws-scan-alpha"));
+        widgets::badge_icon(ui, BadgeKind::Amber, None, t("scan-alpha"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (icon, key) = if *expanded {
-                (ic::CARET_UP, "ws-tt-fold")
+                (ic::CARET_UP, "turntable-fold")
             } else {
-                (ic::CARET_DOWN, "ws-tt-unfold")
+                (ic::CARET_DOWN, "turntable-unfold")
             };
             if widgets::icon_button(ui, icon, t(key)).clicked() {
                 *expanded = !*expanded;
@@ -472,7 +470,7 @@ impl ScanUi {
                         self.table
                             .devices
                             .get(self.table.device)
-                            .map_or_else(|| t("ws-tt-no-device"), |d| d.name.clone())
+                            .map_or_else(|| t("turntable-no-device"), |d| d.name.clone())
                     });
                 egui::ComboBox::from_id_salt("dc-scan-turntable")
                     .width(ui.available_width() - 40.0)
@@ -483,7 +481,7 @@ impl ScanUi {
                         }
                     });
             });
-            if widgets::icon_button(ui, ic::ARROWS_CLOCKWISE, t("ws-tt-refresh")).clicked()
+            if widgets::icon_button(ui, ic::ARROWS_CLOCKWISE, t("turntable-refresh")).clicked()
                 && !busy
                 && !table.connected
             {
@@ -496,7 +494,7 @@ impl ScanUi {
         // the kinds of turntable that cannot be used here, and why
         for (backend, code) in &self.table.unavailable {
             let why = code.as_deref().map_or_else(
-                || t("ws-scan-err-other"),
+                || t("scan-err-other"),
                 |code| t(&ScanFailure::new(code, "").key()),
             );
             ui.add_space(4.0);
@@ -514,7 +512,7 @@ impl ScanUi {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             if table.connected {
-                if Button::secondary(t("ws-tt-disconnect"))
+                if Button::secondary(t("turntable-disconnect"))
                     .icon(ic::PLUG)
                     .enabled(!busy && !job)
                     .show(ui)
@@ -527,7 +525,7 @@ impl ScanUi {
                     Value::Null,
                     |d| json!({ "backend": d.backend, "device": d.id }),
                 );
-                if Button::secondary(t("ws-tt-connect"))
+                if Button::secondary(t("turntable-connect"))
                     .icon(ic::PLUGS_CONNECTED)
                     .enabled(!busy && !self.table.devices.is_empty())
                     .show(ui)
@@ -539,9 +537,9 @@ impl ScanUi {
             // a paused automatic scan holds the turntable still
             let paused = snap.auto.as_ref().is_some_and(|j| j.paused);
             let (kind, key) = match (table.connected, table.busy && !paused) {
-                (false, _) => (BadgeKind::Neutral, "ws-tt-state-off"),
-                (true, false) => (BadgeKind::Info, "ws-tt-state-ready"),
-                (true, true) => (BadgeKind::Warning, "ws-tt-state-moving"),
+                (false, _) => (BadgeKind::Neutral, "turntable-state-off"),
+                (true, false) => (BadgeKind::Info, "turntable-state-ready"),
+                (true, true) => (BadgeKind::Warning, "turntable-state-moving"),
             };
             widgets::badge(ui, kind, t(key));
         });
@@ -561,12 +559,12 @@ impl ScanUi {
                 );
             };
             if let Some(r) = table.rotate_deg {
-                text(ui, tr_n("ws-tt-rotation", deg(r)));
+                text(ui, tr_n("turntable-rotation", deg(r)));
             }
             if table.tilt.is_some()
                 && let Some(v) = table.tilt_deg
             {
-                text(ui, tr_n("ws-tt-tilt-now", deg(v)));
+                text(ui, tr_n("turntable-tilt-now", deg(v)));
             }
         });
         // while the automatic scan runs the manual controls (unusable then)
@@ -576,7 +574,10 @@ impl ScanUi {
                 ui.add_space(6.0);
                 progress(
                     ui,
-                    &tr_n("ws-tt-cal-progress", format!("{} / {}", j.step, j.steps)),
+                    &tr_n(
+                        "turntable-cal-progress",
+                        format!("{} / {}", j.step, j.steps),
+                    ),
                     j,
                 );
             }
@@ -589,7 +590,7 @@ impl ScanUi {
         ui.add_enabled_ui(manual, |ui| {
             widgets::labeled_slider(
                 ui,
-                &t("ws-tt-step"),
+                &t("turntable-step"),
                 &mut self.table.step_deg,
                 1.0..=360.0,
                 1.0,
@@ -600,8 +601,8 @@ impl ScanUi {
             ui.horizontal(|ui| {
                 let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
                 for (key, icon, sign) in [
-                    ("ws-tt-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
-                    ("ws-tt-turn-on", ic::ARROW_CLOCKWISE, 1.0),
+                    ("turntable-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
+                    ("turntable-turn-on", ic::ARROW_CLOCKWISE, 1.0),
                 ] {
                     if Button::secondary(t(key))
                         .icon(icon)
@@ -622,12 +623,12 @@ impl ScanUi {
                 self.table.tilt_deg = self.table.tilt_deg.clamp(lo, hi);
                 widgets::labeled_slider_deg(
                     ui,
-                    &t("ws-tt-tilt"),
+                    &t("turntable-tilt"),
                     &mut self.table.tilt_deg,
                     lo..=hi,
                     0.0,
                 );
-                if Button::secondary(t("ws-tt-tilt-apply"))
+                if Button::secondary(t("turntable-tilt-apply"))
                     .icon(ic::ANGLE)
                     .enabled(manual)
                     .full_width(true)
@@ -643,12 +644,12 @@ impl ScanUi {
             ui.add_space(6.0);
             let r = widgets::labeled_slider(
                 ui,
-                &t("ws-tt-speed"),
+                &t("turntable-speed"),
                 &mut self.table.speed,
                 2.0..=60.0,
                 1.0,
                 0,
-                &t("ws-tt-speed-unit"),
+                &t("turntable-speed-unit"),
                 20.0,
             );
             if released(&r) {
@@ -662,7 +663,7 @@ impl ScanUi {
         ui.horizontal(|ui| {
             // Stop works whenever the turntable is connected and no other
             // command holds the scanner (a running command has its own Stop)
-            if Button::secondary(t("ws-tt-stop"))
+            if Button::secondary(t("turntable-stop"))
                 .icon(ic::STOP)
                 .enabled(!busy)
                 .show(ui)
@@ -670,7 +671,7 @@ impl ScanUi {
             {
                 out.push(Act::Run(TURNTABLE_STOP, Value::Null));
             }
-            if Button::ghost(t("ws-tt-home"))
+            if Button::ghost(t("turntable-home"))
                 .icon(ic::HOUSE_SIMPLE)
                 .enabled(manual)
                 .show(ui)
@@ -682,8 +683,8 @@ impl ScanUi {
 
         // calibration
         ui.add_space(12.0);
-        sub_heading(ui, "ws-tt-cal-title");
-        caption(ui, t("ws-tt-cal-hint"));
+        sub_heading(ui, "turntable-cal-title");
+        caption(ui, t("turntable-cal-hint"));
         ui.add_space(6.0);
         match &snap.calibration {
             Some(cal) => {
@@ -693,27 +694,30 @@ impl ScanUi {
                 let other = matching(snap).is_none();
                 if other {
                     ui.label(
-                        RichText::new(format!("{} {}", ic::WARNING, t("ws-tt-cal-other")))
+                        RichText::new(format!("{} {}", ic::WARNING, t("turntable-cal-other")))
                             .font(fonts::ui(12.0))
                             .color(c.status_warning),
                     );
                 } else {
                     let text = cal.created.map_or_else(
-                        || t("ws-tt-cal-now"),
+                        || t("turntable-cal-now"),
                         |at| calibrated_ago(now.saturating_sub(at)),
                     );
                     widgets::badge(ui, BadgeKind::Success, text);
                 }
             }
             None => {
-                widgets::badge(ui, BadgeKind::Neutral, t("ws-tt-cal-none"));
+                widgets::badge(ui, BadgeKind::Neutral, t("turntable-cal-none"));
             }
         }
         ui.add_space(6.0);
         if let Some(j) = JobSnap::running(snap.calibrating.as_ref()) {
             progress(
                 ui,
-                &tr_n("ws-tt-cal-progress", format!("{} / {}", j.step, j.steps)),
+                &tr_n(
+                    "turntable-cal-progress",
+                    format!("{} / {}", j.step, j.steps),
+                ),
                 j,
             );
             return;
@@ -721,13 +725,13 @@ impl ScanUi {
         let scanner =
             snap.status.state == ScanState::Connected || snap.status.state == ScanState::Stopped;
         if snap.status.state == ScanState::Idle {
-            caption(ui, t("ws-tt-cal-needs"));
+            caption(ui, t("turntable-cal-needs"));
             ui.add_space(4.0);
         }
         let key = if snap.calibration.is_some() {
-            "ws-tt-recalibrate"
+            "turntable-recalibrate"
         } else {
-            "ws-tt-calibrate"
+            "turntable-calibrate"
         };
         let r = Button::secondary(t(key))
             .icon(ic::CROSSHAIR)
@@ -753,15 +757,15 @@ impl ScanUi {
         out: &mut Vec<Act>,
     ) {
         ui.add_space(10.0);
-        sub_heading(ui, "ws-scan-auto-title");
+        sub_heading(ui, "scan-auto-title");
         let table = &snap.table;
         if !table.connected {
-            caption(ui, t("ws-scan-auto-needs"));
+            caption(ui, t("scan-auto-needs"));
             return;
         }
         if let Some(a) = JobSnap::running(snap.auto.as_ref()) {
             let text = dc_i18n::tr_args(
-                "ws-scan-auto-progress",
+                "scan-auto-progress",
                 &[
                     ("step", &a.step.to_string()),
                     ("steps", &a.steps.to_string()),
@@ -770,7 +774,7 @@ impl ScanUi {
             );
             progress(ui, &text, a);
             ui.add_space(4.0);
-            caption(ui, t("ws-scan-auto-hint"));
+            caption(ui, t("scan-auto-hint"));
             return;
         }
         let busy = busy || JobSnap::running(snap.calibrating.as_ref()).is_some();
@@ -780,9 +784,9 @@ impl ScanUi {
             .add_enabled_ui(can, |ui| {
                 if table.tilt.is_some() {
                     let labels = [
-                        t("ws-scan-auto-arch"),
-                        t("ws-scan-auto-quick"),
-                        t("ws-scan-auto-custom"),
+                        t("scan-auto-arch"),
+                        t("scan-auto-quick"),
+                        t("scan-auto-custom"),
                     ];
                     widgets::segmented_fill(ui, &mut self.table.preset, &labels, 32.0);
                     ui.add_space(6.0);
@@ -794,13 +798,13 @@ impl ScanUi {
                 if self.table.preset >= PRESETS.len() {
                     let error = tilts.is_none().then(|| {
                         dc_i18n::tr_args(
-                            "ws-scan-auto-tilts-error",
+                            "scan-auto-tilts-error",
                             &[("min", &deg(range.0)), ("max", &deg(range.1))],
                         )
                     });
                     widgets::text_input(
                         ui,
-                        &t("ws-scan-auto-tilts"),
+                        &t("scan-auto-tilts"),
                         &mut self.table.custom,
                         "-20, 0, 20",
                         None,
@@ -810,7 +814,7 @@ impl ScanUi {
                 }
                 widgets::labeled_slider(
                     ui,
-                    &t("ws-scan-auto-rotation"),
+                    &t("scan-auto-rotation"),
                     &mut self.table.rotation_deg,
                     30.0..=720.0,
                     15.0,
@@ -823,9 +827,9 @@ impl ScanUi {
             .inner;
         ui.add_space(6.0);
         let b = if primary {
-            Button::primary(t("ws-scan-auto-start"))
+            Button::primary(t("scan-auto-start"))
         } else {
-            Button::secondary(t("ws-scan-auto-start"))
+            Button::secondary(t("scan-auto-start"))
         };
         if b.icon(ic::PLAY_CIRCLE)
             .enabled(can && tilts.is_some())
@@ -849,7 +853,7 @@ impl ScanUi {
         }
         ui.add_space(4.0);
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            caption(ui, t("ws-scan-auto-hint"));
+            caption(ui, t("scan-auto-hint"));
         });
     }
 
@@ -866,26 +870,26 @@ impl ScanUi {
             .show(ui.ctx(), |ui| {
                 ui.set_width(440.0);
                 ui.label(
-                    RichText::new(t("ws-scan-auto-confirm-title"))
+                    RichText::new(t("scan-auto-confirm-title"))
                         .font(fonts::semibold(18.0))
                         .color(c.text_primary),
                 );
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new(t("ws-scan-auto-confirm-body"))
+                    RichText::new(t("scan-auto-confirm-body"))
                         .font(fonts::ui(13.0))
                         .color(c.text_secondary),
                 );
                 ui.add_space(16.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if Button::primary(t("ws-scan-auto-confirm-calibrate"))
+                    if Button::primary(t("scan-auto-confirm-calibrate"))
                         .icon(ic::CROSSHAIR)
                         .show(ui)
                         .clicked()
                     {
                         return Some(false);
                     }
-                    if Button::secondary(t("ws-scan-auto-confirm-anyway"))
+                    if Button::secondary(t("scan-auto-confirm-anyway"))
                         .show(ui)
                         .clicked()
                     {
@@ -1006,7 +1010,7 @@ mod tests {
         );
         assert_eq!(
             t(&ScanFailure::new("ble-no-adapter", "").key()),
-            t("ws-scan-err-ble-no-adapter")
+            t("scan-err-ble-no-adapter")
         );
         assert!(backend_name("revopoint-ble").contains("Bluetooth"));
         assert_eq!(backend_name("other"), "other");

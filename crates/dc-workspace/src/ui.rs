@@ -48,7 +48,7 @@ impl Workspace {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        let scanning = self.scan.ui.open;
+        let scanning = self.scan.is_open();
         if !dropped.is_empty() && self.confirm_exit.is_none() && !self.show_help && !scanning {
             self.import_dropped(dropped);
         }
@@ -102,7 +102,7 @@ impl Workspace {
         CentralPanel::no_frame().show(ui, |ui| self.center_ui(ui));
 
         // the scan popup (under the dialogs of the workspace)
-        self.scan_popup(ui);
+        self.scan.show(ui);
         self.dialogs(ui);
         if !self.running.is_empty() {
             ui.ctx()
