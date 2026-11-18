@@ -13,11 +13,13 @@ use dc_scanner::control::{
     SCAN_AUTO, TURNTABLE_CALIBRATE, TURNTABLE_CONNECT, TURNTABLE_DEVICES, TURNTABLE_DISCONNECT,
     TURNTABLE_HOME, TURNTABLE_MOVE, TURNTABLE_SPEED, TURNTABLE_STOP,
 };
+use dc_scanner::rig::ROI_BELOW_PLATTER_MM;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use egui::{Align, Layout, RichText, Sense, Stroke, Ui, vec2};
+use glam::{Quat, Vec3};
 use serde_json::{Value, json};
 
 use super::{Act, ScanUi, Snapshot};
@@ -67,6 +69,15 @@ pub(super) struct TableSnap {
 
 fn num(v: &Value) -> Option<f32> {
     v.as_f64().map(|x| x as f32)
+}
+
+/// A vector of three numbers.
+fn vec3(v: &Value) -> Option<Vec3> {
+    let a = v.as_array()?;
+    match a.as_slice() {
+        [x, y, z] => Some(Vec3::new(num(x)?, num(y)?, num(z)?)),
+        _ => None,
+    }
 }
 
 impl TableSnap {
@@ -148,6 +159,16 @@ pub(super) struct CalSnap {
     pub scanner_serial: Option<String>,
     /// When it was made, in seconds since 1970.
     pub created: Option<u64>,
+    /// A point of the axis on the platter, and the platter's normal
+    /// towards the scanner (camera frame, mm).
+    pub axis_point: Option<Vec3>,
+    pub platter_up: Option<Vec3>,
+    /// A point and the direction of the tilt axis, when the table tilts.
+    pub tilt_axis: Option<(Vec3, Vec3)>,
+    /// Errors of the fit: the turn in degrees, the axis position in mm
+    /// (both 0 when the calibration did not store them).
+    pub fit_rms_deg: f32,
+    pub fit_rms_mm: f32,
 }
 
 impl CalSnap {
@@ -163,6 +184,11 @@ impl CalSnap {
                 Value::String(s) => rfc3339_secs(s),
                 _ => None,
             },
+            axis_point: vec3(&v["axis_point"]),
+            platter_up: vec3(&v["platter_up"]),
+            tilt_axis: vec3(&v["tilt_axis_point"]).zip(vec3(&v["tilt_axis_dir"])),
+            fit_rms_deg: num(&v["fit_rms_deg"]).unwrap_or(0.0),
+            fit_rms_mm: num(&v["fit_rms_mm"]).unwrap_or(0.0),
         })
     }
 
@@ -178,9 +204,121 @@ impl CalSnap {
     }
 }
 
+/// How good the axis fit of a calibration is, from the errors it stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CalQuality {
+    Good,
+    Fair,
+    Poor,
+}
+
+impl CalQuality {
+    /// Errors (turn in degrees, axis position in mm) up to which the fit
+    /// is good, then fair; beyond them the scan does not hold together.
+    const GOOD: (f32, f32) = (0.5, 0.5);
+    const FAIR: (f32, f32) = (1.0, 1.0);
+
+    fn of(deg: f32, mm: f32) -> Self {
+        let within = |(d, m): (f32, f32)| deg <= d && mm <= m;
+        if within(Self::GOOD) {
+            Self::Good
+        } else if within(Self::FAIR) {
+            Self::Fair
+        } else {
+            Self::Poor
+        }
+    }
+
+    fn badge(self) -> BadgeKind {
+        match self {
+            Self::Good => BadgeKind::Success,
+            Self::Fair => BadgeKind::Warning,
+            Self::Poor => BadgeKind::Danger,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Good => "turntable-cal-quality-good",
+            Self::Fair => "turntable-cal-quality-fair",
+            Self::Poor => "turntable-cal-quality-poor",
+        }
+    }
+}
+
+impl CalSnap {
+    /// The quality of the fit and its errors (turn in degrees, axis
+    /// position in mm); `None` for a calibration that did not store them.
+    fn fit(&self) -> Option<(CalQuality, f32, f32)> {
+        let (deg, mm) = (self.fit_rms_deg, self.fit_rms_mm);
+        (deg != 0.0 || mm != 0.0).then(|| (CalQuality::of(deg, mm), deg, mm))
+    }
+
+    /// Box around the cylinder of the region of interest (`radius_mm`
+    /// around the axis, from the platter to `height_mm` above it) in the
+    /// frame of a scan that began with the table tilted by `tilt_deg`.
+    pub fn roi_box(&self, radius_mm: f32, height_mm: f32, tilt_deg: f32) -> Option<(Vec3, Vec3)> {
+        const AROUND: usize = 32;
+        let (point, up) = (self.axis_point?, self.platter_up?.try_normalize()?);
+        let e1 = up.any_orthonormal_vector();
+        let e2 = up.cross(e1);
+        let tilt = self.tilt_axis.and_then(|(p, d)| {
+            Some((
+                p,
+                Quat::from_axis_angle(d.try_normalize()?, tilt_deg.to_radians()),
+            ))
+        });
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for h in [-ROI_BELOW_PLATTER_MM, height_mm] {
+            for i in 0..AROUND {
+                let a = std::f32::consts::TAU * i as f32 / AROUND as f32;
+                let mut p = point + up * h + (e1 * a.cos() + e2 * a.sin()) * radius_mm;
+                if let Some((axis_point, q)) = tilt {
+                    p = axis_point + q * (p - axis_point);
+                }
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+        }
+        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+    }
+}
+
+/// The turning speed the popup starts with (°/s): slow enough for the
+/// scanner to follow at its 3 to 10 frames per second.
+const DEFAULT_SPEED_DEG_S: f32 = 8.0;
+/// Degrees the turntable may turn between two frames before tracking
+/// is at risk.
+const MAX_DEG_PER_FRAME: f32 = 2.5;
+/// Stop and capture, in [`TableUi::capture`].
+#[cfg(feature = "stop-capture")]
+const CAPTURE_STOP: usize = 1;
+
+/// Degrees turned between two frames and the speed (°/s) that keeps it near
+/// 2°, when `speed` (°/s) turns the object too far between two frames at
+/// `fps` frames per second; `None` when it is slow enough or the frame rate
+/// is not known.
+fn too_fast(speed: f32, fps: f32) -> Option<(f32, f32)> {
+    (fps >= 0.5 && speed / fps > MAX_DEG_PER_FRAME).then(|| (speed / fps, (fps * 2.0).max(2.0)))
+}
+
+/// The advice for [`too_fast`].
+fn speed_hint(speed: f32, fps: f32) -> Option<String> {
+    let (per_frame, suggested) = too_fast(speed, fps)?;
+    Some(dc_i18n::tr_args(
+        "turntable-speed-hint",
+        &[
+            ("fps", &format!("{fps:.1}")),
+            ("deg", &format!("{per_frame:.1}")),
+            ("speed", &format!("{suggested:.0}")),
+        ],
+    ))
+}
+
 /// The calibration of the rig made with the connected scanner and
 /// turntable, if any.
-fn matching(snap: &Snapshot) -> Option<&CalSnap> {
+pub(super) fn matching(snap: &Snapshot) -> Option<&CalSnap> {
     let serial = snap
         .status
         .device
@@ -291,6 +429,15 @@ pub(super) struct TableUi {
     /// "Calibrate first" was chosen: the calibration control comes into
     /// view with the focus on the next frame.
     pub focus_calibrate: bool,
+    /// Continuous turning (0) or stop and capture (1).
+    #[cfg(feature = "stop-capture")]
+    pub capture: usize,
+    /// Degrees between the stops of stop and capture.
+    #[cfg(feature = "stop-capture")]
+    pub stop_step_deg: f32,
+    /// Frames taken at each stop (a whole number).
+    #[cfg(feature = "stop-capture")]
+    pub frames_per_stop: f32,
 }
 
 impl Default for TableUi {
@@ -301,13 +448,19 @@ impl Default for TableUi {
             device: 0,
             step_deg: 45.0,
             tilt_deg: 0.0,
-            speed: 20.0,
+            speed: DEFAULT_SPEED_DEG_S,
             preset: 0,
             custom: "-20, 0, 20".to_owned(),
             rotation_deg: 360.0,
             expanded: true,
             confirm_auto: None,
             focus_calibrate: false,
+            #[cfg(feature = "stop-capture")]
+            capture: 0,
+            #[cfg(feature = "stop-capture")]
+            stop_step_deg: 10.0,
+            #[cfg(feature = "stop-capture")]
+            frames_per_stop: 3.0,
         }
     }
 }
@@ -361,6 +514,59 @@ impl TableUi {
         match PRESETS.get(self.preset) {
             Some(p) => Some(p.to_vec()),
             None => parse_tilts(&self.custom, range.0, range.1),
+        }
+    }
+
+    /// The parameters of `scan.auto` from the controls.
+    fn auto_params(&self, tilts: Vec<f32>) -> Value {
+        let params = json!({
+            "tilts_deg": tilts,
+            "rotation_deg": self.rotation_deg,
+            "deg_per_s": self.speed,
+        });
+        #[cfg(feature = "stop-capture")]
+        if self.capture == CAPTURE_STOP {
+            let mut params = params;
+            params["mode"] = json!("stop-and-capture");
+            params["step_deg"] = json!(self.stop_step_deg);
+            params["frames_per_stop"] = json!(self.frames_per_stop.round() as u32);
+            return params;
+        }
+        params
+    }
+
+    /// Continuous turning or stop and capture, the angle between the stops
+    /// and the frames taken at each.
+    #[cfg(feature = "stop-capture")]
+    fn stop_capture_ui(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        let labels = [t("scan-auto-mode-continuous"), t("scan-auto-mode-stop")];
+        widgets::segmented_fill(ui, &mut self.capture, &labels, 32.0);
+        if self.capture == CAPTURE_STOP {
+            ui.add_space(6.0);
+            widgets::labeled_slider(
+                ui,
+                &t("scan-auto-stop-step"),
+                &mut self.stop_step_deg,
+                5.0..=15.0,
+                1.0,
+                0,
+                "°",
+                10.0,
+            );
+            ui.add_space(6.0);
+            widgets::labeled_slider(
+                ui,
+                &t("scan-auto-stop-frames"),
+                &mut self.frames_per_stop,
+                1.0..=10.0,
+                1.0,
+                0,
+                "",
+                3.0,
+            );
+            ui.add_space(4.0);
+            caption(ui, t("scan-auto-stop-hint"));
         }
     }
 }
@@ -650,13 +856,16 @@ impl ScanUi {
                 1.0,
                 0,
                 &t("turntable-speed-unit"),
-                20.0,
+                DEFAULT_SPEED_DEG_S,
             );
             if released(&r) {
                 out.push(Act::Run(
                     TURNTABLE_SPEED,
                     json!({ "axis": "rotate", "deg_per_s": self.table.speed }),
                 ));
+            }
+            if let Some(hint) = speed_hint(self.table.speed, snap.status.fps) {
+                caption(ui, hint);
             }
         });
         ui.add_space(6.0);
@@ -703,7 +912,35 @@ impl ScanUi {
                         || t("turntable-cal-now"),
                         |at| calibrated_ago(now.saturating_sub(at)),
                     );
-                    widgets::badge(ui, BadgeKind::Success, text);
+                    let fit = cal.fit();
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::badge(ui, BadgeKind::Success, text);
+                        if let Some((quality, _, _)) = fit {
+                            widgets::badge(ui, quality.badge(), t(quality.key()));
+                        }
+                    });
+                    if let Some((quality, deg, mm)) = fit {
+                        ui.add_space(4.0);
+                        caption(
+                            ui,
+                            dc_i18n::tr_args(
+                                "turntable-cal-residuals",
+                                &[("deg", &format!("{deg:.2}")), ("mm", &format!("{mm:.2}"))],
+                            ),
+                        );
+                        if quality == CalQuality::Poor {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} {}",
+                                    ic::WARNING,
+                                    t("turntable-cal-poor-hint")
+                                ))
+                                .font(fonts::ui(12.0))
+                                .color(c.status_warning),
+                            );
+                        }
+                    }
                 }
             }
             None => {
@@ -822,6 +1059,8 @@ impl ScanUi {
                     "°",
                     360.0,
                 );
+                #[cfg(feature = "stop-capture")]
+                self.table.stop_capture_ui(ui);
                 tilts
             })
             .inner;
@@ -838,11 +1077,7 @@ impl ScanUi {
             .clicked()
             && let Some(tilts) = tilts
         {
-            let params = json!({
-                "tilts_deg": tilts,
-                "rotation_deg": self.table.rotation_deg,
-                "deg_per_s": self.table.speed,
-            });
+            let params = self.table.auto_params(tilts);
             if matching(snap).is_some() {
                 out.push(Act::Run(SCAN_AUTO, params));
             } else {
@@ -1014,5 +1249,106 @@ mod tests {
         );
         assert!(backend_name("revopoint-ble").contains("Bluetooth"));
         assert_eq!(backend_name("other"), "other");
+    }
+
+    fn calibration(extra: Value) -> CalSnap {
+        let mut v = json!({
+            "turntable_id": "t",
+            "axis_point": [0.0, 0.0, 200.0],
+            "axis_dir": [0.0, -1.0, 0.0],
+            "platter_up": [0.0, -1.0, 0.0],
+        });
+        for (k, x) in extra.as_object().into_iter().flatten() {
+            v[k] = x.clone();
+        }
+        CalSnap::from_json(&v).unwrap()
+    }
+
+    #[test]
+    fn quality_of_the_fit() {
+        let q = |d, m| calibration(json!({ "fit_rms_deg": d, "fit_rms_mm": m })).fit();
+        assert_eq!(q(0.1, 0.05).unwrap().0, CalQuality::Good);
+        assert_eq!(q(0.8, 0.2).unwrap().0, CalQuality::Fair);
+        assert_eq!(q(0.2, 0.9).unwrap().0, CalQuality::Fair);
+        assert_eq!(q(0.2, 2.5).unwrap().0, CalQuality::Poor);
+        let (_, deg, mm) = q(0.12, 0.34).unwrap();
+        assert!((deg - 0.12).abs() < 1e-6 && (mm - 0.34).abs() < 1e-6);
+        // a calibration made before the errors were stored says nothing
+        assert_eq!(calibration(json!({})).fit(), None);
+        assert_eq!(q(0.0, 0.0), None);
+        assert_eq!(CalQuality::of(f32::NAN, 0.1), CalQuality::Poor);
+        assert_eq!(CalQuality::Good.badge(), BadgeKind::Success);
+        assert_eq!(CalQuality::Poor.badge(), BadgeKind::Danger);
+    }
+
+    #[test]
+    fn box_of_the_region_of_interest() {
+        // the platter faces the scanner: its normal is -Y here, the axis
+        // is 200 mm away along Z
+        let (lo, hi) = calibration(json!({})).roi_box(45.0, 60.0, 0.0).unwrap();
+        assert!(
+            (lo.x + 45.0).abs() < 0.1 && (hi.x - 45.0).abs() < 0.1,
+            "{lo} {hi}"
+        );
+        assert!((lo.z - 155.0).abs() < 0.1 && (hi.z - 245.0).abs() < 0.1);
+        assert!((hi.y - ROI_BELOW_PLATTER_MM).abs() < 1e-4 && (lo.y + 60.0).abs() < 1e-4);
+        // tilting the table about the X axis through the axis point moves
+        // the cylinder with it
+        let tilted = calibration(json!({
+            "tilt_axis_point": [0.0, 0.0, 200.0],
+            "tilt_axis_dir": [1.0, 0.0, 0.0],
+        }));
+        let (tlo, thi) = tilted.roi_box(45.0, 60.0, 90.0).unwrap();
+        assert!((tlo.x + 45.0).abs() < 0.1 && (thi.x - 45.0).abs() < 0.1);
+        // the platter normal -Y turned to -Z: the height runs from Z 201 to
+        // Z 140 and the disk lies in the XY plane
+        assert!(
+            (tlo.z - 140.0).abs() < 0.1 && (thi.z - 201.0).abs() < 0.1,
+            "{tlo} {thi}"
+        );
+        assert!((thi.y - 45.0).abs() < 0.1 && (tlo.y + 45.0).abs() < 0.1);
+        let flat = tilted.roi_box(45.0, 60.0, 0.0).unwrap();
+        assert_eq!(flat, (lo, hi), "no tilt, no move");
+        // without an axis there is no box
+        let bare = CalSnap::from_json(&json!({ "turntable_id": "t" })).unwrap();
+        assert_eq!(bare.roi_box(45.0, 60.0, 0.0), None);
+    }
+
+    #[test]
+    fn the_speed_is_slow_by_default_and_the_hint_follows_the_frame_rate() {
+        assert!(TableUi::default().speed <= 10.0);
+        // 8 °/s at 6.5 frames per second: 1.2° per frame, fine
+        assert_eq!(too_fast(8.0, 6.5), None);
+        // 20 °/s at 2.7 frames per second: 7.4° per frame
+        let (per_frame, suggested) = too_fast(20.0, 2.7).unwrap();
+        assert!(
+            (per_frame - 7.4).abs() < 0.05 && suggested == 5.4,
+            "{per_frame} {suggested}"
+        );
+        // no stream, no hint
+        assert_eq!(too_fast(60.0, 0.0), None);
+    }
+
+    #[test]
+    fn automatic_scan_parameters() {
+        let ui = TableUi::default();
+        assert_eq!(
+            ui.auto_params(vec![0.0]),
+            json!({ "tilts_deg": [0.0], "rotation_deg": 360.0, "deg_per_s": DEFAULT_SPEED_DEG_S })
+        );
+    }
+
+    #[cfg(feature = "stop-capture")]
+    #[test]
+    fn stop_and_capture_parameters() {
+        let mut ui = TableUi::default();
+        assert_eq!((ui.stop_step_deg, ui.frames_per_stop), (10.0, 3.0));
+        assert_eq!(ui.auto_params(vec![0.0])["mode"], Value::Null);
+        ui.capture = CAPTURE_STOP;
+        let p = ui.auto_params(vec![0.0, 20.0]);
+        assert_eq!(p["mode"], "stop-and-capture");
+        assert_eq!(p["step_deg"], 10.0);
+        assert_eq!(p["frames_per_stop"], 3);
+        assert_eq!(p["tilts_deg"], json!([0.0, 20.0]));
     }
 }

@@ -349,6 +349,9 @@ pub struct ViewportResponse {
     pub hovered: Option<Pick>,
     /// The camera moved this frame.
     pub camera_changed: bool,
+    /// The camera was framed by [`Viewport::fit`] or [`Viewport::fit_box`]
+    /// this frame (`camera_changed` then is not the user's doing).
+    pub fit_applied: bool,
     /// What the transform gizmo did this frame.
     pub gizmo: Option<GizmoEvent>,
     /// The pointer is over a handle of the transform gizmo.
@@ -418,6 +421,7 @@ pub struct Viewport {
     scene_version: u64,
     last_render: Option<RenderKey>,
     pending_fit: bool,
+    pending_fit_box: Option<(Vec3, Vec3)>,
     fitted_once: bool,
     last_hover: Option<(Pos2, Camera, u64)>,
     hovered: Option<Pick>,
@@ -458,6 +462,7 @@ impl Viewport {
             scene_version: 0,
             last_render: None,
             pending_fit: false,
+            pending_fit_box: None,
             fitted_once: false,
             last_hover: None,
             hovered: None,
@@ -642,6 +647,14 @@ impl Viewport {
     /// the size of the area is known).
     pub fn fit(&mut self) {
         self.pending_fit = true;
+        self.pending_fit_box = None;
+    }
+
+    /// Frames the world box `lo..=hi` instead of the bounds of everything
+    /// shown (applied at the next [`Viewport::ui`]); for a view that must
+    /// not follow stray points.
+    pub fn fit_box(&mut self, lo: Vec3, hi: Vec3) {
+        self.pending_fit_box = Some((lo, hi));
     }
 
     fn bounding_sphere(&self) -> Option<Sphere> {
@@ -831,9 +844,14 @@ impl Viewport {
         let aspect = aspect_of(rect);
         let before = self.camera;
 
-        if self.pending_fit && rect.width() > 1.0 && rect.height() > 1.0 {
+        let mut fit_applied = false;
+        if (self.pending_fit || self.pending_fit_box.is_some())
+            && rect.width() > 1.0
+            && rect.height() > 1.0
+        {
             self.pending_fit = false;
-            if let Some((lo, hi)) = self.bounds {
+            let framed = self.pending_fit_box.take().or(self.bounds);
+            if let Some((lo, hi)) = framed {
                 self.camera.fit_box_in(
                     lo,
                     hi,
@@ -842,6 +860,7 @@ impl Viewport {
                     self.settings.fit_margin,
                 );
                 self.fitted_once = true;
+                fit_applied = true;
             }
         }
 
@@ -896,6 +915,7 @@ impl Viewport {
 
         ViewportResponse {
             camera_changed: self.camera != before,
+            fit_applied,
             response,
             pick,
             hovered: self.hovered,

@@ -17,6 +17,7 @@
 //! Each control runs a `scan.*` or `turntable.*` command
 //! ([`ScanPopup::command`]); the drawing only reads the controller.
 
+mod framing;
 mod turntable;
 
 use std::sync::Arc;
@@ -25,9 +26,9 @@ use std::time::Duration;
 use dc_case::ScanRole;
 use dc_mesh::TriMesh;
 use dc_scanner::control::{
-    SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD, SCAN_PAUSE,
-    SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START, SCAN_STOP, SCAN_UNDO,
-    TURNTABLE_CONNECT, TURNTABLE_DEVICES,
+    SCAN_AUTO, SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD,
+    SCAN_PAUSE, SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START, SCAN_STOP,
+    SCAN_UNDO, TURNTABLE_CONNECT, TURNTABLE_DEVICES,
 };
 use dc_scanner::{
     CloudOp, DeviceInfo, LivePreview, MeshOp, PointCloud, ScanSettings, ScanState, ScanStatus,
@@ -43,10 +44,11 @@ use egui::{
     Align, Align2, Color32, Id, Key, Layout, Margin, Modal, Modifiers, PointerButton, Pos2, Rect,
     RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
+use framing::Follow;
 use glam::Vec3;
 use serde_json::{Value, json};
 pub(crate) use turntable::OPEN_SEARCH_S;
-use turntable::{CalSnap, JobSnap, TableSnap, TableUi};
+use turntable::{CalSnap, JobSnap, TableSnap, TableUi, matching};
 
 use crate::{
     ImportWords, ScanFailure, ScanPopup, ScanTarget, caption, scene_color, select, t, tr_n,
@@ -193,6 +195,25 @@ fn addr<T>(a: &Arc<T>) -> usize {
     Arc::as_ptr(a) as *const () as usize
 }
 
+/// What the live view frames: the cylinder of the region of interest when
+/// the rig is calibrated, else the robust bounds of the fused cloud (the
+/// points of the latest frame only when there is no cloud yet).
+fn live_box(snap: &Snapshot) -> Option<(Vec3, Vec3)> {
+    let preview = snap.preview.as_ref()?;
+    if snap.settings.use_roi
+        && let Some(cal) = matching(snap)
+        && let Some([_, tilt]) = snap.status.world_angles_deg
+        && let Some(b) = cal.roi_box(
+            snap.settings.roi_radius_mm,
+            snap.settings.roi_height_mm,
+            tilt,
+        )
+    {
+        return Some(b);
+    }
+    framing::robust_box(&preview.cloud.points).or_else(|| framing::bounds(&preview.frame_points))
+}
+
 /// A control of the popup that was used this frame.
 enum Act {
     Run(&'static str, Value),
@@ -246,6 +267,10 @@ pub(crate) struct ScanUi {
     edited: Option<Uploaded>,
     /// Frame the view on the next content.
     fit: bool,
+    /// Whether the live view follows the growing scan.
+    follow: Follow,
+    /// A calibration was running when the view was last drawn.
+    calibrating_before: bool,
 }
 
 impl ScanUi {
@@ -288,6 +313,8 @@ impl ScanUi {
             live: None,
             edited: None,
             fit: true,
+            follow: Follow::default(),
+            calibrating_before: false,
         }
     }
 
@@ -393,7 +420,7 @@ impl ScanUi {
             }
             TURNTABLE_DEVICES => self.table.listed(out),
             TURNTABLE_CONNECT => self.table.connected(out),
-            SCAN_START => self.fit |= self.snap.as_ref().is_none_or(|s| s.cloud.is_none()),
+            SCAN_START | SCAN_AUTO => self.refit(),
             SCAN_STOP => {
                 self.show_surface = false;
                 self.selection = None;
@@ -401,7 +428,7 @@ impl ScanUi {
             SCAN_RESET => {
                 self.selection = None;
                 self.imported = None;
-                self.fit = true;
+                self.refit();
             }
             SCAN_SETTINGS => {
                 if let Ok(s) = serde_json::from_value::<ScanSettings>(out.clone()) {
@@ -460,6 +487,11 @@ impl ScanUi {
         let Some(snap) = self.snap.clone() else {
             return;
         };
+        // a calibration that ended: the rig and the view start afresh
+        let calibrating = JobSnap::running(snap.calibrating.as_ref()).is_some();
+        if std::mem::replace(&mut self.calibrating_before, calibrating) && !calibrating {
+            self.refit();
+        }
         let c = *colors(ui);
         let key = ShownKey {
             content,
@@ -531,11 +563,28 @@ impl ScanUi {
         vp.settings.wireframe = self.wireframe && content == Content::Surface;
         vp.set_points(points);
         vp.set_meshes(meshes);
-        if self.fit && content != Content::Nothing {
-            vp.fit();
-            self.fit = false;
+        if content != Content::Nothing {
+            let live = content == Content::Live;
+            let points = snap.preview.as_ref().map_or(0, |p| p.cloud.len());
+            if self.fit || (live && self.follow.due(points)) {
+                if !live {
+                    vp.fit();
+                    self.fit = false;
+                } else if let Some((lo, hi)) = live_box(&snap) {
+                    vp.fit_box(lo, hi);
+                    self.follow.framed(points);
+                    self.fit = false;
+                }
+            }
         }
         self.shown = Some(key);
+    }
+
+    /// The view is framed again from the next content on, and follows the
+    /// scan again if the user had moved the camera.
+    fn refit(&mut self) {
+        self.fit = true;
+        self.follow.restart();
     }
 
     // ------------------------------------------------------------ drawing
@@ -742,7 +791,13 @@ impl ScanUi {
         let mut response = None;
         if let Some(vp) = self.viewport.as_mut() {
             vp.settings.background = Some(scene_color(c.bg_viewport));
-            response = Some(vp.ui(ui).response);
+            let r = vp.ui(ui);
+            // a camera that moved without a framing is the user's: the view
+            // stays where they put it until the next framing is asked for
+            if r.camera_changed && !r.fit_applied {
+                self.follow.user_moved = true;
+            }
+            response = Some(r.response);
         } else {
             ui.allocate_rect(rect, Sense::hover());
             centered(ui, rect, &t("scan-no-gpu"), c.text_disabled);
@@ -802,7 +857,7 @@ impl ScanUi {
                 if content != Content::Nothing
                     && widgets::icon_button(ui, ic::CORNERS_OUT, t("scan-fit")).clicked()
                 {
-                    self.fit = true;
+                    self.refit();
                     self.shown = None;
                 }
             },
