@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.10](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.9...v0.2.0-alpha.10) (2026-11-18)
+
+
+### Features
+
+* **release:** sign the Windows programs and installers ([#28](https://github.com/dnviti-personal-org/dentalcraft-app/issues/28)) ([947aa7d](https://github.com/dnviti-personal-org/dentalcraft-app/commit/947aa7da611b7e3d4a314cc05090b7c258d00af1))
+
 ## [0.2.0-alpha.9](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.8...v0.2.0-alpha.9) (2026-11-18)
 
 
