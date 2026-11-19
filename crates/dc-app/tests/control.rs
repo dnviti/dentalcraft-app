@@ -221,3 +221,67 @@ fn bridge_runs_commands_through_the_workspace() {
     assert_eq!(h.state().bridge().app.screen(), Screen::Workspace);
     assert!(project.is_file());
 }
+
+#[test]
+fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let demo = |c: &mut Client, arch: &str| {
+            c.call(
+                "execute",
+                json!({"id": "aligners.demo", "params": {"arch": arch}}),
+            )
+            .unwrap();
+        };
+        demo(&mut c, "lower");
+        // a leaf that fails answers with its error, as before
+        let e = c
+            .call("execute", json!({"id": "aligners.occlusion.align"}))
+            .unwrap_err();
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("aligners.occlusion.align: "),
+            "{e}"
+        );
+        demo(&mut c, "upper");
+        let out = c
+            .call(
+                "execute",
+                json!({"id": "aligners.preparation.segmentation.automatic",
+                       "params": {"arch": "upper"}}),
+            )
+            .unwrap();
+        assert!(out["teeth"].as_u64().is_some_and(|n| n > 0), "{out}");
+        let out = c
+            .call(
+                "execute",
+                json!({"id": "aligners.output.study-models", "params": {}}),
+            )
+            .unwrap();
+        assert!(
+            out["kept"].as_array().is_some_and(|k| !k.is_empty()),
+            "{out}"
+        );
+        assert_eq!(c.scans(), 2);
+    });
+    drive(&mut h, client);
+    // as after a click on their buttons: the new tooth colours show the
+    // scan, the study models just built are shown
+    let ws = h.state().bridge().app.workspace().unwrap();
+    assert!(!ws.teeth_shown());
+    assert!(ws.study_shown());
+}

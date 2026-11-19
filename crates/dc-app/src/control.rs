@@ -885,6 +885,16 @@ impl Bridge {
                     Ok(ws) => ws,
                     Err(e) => return Step::Done(Err(e)),
                 };
+                // the command of a menu leaf runs as the button of its
+                // inspector: the window shows what a click shows (its
+                // report, the study models just built, the new tooth colours)
+                if ws.run_leaf_command(spec.id, params.clone()) {
+                    return Self::after_jobs(move |ws| match ws.take_leaf_answer() {
+                        Some(Ok(v)) => Ok(v),
+                        Some(Err(e)) => Err(RpcError::host(format!("{}: {e}", spec.id))),
+                        None => Err(RpcError::host(format!("{}: did not run", spec.id))),
+                    });
+                }
                 let out = Arc::new(Mutex::new(None));
                 ws.run_command(Box::new(Capturing {
                     spec,

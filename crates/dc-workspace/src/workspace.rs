@@ -319,6 +319,9 @@ pub struct Workspace {
     /// The surface of the popup being imported: its file lives until the
     /// import job has read it.
     pub(crate) scan_output: Option<dc_scan_ui::ScanOutput>,
+    /// The command of a menu leaf an agent runs
+    /// ([`Workspace::run_leaf_command`]) and its answer once it ended.
+    agent_leaf: Option<(&'static str, Option<Result<Value, String>>)>,
     actions: VecDeque<WorkspaceAction>,
 }
 
@@ -437,6 +440,7 @@ impl Workspace {
             show_help: false,
             scan: dc_scan_ui::ScanPopup::default(),
             scan_output: None,
+            agent_leaf: None,
             actions: VecDeque::new(),
         }
     }
@@ -769,6 +773,39 @@ impl Workspace {
                 );
             }
         }
+    }
+
+    /// Runs the command of a menu leaf for an agent connected to the app
+    /// (`dentalcraft --control`) with `params`, as the button of its
+    /// inspector runs it: in the background, one undo step when it changes
+    /// the case, its report, and what it shows in the view (the study models
+    /// just built, the scan with new tooth colours). The answer comes from
+    /// [`Workspace::take_leaf_answer`]. `false` when `command_id` is not the
+    /// command of a menu leaf.
+    pub fn run_leaf_command(&mut self, command_id: &str, params: Value) -> bool {
+        let Some(id) = self
+            .menu
+            .iter()
+            .find_map(|(_, i)| i.command_id().filter(|c| *c == command_id))
+        else {
+            return false;
+        };
+        let Some(spec) = self.module_spec(id) else {
+            return false;
+        };
+        self.agent_leaf = Some((id, None));
+        self.spawn_leaf(id, spec, params);
+        true
+    }
+
+    /// The output of the command [`Workspace::run_leaf_command`] started
+    /// (its failure as text) once it ended; `None` while it runs, or when it
+    /// did not start.
+    pub fn take_leaf_answer(&mut self) -> Option<Result<Value, String>> {
+        if self.agent_leaf.as_ref().is_some_and(|(_, a)| a.is_some()) {
+            return self.agent_leaf.take().and_then(|(_, a)| a);
+        }
+        None
     }
 
     /// The button "Import the bite scans" of Bite (`oa.import_bite`): the
@@ -1494,7 +1531,8 @@ impl Workspace {
     }
 
     /// A registered command run as a job ended: its state lands as one undo
-    /// step and its output is reported, or its failure is shown.
+    /// step and its output is reported, or its failure is shown. The leaf an
+    /// agent runs keeps its answer ([`Workspace::take_leaf_answer`]).
     fn finish_spec(
         &mut self,
         kind: SpecKind,
@@ -1502,6 +1540,18 @@ impl Workspace {
         label: String,
         taken: Option<Result<Result<CommandOutput, CommandError>, JobError>>,
     ) {
+        if let SpecKind::Leaf(id) = kind
+            && let Some((asked, answer)) = self.agent_leaf.as_mut()
+            && *asked == id
+            && answer.is_none()
+        {
+            *answer = Some(match &taken {
+                Some(Ok(Ok((_, out)))) => Ok(out.clone()),
+                Some(Ok(Err(e))) => Err(e.to_string()),
+                Some(Err(e)) => Err(e.to_string()),
+                None => Err("the command did not end".to_owned()),
+            });
+        }
         match taken {
             Some(Ok(Ok((state, out)))) => {
                 if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
