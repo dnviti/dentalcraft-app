@@ -85,6 +85,9 @@ pub(crate) struct ShownToast {
     /// Stays until the user closes it (errors always do), and is always
     /// drawn: an arch warning must not time out or be pushed off the stack.
     pub sticky: bool,
+    /// The failure of a step (a refused command): it goes when another
+    /// command succeeds or the selection changes, not only when closed.
+    pub until_next: bool,
 }
 
 impl ShownToast {
@@ -615,6 +618,10 @@ impl Workspace {
     /// `function`): the inspector of a function has the button that runs it.
     /// The tool of another function closes.
     pub fn select_item(&mut self, id: &'static str) {
+        // a refused step's message belongs to the function it was shown for
+        if self.selected != Some(id) {
+            self.clear_step_errors();
+        }
         let command = self.menu.find(id).and_then(|i| i.command_id());
         if let Some(tool) = self.manual.tool
             && crate::function::owner(tool) != command
@@ -664,6 +671,9 @@ impl Workspace {
     /// Nothing selected (Escape): the inspector shows the overview and the
     /// open tool closes.
     pub(crate) fn clear_selection(&mut self) {
+        if self.selected.is_some() {
+            self.clear_step_errors();
+        }
         self.selected = None;
         self.close_tool();
         self.set_region_view(false);
@@ -1334,6 +1344,7 @@ impl Workspace {
             toast,
             born: None,
             sticky: false,
+            until_next: false,
         });
     }
 
@@ -1343,7 +1354,14 @@ impl Workspace {
             toast,
             born: None,
             sticky: true,
+            until_next: false,
         });
+    }
+
+    /// Drops the failure messages of refused steps: another command
+    /// succeeded, or the selection changed.
+    fn clear_step_errors(&mut self) {
+        self.toasts.retain(|t| !t.until_next);
     }
 
     pub(crate) fn module_ctx_run(&mut self, f: impl FnOnce(&mut dyn Module, &mut ModuleCtx<'_>)) {
@@ -1512,7 +1530,10 @@ impl Workspace {
                 self.finish_spec(kind, command, label, taken);
             }
             Task::Command { label, handle } => match handle.try_take() {
-                Some(Ok(Ok(state))) => self.undo.push(Arc::new(state), label),
+                Some(Ok(Ok(state))) => {
+                    self.clear_step_errors();
+                    self.undo.push(Arc::new(state), label);
+                }
                 Some(Ok(Err(CommandError::Cancelled))) => {
                     self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
                 }
@@ -1554,6 +1575,7 @@ impl Workspace {
         }
         match taken {
             Some(Ok(Ok((state, out)))) => {
+                self.clear_step_errors();
                 if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
                     self.undo.push(Arc::new(state), label);
                 }
@@ -1750,7 +1772,14 @@ impl Workspace {
     }
 
     fn job_error(&mut self, key: &str, detail: String) {
-        self.toast(Toast::new(ToastLevel::Error, key).with_detail(detail));
+        // a refused step says why until the next one works or the user
+        // selects something else
+        self.toasts.push(ShownToast {
+            toast: Toast::new(ToastLevel::Error, key).with_detail(detail),
+            born: None,
+            sticky: false,
+            until_next: key == "ws-toast-command-failed",
+        });
     }
 
     fn job_panic(&mut self, command: Option<&str>, label: &str, e: &JobError) {
@@ -1812,6 +1841,7 @@ mod tests {
             toast: Toast::new(level, "k"),
             born: None,
             sticky,
+            until_next: false,
         }
     }
 
