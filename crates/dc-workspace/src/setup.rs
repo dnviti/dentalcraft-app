@@ -345,7 +345,8 @@ fn setup_slider(
     slider(ui, now, range, n, drag, commit);
 }
 
-/// A choice among a few values, one row each.
+/// A choice among a few values, one row each (a long label wraps beside its
+/// dot: a narrow inspector clips nothing).
 pub(crate) fn choice(ui: &mut Ui, values: &Value, c: &Choice, commit: &mut Option<Value>) {
     let col = *colors(ui);
     ui.label(
@@ -365,6 +366,7 @@ pub(crate) fn choice(ui: &mut Ui, values: &Value, c: &Choice, commit: &mut Optio
                             .font(fonts::ui(12.0))
                             .color(col.text_primary),
                     )
+                    .wrap()
                     .sense(egui::Sense::click()),
                 );
                 dot.interact(egui::Sense::click()).clicked() || text.clicked()

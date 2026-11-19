@@ -274,3 +274,41 @@ fn the_italian_bite_and_export_sentences_have_their_accents() {
     );
     assert!(dc_i18n::tr("ws-ca-little-minimal").contains("Irregolarità"));
 }
+
+#[test]
+fn the_periodontal_choices_wrap_in_the_narrowest_inspector() {
+    italian();
+    let mut ws = Workspace::new_headless(
+        Box::new(AlignersModule::new()),
+        Some(demo_project(&["lower"])),
+        None,
+    );
+    let size = dc_ui::tokens::tokens().size;
+    ws.set_panel_widths(dc_workspace::PanelWidths {
+        menu: size.left_menu_width,
+        inspector: size.inspector_min_width,
+    });
+    ws.select_item("aligners.planning.aligners");
+    // tall enough to show the whole inspector without scrolling
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 3000.0))
+        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        .build_ui_state(
+            |ui, ws: &mut Workspace| {
+                let _ = ws.show(ui);
+            },
+            ws,
+        );
+    h.run();
+    let l = h.state().layout();
+    assert_eq!(l.inspector.width(), size.inspector_min_width);
+    // the long choices are there, wrapped: nothing of the inspector clipped
+    for label in [
+        "Parodontite stadio I (0,18 mm per allineatore)",
+        "Parodontite stadio II (0,15 mm per allineatore)",
+        "Parodontite stadio III (0,10 mm per allineatore)",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    assert_eq!(l.inspector_overflow, 0.0, "{l:?}");
+}
