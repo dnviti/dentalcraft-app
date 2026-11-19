@@ -61,6 +61,10 @@ const RESOLUTIONS: [f32; 3] = [0.15, 0.3, 0.6];
 const PANEL_WIDTH: f32 = 340.0;
 /// Frames per second of the live view while scanning.
 const LIVE_FRAME: Duration = Duration::from_millis(66);
+/// Height of the 3D view's starting viewpoint above the platter, as an
+/// angle from the scanner's side (degrees): about where the scanner of a
+/// turntable rig looks from.
+const VIEW_ELEVATION_DEG: f32 = 25.0;
 
 /// Ids of the clouds of the 3D view.
 const CLOUD_ID: u64 = 1;
@@ -791,8 +795,10 @@ impl ScanUi {
         {
             let mut vp = Viewport::new(rs);
             vp.settings.hover_pick = false;
-            // as the scanner sees it: its first frame looks along +Z, Y down
-            vp.camera_mut().rotation = look_rotation(Vec3::Z, Vec3::NEG_Y);
+            // as the scanner sees the scan world (+Z up, the scanner on +X):
+            // from its side, a little from above
+            let e = VIEW_ELEVATION_DEG.to_radians();
+            vp.camera_mut().rotation = look_rotation(Vec3::new(-e.cos(), 0.0, -e.sin()), Vec3::Z);
             self.viewport = Some(vp);
         }
         self.sync_view(ui);
