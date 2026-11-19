@@ -51,7 +51,10 @@
 //! anything (the menu law). Then `execute` runs the function, as its
 //! inspector's button does. `app.window.screenshot` (parameter `path`)
 //! writes the window as the user sees it to a PNG file (a GPU read-back of
-//! the next frame; it does not wait for the jobs).
+//! the next frame; it does not wait for the jobs). `app.window.layout`
+//! (parameters `width` + `height`, `menu`, `inspector`, each optional) sizes
+//! the window and the side panels, as the user does by dragging, and
+//! answers where the menu, the inspector and the 3D view are.
 //!
 //! `list` also has the scanner's commands `scan.*` and the turntable's
 //! `turntable.*` (`dc_scanner::control`): they run on the scan controller
@@ -86,8 +89,8 @@ use dc_module_api::{CommandOutput, CommandSpec};
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::builtins;
-use dc_workspace::{ScanTicket, Workspace};
-use egui::Ui;
+use dc_workspace::{PanelWidths, ScanTicket, Workspace};
+use egui::{Rect, Ui, Vec2};
 use serde_json::{Map, Value, json};
 
 use crate::DentalCraftApp;
@@ -431,6 +434,111 @@ fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
     ))
 }
 
+/// `app.window.layout`: the size of the window and of the side panels of
+/// the workspace, and where its parts are.
+pub const WINDOW_LAYOUT: &str = "app.window.layout";
+
+fn window_layout_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowLayoutParams",
+        "type": "object",
+        "properties": {
+            "width": {
+                "description": "Width of the inside of the window (points); give it with height.",
+                "type": "number",
+                "exclusiveMinimum": 0
+            },
+            "height": {
+                "description": "Height of the inside of the window (points); give it with width.",
+                "type": "number",
+                "exclusiveMinimum": 0
+            },
+            "menu": {
+                "description": "Width of the left menu (points), as a drag of its edge sets it: kept within its range, and saved.",
+                "type": "number"
+            },
+            "inspector": {
+                "description": "Width of the inspector (points), as a drag of its edge sets it: kept within its range, and saved.",
+                "type": "number"
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// The parameters of `app.window.layout`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowLayoutArgs {
+    window: Option<Vec2>,
+    menu: Option<f32>,
+    inspector: Option<f32>,
+}
+
+/// The optional number parameter `key`.
+fn opt_f32_param(params: &Value, key: &str) -> Result<Option<f32>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| n.is_finite())
+            .map(Some)
+            .ok_or_else(|| {
+                RpcError::new(
+                    codes::INVALID_PARAMS,
+                    format!("parameter `{key}` must be a number"),
+                )
+            }),
+    }
+}
+
+fn window_layout_args(params: &Value) -> Result<WindowLayoutArgs, RpcError> {
+    let invalid = |e: String| RpcError::new(codes::INVALID_PARAMS, format!("{WINDOW_LAYOUT}: {e}"));
+    let known = ["width", "height", "menu", "inspector"];
+    if let Some(k) = params
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
+    {
+        return Err(invalid(format!("unknown parameter `{k}`")));
+    }
+    let window = match (
+        opt_f32_param(params, "width")?,
+        opt_f32_param(params, "height")?,
+    ) {
+        (None, None) => None,
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(Vec2::new(w, h)),
+        (Some(_), Some(_)) => return Err(invalid("width and height must be above 0".into())),
+        _ => return Err(invalid("give width and height together".into())),
+    };
+    Ok(WindowLayoutArgs {
+        window,
+        menu: opt_f32_param(params, "menu")?,
+        inspector: opt_f32_param(params, "inspector")?,
+    })
+}
+
+/// How long `app.window.layout` waits for the window to take its size.
+const LAYOUT_WAIT: Duration = Duration::from_secs(3);
+
+/// The answer of `app.window.layout`: the window, the parts of the
+/// workspace as the last frame drew them, the widths chosen for the panels
+/// and how far their contents run past them.
+fn layout_json(window: Vec2, ws: &Workspace) -> Value {
+    let l = ws.layout();
+    let chosen = ws.panel_widths();
+    let rect =
+        |r: Rect| json!({ "x": r.min.x, "y": r.min.y, "width": r.width(), "height": r.height() });
+    json!({
+        "window": { "width": window.x, "height": window.y },
+        "menu": rect(l.menu),
+        "inspector": rect(l.inspector),
+        "view": rect(l.view),
+        "chosen": { "menu": chosen.menu, "inspector": chosen.inspector },
+        "overflow": { "menu": l.menu_overflow, "inspector": l.inspector_overflow },
+    })
+}
+
 fn run_by_the_app(_: &CaseState, _: &Value, _: &JobCtx) -> Result<CommandOutput, CommandError> {
     Err(CommandError::Invalid(
         "app command: the app bridge runs it".into(),
@@ -459,6 +567,13 @@ fn window_specs() -> Vec<CommandSpec> {
             label_key: "app-cmd-window-view",
             doc_key: "app-cmd-window-view-doc",
             params_schema: window_view_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_LAYOUT,
+            label_key: "app-cmd-window-layout",
+            doc_key: "app-cmd-window-layout-doc",
+            params_schema: window_layout_params,
             run: run_by_the_app,
         },
     ]
@@ -602,6 +717,54 @@ impl Bridge {
             Err(_) => Some(Err(RpcError::host(
                 "the window gave no image (no GPU read-back)",
             ))),
+        }))
+    }
+
+    /// `app.window.layout`: sets the panel widths (saved, as after a drag of
+    /// their edges) and the window size, then answers the layout once the
+    /// window has its size and drew with it (or after [`LAYOUT_WAIT`]).
+    fn window_layout(&mut self, params: &Value) -> Step {
+        let args = match window_layout_args(params) {
+            Ok(a) => a,
+            Err(e) => return Step::Done(Err(e)),
+        };
+        let Some(ctx) = self.ctx.clone() else {
+            return Step::Done(Err(RpcError::host("the window has not drawn yet")));
+        };
+        let ws = match self.workspace() {
+            Ok(ws) => ws,
+            Err(e) => return Step::Done(Err(e)),
+        };
+        if args.menu.is_some() || args.inspector.is_some() {
+            let now = ws.panel_widths();
+            ws.set_panel_widths(PanelWidths {
+                menu: args.menu.unwrap_or(now.menu),
+                inspector: args.inspector.unwrap_or(now.inspector),
+            });
+            let widths = ws.panel_widths();
+            self.app.remember_panel_widths(widths);
+        }
+        if let Some(size) = args.window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        ctx.request_repaint();
+        let deadline = std::time::Instant::now() + LAYOUT_WAIT;
+        // frames drawn at the asked size (the layout is the last frame's)
+        let mut drawn = 0u32;
+        Step::Wait(Box::new(move |b: &mut Bridge| {
+            let size = ctx.content_rect().size();
+            let at_size = args
+                .window
+                .is_none_or(|w| (w - size).abs().max_elem() < 1.0);
+            drawn = if at_size { drawn + 1 } else { 0 };
+            if drawn < 3 && std::time::Instant::now() < deadline {
+                ctx.request_repaint();
+                return None;
+            }
+            Some(match b.app.workspace() {
+                Some(ws) => Ok(layout_json(size, ws)),
+                None => Err(RpcError::host("the workspace was closed")),
+            })
         }))
     }
 
@@ -921,6 +1084,8 @@ impl Bridge {
                         .map_err(invalid)
                 })
             }
+            // the window and its side panels, as the user sizes them
+            WINDOW_LAYOUT => return self.window_layout(params),
             // the installation, not the case: through the update dialog
             dc_update::commands::CHECK => {
                 if let Err(e) = self.app.agent_update_check() {
@@ -1292,7 +1457,8 @@ impl ControlledApp {
         }
         if self.server.pump(&mut self.bridge) {
             // a request waits for a job: keep polling
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            ui.ctx()
+                .request_repaint_after(dc_ui::pacing::FRAME_INTERVAL);
         }
         self.bridge.app.show(ui);
     }
@@ -1301,5 +1467,9 @@ impl ControlledApp {
 impl eframe::App for ControlledApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.bridge.app.pace_frame(raw_input);
     }
 }

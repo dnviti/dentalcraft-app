@@ -102,6 +102,16 @@ fn main() -> eframe::Result {
             .with_app_id("com.dentalcraft.DentalCraft")
             .with_inner_size([1600.0, 960.0])
             .with_min_inner_size([1280.0, 800.0]),
+        // vsync: `Fifo` waits for the display and is supported everywhere
+        // (never tears, unlike `FifoRelaxed`, which `AutoVsync` may pick);
+        // `dc_app::pacing` also holds every frame to 60 fps
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            surface: egui_wgpu::SurfaceConfig {
+                present_mode: egui_wgpu::wgpu::PresentMode::Fifo,
+                ..egui_wgpu::SurfaceConfig::LOW_LATENCY
+            },
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

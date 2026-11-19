@@ -249,7 +249,7 @@ impl Workspace {
             Params::None => {}
             Params::Module => {
                 section(ui, "ws-fn-params");
-                self.module_ctx_run(|m, ctx| m.inspector(ui, ctx));
+                self.module_inspector(ui);
             }
             Params::Own(draw) => {
                 section(ui, "ws-fn-params");

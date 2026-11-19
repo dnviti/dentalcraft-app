@@ -300,6 +300,8 @@ pub struct Workspace {
     /// Whether the case needs the bite before "Final position".
     pub(crate) bite_check: leaf::BiteCheck,
     pub(crate) menu_view: MenuView,
+    /// The widths of the side panels and where the last frame drew them.
+    pub(crate) panels: crate::panels::Panels,
     pub(crate) selected: Option<&'static str>,
     /// Role the user chose for the next import (`None` = auto): it applies
     /// to the next file dialog or drop and goes back to auto.
@@ -396,6 +398,7 @@ impl Workspace {
             .expect("cannot start the background job threads");
         Self {
             menu_view: MenuView::new(&menu),
+            panels: crate::panels::Panels::default(),
             module,
             menu,
             commands,

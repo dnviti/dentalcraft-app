@@ -46,6 +46,7 @@ mod leaf;
 mod manual;
 mod menu;
 mod overlay;
+mod panels;
 mod production;
 mod project;
 mod region;
@@ -61,6 +62,7 @@ mod workspace;
 
 pub use dc_scan_ui::ScanTicket;
 pub use menu::filter_ids;
+pub use panels::{PanelWidths, WorkspaceLayout};
 pub use project::{now_rfc3339, project_codecs};
 pub use workspace::{Workspace, WorkspaceAction};
 

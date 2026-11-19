@@ -8,6 +8,7 @@ use dc_case::{BlobRef, CaseState, RoleSource, ScanRole};
 use dc_module_api::MenuItem;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
+use dc_ui::panels::contained;
 use dc_ui::theme::colors;
 use dc_ui::tokens::tokens;
 use dc_ui::widgets::{self, Button};
@@ -20,6 +21,7 @@ use egui::{
 use crate::function::caption;
 use crate::leaf;
 use crate::menu::{self, MenuCtx, MenuEvent};
+use crate::panels::{PANEL_INSPECTOR, PANEL_MENU, side_panel};
 use crate::t;
 use crate::timeline::{self, TimelineModel};
 use crate::workspace::{Exit, SaveStatus, Workspace, WorkspaceAction};
@@ -75,17 +77,25 @@ impl Workspace {
                     .fill(c.bg_panel)
                     .inner_margin(Margin::symmetric(12, 0)),
             )
-            .show(ui, |ui| self.status_bar(ui));
-        Panel::left("dc-workspace-menu")
-            .exact_size(sz.left_menu_width)
-            .resizable(false)
-            .frame(Frame::new().fill(c.bg_panel))
-            .show(ui, |ui| self.left_panel(ui));
-        Panel::right("dc-workspace-inspector")
-            .exact_size(sz.inspector_width)
-            .resizable(false)
+            .show(ui, |ui| contained(ui, |ui| self.status_bar(ui)));
+        // the side panels: as wide as the user dragged them, the 3D view
+        // keeps the rest (and never less than its minimum while it can)
+        let inspector = side_panel(PANEL_INSPECTOR, &sz)
             .frame(Frame::new().fill(c.bg_panel).inner_margin(Margin::same(16)))
-            .show(ui, |ui| self.inspector_panel(ui));
+            .reserve(sz.viewport_min_width);
+        let inspector_room = inspector.shown_width(self.panels.widths.inspector, f32::INFINITY);
+        let mut width = self.panels.widths.menu;
+        let r = side_panel(PANEL_MENU, &sz)
+            .frame(Frame::new().fill(c.bg_panel))
+            .reserve(inspector_room + sz.viewport_min_width)
+            .show(ui, &mut width, |ui| self.left_panel(ui));
+        self.panels.widths.menu = width;
+        self.panels.note(PANEL_MENU, r.rect, r.overflow, r.resized);
+        let mut width = self.panels.widths.inspector;
+        let r = inspector.show(ui, &mut width, |ui| self.inspector_panel(ui));
+        self.panels.widths.inspector = width;
+        self.panels
+            .note(PANEL_INSPECTOR, r.rect, r.overflow, r.resized);
         Panel::bottom("dc-workspace-timeline")
             .exact_size(sz.timeline_height)
             .resizable(false)
@@ -96,8 +106,10 @@ impl Workspace {
                 bottom: 10,
             }))
             .show(ui, |ui| {
-                let model = TimelineModel::from_state(self.undo.current());
-                timeline::show(ui, &model, &mut self.timeline);
+                contained(ui, |ui| {
+                    let model = TimelineModel::from_state(self.undo.current());
+                    timeline::show(ui, &model, &mut self.timeline);
+                })
             });
         CentralPanel::no_frame().show(ui, |ui| self.center_ui(ui));
 
@@ -409,7 +421,7 @@ impl Workspace {
                     // a function: the workspace lays it out, by the menu law
                     Some(item) if item.command_id().is_some() => self.function_inspector(ui, item),
                     // a group: what the module says of it
-                    Some(_) => self.module_ctx_run(|m, ctx| m.inspector(ui, ctx)),
+                    Some(_) => self.module_inspector(ui),
                     None => {
                         ui.heading(t(self.module.name_key()));
                         ui.label(t("ws-inspector-select"));

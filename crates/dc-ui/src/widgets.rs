@@ -195,9 +195,9 @@ impl Button {
                 }
             }
         };
-        let galley = ui
-            .painter()
-            .layout_no_wrap(self.label.clone(), font, Color32::PLACEHOLDER);
+        let mut galley =
+            ui.painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), Color32::PLACEHOLDER);
         let icon_galley = self.icon.map(|i| {
             ui.painter()
                 .layout_no_wrap(i.into(), fonts::icon(16.0), Color32::PLACEHOLDER)
@@ -206,17 +206,29 @@ impl Button {
             .as_ref()
             .map(|g| g.size().x + if self.label.is_empty() { 0.0 } else { 8.0 })
             .unwrap_or(0.0);
+        // a label wider than the room (a full-width button, or a column)
+        // wraps onto more lines and the button grows taller, never wider
+        let room = ui.available_width();
+        if (self.full_width || !ui.layout().is_horizontal())
+            && icon_w + galley.size().x + 2.0 * pad > room
+        {
+            let wrap = (room - 2.0 * pad - icon_w).max(40.0);
+            galley = ui
+                .painter()
+                .layout(self.label.clone(), font, Color32::PLACEHOLDER, wrap);
+        }
         let content_w = icon_w + galley.size().x;
         let mut width = (content_w + 2.0 * pad).max(self.min_width);
         if self.full_width {
-            width = width.max(ui.available_width());
+            width = width.max(room);
         }
+        let height = self.size.height().max(galley.size().y + 12.0);
         let sense = if self.enabled {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(vec2(width, self.size.height()), sense);
+        let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
         let label = self.label.clone();
         let enabled = self.enabled;
         let selected = self.selected;
@@ -1266,7 +1278,7 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) -> Response 
             if bar.width() > 0.0 {
                 p.rect_filled(bar, radius(2.0), c.select_blue);
             }
-            ui.ctx().request_repaint();
+            crate::pacing::request_next_frame(ui.ctx());
         }
     }
     response

@@ -8,6 +8,9 @@
 //! - [`icons`]: Phosphor Regular codepoints (`icons::TOOTH`, ...), usable in
 //!   any text because Phosphor is a fallback of every family.
 //! - [`widgets`]: buttons, badges, toggles, sliders, tabs, inputs, cards.
+//! - [`panels`]: side panels the user resizes, contents that never move a
+//!   panel's edge.
+//! - [`pacing`]: the frame rate cap (60 fps).
 //! - [`loader`] / [`tr`]: the Fluent bundle of shared widget strings.
 //!
 //! ```no_run
@@ -25,6 +28,8 @@
 pub mod fonts;
 #[path = "phosphor_regular.rs"]
 pub mod icons;
+pub mod pacing;
+pub mod panels;
 pub mod theme;
 pub mod tokens;
 pub mod widgets;

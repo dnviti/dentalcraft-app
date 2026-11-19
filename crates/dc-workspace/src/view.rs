@@ -1063,6 +1063,7 @@ impl Workspace {
                 // the clicks and strokes go to the manual tool that is open,
                 // else to the selection and its gizmo
                 let vr = vp.ui(ui);
+                self.panels.layout.view = vr.response.rect;
                 // the tooth numbers, the Alt+click that chooses the brush tooth
                 // and the click on a number or a mark ("Delete a tooth")
                 let mark_click;
@@ -1134,7 +1135,7 @@ impl Workspace {
             None => {
                 ui.painter()
                     .rect_filled(rect, CornerRadius::ZERO, c.bg_viewport);
-                ui.allocate_rect(rect, Sense::hover());
+                self.panels.layout.view = ui.allocate_rect(rect, Sense::hover()).rect;
             }
         }
 
