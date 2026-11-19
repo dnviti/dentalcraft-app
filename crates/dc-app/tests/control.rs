@@ -277,11 +277,33 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
             "{out}"
         );
         assert_eq!(c.scans(), 2);
+
+        // the view of the window: as after a click on their buttons, the new
+        // tooth colours show the scan and the study models just built are
+        // shown; the toolbar and the timeline change them
+        let view = |c: &mut Client, p: Value| {
+            c.call("execute", json!({"id": "app.window.view", "params": p}))
+        };
+        let now = view(&mut c, json!({})).unwrap();
+        assert_eq!(
+            (&now["teeth_shown"], &now["study_shown"], &now["view"]),
+            (&json!(false), &json!(true), &json!("occlusal")),
+            "{now}"
+        );
+        let set = view(&mut c, json!({"view": "front", "stage": 4, "study": false})).unwrap();
+        assert_eq!(set["view"], "front", "{set}");
+        assert_eq!(set["stage"], set["last_stage"], "{set}");
+        assert_eq!(set["study_shown"], false, "{set}");
+        for bad in [
+            json!({"view": "top"}),
+            json!({"stage": -1}),
+            json!({"zoom": 2}),
+        ] {
+            let e = view(&mut c, bad).unwrap_err();
+            assert_eq!(e["code"], -32602, "{e}");
+        }
     });
     drive(&mut h, client);
-    // as after a click on their buttons: the new tooth colours show the
-    // scan, the study models just built are shown
     let ws = h.state().bridge().app.workspace().unwrap();
-    assert!(!ws.teeth_shown());
-    assert!(ws.study_shown());
+    assert!(!ws.teeth_shown() && !ws.study_shown());
 }

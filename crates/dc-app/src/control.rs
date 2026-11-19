@@ -347,6 +347,90 @@ fn window_screenshot_params() -> Value {
     })
 }
 
+/// `app.window.view`: what the 3D view of the window shows, as the toolbar
+/// and the timeline set it.
+pub const WINDOW_VIEW: &str = "app.window.view";
+
+fn window_view_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowViewParams",
+        "type": "object",
+        "properties": {
+            "view": {
+                "description": "Standard view of the camera.",
+                "type": "string",
+                "enum": ["occlusal", "front", "left", "right", "back"]
+            },
+            "stage": {
+                "description": "Stage shown on the timeline (0 = initial position; at most the last one).",
+                "type": "integer",
+                "minimum": 0
+            },
+            "study": {
+                "description": "The \"Study models\" layer.",
+                "type": "boolean"
+            },
+            "target": {
+                "description": "The \"Final position\" layer (the ghost of the teeth at their final position).",
+                "type": "boolean"
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// The optional boolean parameter `key`.
+fn opt_bool_param(params: &Value, key: &str) -> Result<Option<bool>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(RpcError::new(
+            codes::INVALID_PARAMS,
+            format!("parameter `{key}` must be a boolean"),
+        )),
+    }
+}
+
+/// The optional stage number parameter `key`.
+fn opt_u32_param(params: &Value, key: &str) -> Result<Option<u32>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                RpcError::new(
+                    codes::INVALID_PARAMS,
+                    format!("parameter `{key}` must be a whole number from 0"),
+                )
+            }),
+    }
+}
+
+/// The parameters of `app.window.view`: view, stage, study, target.
+type WindowViewArgs = (Option<String>, Option<u32>, Option<bool>, Option<bool>);
+
+fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
+    let known = ["view", "stage", "study", "target"];
+    if let Some(k) = params
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
+    {
+        return Err(RpcError::new(
+            codes::INVALID_PARAMS,
+            format!("{WINDOW_VIEW}: unknown parameter `{k}`"),
+        ));
+    }
+    Ok((
+        opt_str_param(params, "view")?.map(str::to_owned),
+        opt_u32_param(params, "stage")?,
+        opt_bool_param(params, "study")?,
+        opt_bool_param(params, "target")?,
+    ))
+}
+
 fn run_by_the_app(_: &CaseState, _: &Value, _: &JobCtx) -> Result<CommandOutput, CommandError> {
     Err(CommandError::Invalid(
         "app command: the app bridge runs it".into(),
@@ -368,6 +452,13 @@ fn window_specs() -> Vec<CommandSpec> {
             label_key: "app-cmd-window-screenshot",
             doc_key: "app-cmd-window-screenshot-doc",
             params_schema: window_screenshot_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_VIEW,
+            label_key: "app-cmd-window-view",
+            doc_key: "app-cmd-window-view-doc",
+            params_schema: window_view_params,
             run: run_by_the_app,
         },
     ]
@@ -817,6 +908,17 @@ impl Bridge {
                 self.workspace().and_then(|ws| match ws.select_entry(&id) {
                     Some(selected) => Ok(json!({ "selected": selected })),
                     None => Err(invalid(format!("no menu entry {id}"))),
+                })
+            }
+            // the toolbar and the timeline of the 3D view
+            WINDOW_VIEW => {
+                let (view, stage, study, target) = match window_view_args(params) {
+                    Ok(p) => p,
+                    Err(e) => return Step::Done(Err(e)),
+                };
+                self.workspace().and_then(|ws| {
+                    ws.set_window_view(view.as_deref(), stage, study, target)
+                        .map_err(invalid)
                 })
             }
             // the installation, not the case: through the update dialog

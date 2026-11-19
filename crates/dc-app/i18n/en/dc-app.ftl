@@ -369,3 +369,5 @@ app-cmd-menu-select = Select a menu entry
 app-cmd-menu-select-doc = Selects an entry of the menu of the open project, as a click on it does: its inspector shows its parameters, its run button and its tools; nothing runs. Parameter: id, the id of the entry or of the command its inspector runs (for example aligners.teeth.find).
 app-cmd-window-screenshot = Screenshot of the window
 app-cmd-window-screenshot-doc = Writes the window as the user sees it (menu, inspector, 3D view, open dialogs) to a PNG file at the next frame. Parameter: path, the PNG file. Answers path, width and height.
+app-cmd-window-view = View of the window
+app-cmd-window-view-doc = Sets what the 3D view of the window shows, as its toolbar and its timeline do; the case does not change. Parameters, each optional (what is not given stays): view (occlusal, front, left, right or back), stage (the stage shown on the timeline, at most the last one; 0 is the initial position), study (the Study models layer), target (the Final position layer, the ghost of the teeth at their final position). Answers view, stage, last_stage, study, target, study_shown and teeth_shown.
