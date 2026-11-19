@@ -13,7 +13,9 @@ use dc_scanner::control::{
     SCAN_AUTO, TURNTABLE_CALIBRATE, TURNTABLE_CONNECT, TURNTABLE_DEVICES, TURNTABLE_DISCONNECT,
     TURNTABLE_HOME, TURNTABLE_MOVE, TURNTABLE_SPEED, TURNTABLE_STOP,
 };
-use dc_scanner::rig::ROI_BELOW_PLATTER_MM;
+use dc_scanner::rig::{
+    AUTO_FRAMES_PER_STOP, AUTO_RESOLUTION_MM, AUTO_STEP_DEG, AUTO_TILTS_DEG, ROI_BELOW_PLATTER_MM,
+};
 use dc_ui::fonts;
 use dc_ui::icons as ic;
 use dc_ui::theme::colors;
@@ -31,8 +33,9 @@ pub(super) const SEARCH_S: f32 = 5.0;
 /// Seconds the popup looks for turntables when it opens.
 pub(crate) const OPEN_SEARCH_S: f32 = 1.0;
 
-/// Tilts of the presets of the automatic scan: Arch, Quick.
-const PRESETS: [&[f32]; 2] = [&[-20.0, 0.0, 20.0], &[0.0]];
+/// Tilts of the presets of the automatic scan: Arch (the tilts `scan.auto`
+/// scans at by default), Quick.
+const PRESETS: [&[f32]; 2] = [&AUTO_TILTS_DEG, &[0.0]];
 /// Tilt range when the turntable does not say its own.
 const TILT_RANGE: (f32, f32) = (-30.0, 30.0);
 
@@ -114,6 +117,13 @@ pub(super) struct JobSnap {
     pub calibration: Option<CalReport>,
     /// `scan.auto`: how the views were registered and fused.
     pub quality: Option<QualityReport>,
+    /// `scan.auto`: the phase of the job (`acquire`, then the phases of the
+    /// finished mesh); `None` for a job that does not name one.
+    pub phase: Option<String>,
+    /// `scan.auto`: the fine reconstruction from the stops.
+    pub reconstruction: Option<ReconSnap>,
+    /// `scan.auto`: what the mesh finish changed.
+    pub finish: Option<FinishSnap>,
 }
 
 impl JobSnap {
@@ -135,6 +145,9 @@ impl JobSnap {
             }),
             calibration: v.get("calibration").and_then(CalReport::from_json),
             quality: v.get("quality").and_then(QualityReport::from_json),
+            phase: v["phase"].as_str().map(str::to_owned),
+            reconstruction: v.get("reconstruction").and_then(ReconSnap::from_json),
+            finish: v.get("finish").and_then(FinishSnap::from_json),
         })
     }
 
@@ -234,6 +247,90 @@ fn warning_key(code: &str) -> &'static str {
     match code {
         "scan-quality-weak" => "scan-warn-scan-quality-weak",
         _ => "scan-warn-other",
+    }
+}
+
+/// The sentence key of the phase of an automatic scan that builds the mesh;
+/// `None` while it acquires (or the job names no phase).
+fn phase_key(phase: &str) -> Option<&'static str> {
+    Some(match phase {
+        "acquire" => return None,
+        "refine" => "scan-phase-refine",
+        "fuse" => "scan-phase-fuse",
+        "extract" => "scan-phase-extract",
+        "clean" => "scan-phase-clean",
+        "fill-holes" => "scan-phase-fill-holes",
+        "optimise" => "scan-phase-optimise",
+        _ => "scan-phase-other",
+    })
+}
+
+fn count(v: &Value, key: &str) -> u64 {
+    v[key].as_u64().unwrap_or(0)
+}
+
+/// The fine reconstruction from the stops (`scan.auto`'s `reconstruction`,
+/// the answer of `scan.reconstruct`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ReconSnap {
+    pub resolution_mm: Option<f32>,
+    pub stops: u64,
+    /// Stops whose position was refined before fusing (0: not refined).
+    pub refined: u64,
+    /// Mean distance between views before the refinement.
+    pub mean_rms_before_mm: Option<f32>,
+    pub mean_rms_mm: Option<f32>,
+    pub vertices: u64,
+    pub faces: u64,
+    pub seconds: Option<f32>,
+}
+
+impl ReconSnap {
+    pub fn from_json(v: &Value) -> Option<Self> {
+        v.is_object().then(|| Self {
+            resolution_mm: num(&v["resolution_mm"]),
+            stops: count(v, "stops"),
+            // a count of stops, or only whether the positions were refined
+            refined: v["refined"].as_u64().unwrap_or_else(|| {
+                if v["refined"].as_bool().unwrap_or(false) {
+                    count(v, "stops")
+                } else {
+                    0
+                }
+            }),
+            mean_rms_before_mm: num(&v["mean_rms_before_mm"]),
+            mean_rms_mm: num(&v["mean_rms_mm"]),
+            vertices: count(v, "vertices"),
+            faces: count(v, "faces"),
+            seconds: num(&v["seconds"]),
+        })
+    }
+}
+
+/// What the mesh finish did (`scan.auto`'s `finish`, the answer of the
+/// `finish` op of `scan.mesh`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct FinishSnap {
+    pub islands_removed: u64,
+    pub nonmanifold_fixed: u64,
+    pub holes_filled: u64,
+    pub holes_left: u64,
+    pub faces_before: u64,
+    pub faces_after: u64,
+    pub max_error_mm: Option<f32>,
+}
+
+impl FinishSnap {
+    pub fn from_json(v: &Value) -> Option<Self> {
+        v.is_object().then(|| Self {
+            islands_removed: count(v, "islands_removed"),
+            nonmanifold_fixed: count(v, "nonmanifold_fixed"),
+            holes_filled: count(v, "holes_filled"),
+            holes_left: count(v, "holes_left"),
+            faces_before: count(v, "faces_before"),
+            faces_after: count(v, "faces_after"),
+            max_error_mm: num(&v["max_error_mm"]),
+        })
     }
 }
 
@@ -358,10 +455,23 @@ const MAX_DEG_PER_FRAME: f32 = 2.5;
 /// Stop and capture, the first of the two choices (the other is continuous
 /// turning), in [`TableUi::capture`].
 const CAPTURE_STOP: usize = 0;
-/// Degrees between stops and frames taken at each stop, as `scan.auto`
-/// defaults to.
-const DEFAULT_STOP_STEP_DEG: f32 = 10.0;
-const DEFAULT_FRAMES_PER_STOP: f32 = 3.0;
+/// Resolutions of the mesh the automatic scan and the manual rebuild offer
+/// (mm), all inside the range of `scan.reconstruct`.
+pub(super) const MESH_RESOLUTIONS_MM: [f32; 5] = [0.08, 0.1, 0.15, 0.2, 0.3];
+
+/// The choice of [`MESH_RESOLUTIONS_MM`] nearest to the resolution
+/// `scan.auto` defaults to.
+fn default_resolution() -> usize {
+    MESH_RESOLUTIONS_MM
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - AUTO_RESOLUTION_MM)
+                .abs()
+                .total_cmp(&(*b - AUTO_RESOLUTION_MM).abs())
+        })
+        .map_or(0, |(i, _)| i)
+}
 
 /// Degrees turned between two frames and the speed (°/s) that keeps it near
 /// 2°, when `speed` (°/s) turns the object too far between two frames at
@@ -503,6 +613,13 @@ pub(super) struct TableUi {
     pub stop_step_deg: f32,
     /// Frames taken at each stop (a whole number).
     pub frames_per_stop: f32,
+    /// Resolution of the finished mesh: a choice of [`MESH_RESOLUTIONS_MM`].
+    pub resolution: usize,
+    /// The mesh is cleaned, its holes closed and optimised when the scan
+    /// ends.
+    pub finish: bool,
+    /// The positions of the stops are refined before the views are fused.
+    pub refine: bool,
 }
 
 impl Default for TableUi {
@@ -521,8 +638,11 @@ impl Default for TableUi {
             confirm_auto: None,
             focus_calibrate: false,
             capture: CAPTURE_STOP,
-            stop_step_deg: DEFAULT_STOP_STEP_DEG,
-            frames_per_stop: DEFAULT_FRAMES_PER_STOP,
+            stop_step_deg: AUTO_STEP_DEG,
+            frames_per_stop: AUTO_FRAMES_PER_STOP as f32,
+            resolution: default_resolution(),
+            finish: true,
+            refine: true,
         }
     }
 }
@@ -586,6 +706,9 @@ impl TableUi {
         let mut params = json!({
             "tilts_deg": tilts,
             "rotation_deg": self.rotation_deg,
+            "resolution_mm": self.resolution_mm(),
+            "finish": self.finish,
+            "refine": self.refine,
         });
         if calibrated && self.capture == CAPTURE_STOP {
             params["mode"] = json!("stop-and-capture");
@@ -596,6 +719,14 @@ impl TableUi {
             params["deg_per_s"] = json!(self.speed);
         }
         params
+    }
+
+    /// The resolution of the mesh chosen (mm).
+    pub fn resolution_mm(&self) -> f32 {
+        MESH_RESOLUTIONS_MM
+            .get(self.resolution)
+            .copied()
+            .unwrap_or(AUTO_RESOLUTION_MM)
     }
 
     /// Stop and capture or continuous turning, the angle between the stops
@@ -619,7 +750,7 @@ impl TableUi {
                 1.0,
                 0,
                 "°",
-                DEFAULT_STOP_STEP_DEG,
+                AUTO_STEP_DEG,
             );
             ui.add_space(6.0);
             widgets::labeled_slider(
@@ -630,10 +761,41 @@ impl TableUi {
                 1.0,
                 0,
                 "",
-                DEFAULT_FRAMES_PER_STOP,
+                AUTO_FRAMES_PER_STOP as f32,
             );
             ui.add_space(4.0);
             caption(ui, t("scan-auto-stop-hint"));
+        }
+    }
+
+    /// The quality of the mesh: its resolution, the refinement of the
+    /// positions and, for the automatic scan (`with_finish`), the finish
+    /// at the end. Shared by the automatic scan and the manual rebuild.
+    pub fn quality_ui(&mut self, ui: &mut Ui, with_finish: bool) {
+        caption(ui, t("scan-quality-resolution"));
+        ui.add_space(2.0);
+        let labels: Vec<String> = MESH_RESOLUTIONS_MM
+            .iter()
+            .map(|mm| format!("{mm:.2}"))
+            .collect();
+        widgets::segmented_fill(ui, &mut self.resolution, &labels, 30.0);
+        ui.add_space(2.0);
+        caption(
+            ui,
+            tr_n(
+                "scan-quality-resolution-mm",
+                format!("{:.2}", self.resolution_mm()),
+            ),
+        );
+        ui.add_space(6.0);
+        widgets::toggle(ui, &mut self.refine, t("scan-quality-refine"));
+        ui.add_space(2.0);
+        caption(ui, t("scan-quality-refine-hint"));
+        if with_finish {
+            ui.add_space(6.0);
+            widgets::toggle(ui, &mut self.finish, t("scan-quality-finish"));
+            ui.add_space(2.0);
+            caption(ui, t("scan-quality-finish-hint"));
         }
     }
 }
@@ -675,7 +837,7 @@ fn heading(ui: &mut Ui, expanded: &mut bool) {
 }
 
 /// A small heading inside a block.
-fn sub_heading(ui: &mut Ui, key: &str) {
+pub(super) fn sub_heading(ui: &mut Ui, key: &str) {
     let c = *colors(ui);
     ui.label(
         RichText::new(t(key))
@@ -747,44 +909,173 @@ fn calibration_report(ui: &mut Ui, r: &CalReport) {
     }
 }
 
+/// What the fine reconstruction measured and built.
+pub(super) fn recon_report(ui: &mut Ui, r: &ReconSnap) {
+    caption(
+        ui,
+        dc_i18n::tr_args(
+            "scan-recon-stops",
+            &[
+                ("stops", &r.stops.to_string()),
+                (
+                    "mm",
+                    &r.resolution_mm
+                        .map_or_else(|| "-".to_owned(), |mm| format!("{mm:.2}")),
+                ),
+            ],
+        ),
+    );
+    let mm = |v: f32| format!("{v:.2}");
+    let refined = r.refined.to_string();
+    let stops = r.stops.to_string();
+    match (r.refined, r.mean_rms_mm, r.mean_rms_before_mm) {
+        (0, Some(now), _) => caption(
+            ui,
+            dc_i18n::tr_args("scan-quality-residual", &[("mm", &mm(now))]),
+        ),
+        (0, None, _) => {}
+        (_, Some(now), Some(before)) => caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-recon-refined-from",
+                &[
+                    ("refined", &refined),
+                    ("stops", &stops),
+                    ("before", &mm(before)),
+                    ("mm", &mm(now)),
+                ],
+            ),
+        ),
+        (_, Some(now), None) => caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-recon-refined",
+                &[("refined", &refined), ("stops", &stops), ("mm", &mm(now))],
+            ),
+        ),
+        (_, None, _) => caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-recon-refined-plain",
+                &[("refined", &refined), ("stops", &stops)],
+            ),
+        ),
+    }
+    caption(
+        ui,
+        dc_i18n::tr_args(
+            "scan-recon-mesh",
+            &[
+                ("vertices", &r.vertices.to_string()),
+                ("faces", &r.faces.to_string()),
+                (
+                    "seconds",
+                    &r.seconds
+                        .map_or_else(|| "-".to_owned(), |s| format!("{s:.1}")),
+                ),
+            ],
+        ),
+    );
+}
+
+/// What the mesh finish removed, closed and optimised.
+pub(super) fn finish_report(ui: &mut Ui, f: &FinishSnap) {
+    caption(
+        ui,
+        dc_i18n::tr_args(
+            "scan-finish-cleaned",
+            &[
+                ("islands", &f.islands_removed.to_string()),
+                ("fixed", &f.nonmanifold_fixed.to_string()),
+            ],
+        ),
+    );
+    caption(
+        ui,
+        dc_i18n::tr_args(
+            "scan-finish-holes",
+            &[
+                ("filled", &f.holes_filled.to_string()),
+                ("left", &f.holes_left.to_string()),
+            ],
+        ),
+    );
+    let (before, after) = (f.faces_before.to_string(), f.faces_after.to_string());
+    match f.max_error_mm {
+        Some(mm) => caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-finish-faces",
+                &[
+                    ("before", &before),
+                    ("after", &after),
+                    ("mm", &format!("{mm:.3}")),
+                ],
+            ),
+        ),
+        None => caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-finish-faces-plain",
+                &[("before", &before), ("after", &after)],
+            ),
+        ),
+    }
+}
+
 /// How the latest automatic scan went: the views fused and flagged, the
-/// residual, the loop closure error and the warning of a weak scan.
-fn quality_report(ui: &mut Ui, q: &QualityReport) {
+/// residual, the loop closure error, the fine reconstruction, what the
+/// finish did and the warning of a weak scan.
+fn auto_report(ui: &mut Ui, job: &JobSnap) {
     let c = *colors(ui);
+    if job.quality.is_none() && job.reconstruction.is_none() && job.finish.is_none() {
+        return;
+    }
     ui.add_space(8.0);
     sub_heading(ui, "scan-quality-title");
-    let line = if q.stops > 0 {
-        dc_i18n::tr_args(
-            "scan-quality-stops",
-            &[
-                ("fused", &q.fused.to_string()),
-                ("stops", &q.stops.to_string()),
-                ("flagged", &q.flagged_stops.to_string()),
-            ],
-        )
-    } else {
-        dc_i18n::tr_args(
-            "scan-quality-frames",
-            &[
-                ("fused", &q.fused.to_string()),
-                ("frames", &q.frames.to_string()),
-            ],
-        )
-    };
-    caption(ui, line);
-    if let Some(mm) = q.mean_rms_mm {
-        caption(
-            ui,
-            dc_i18n::tr_args("scan-quality-residual", &[("mm", &format!("{mm:.2}"))]),
-        );
+    if let Some(q) = &job.quality {
+        let line = if q.stops > 0 {
+            dc_i18n::tr_args(
+                "scan-quality-stops",
+                &[
+                    ("fused", &q.fused.to_string()),
+                    ("stops", &q.stops.to_string()),
+                    ("flagged", &q.flagged_stops.to_string()),
+                ],
+            )
+        } else {
+            dc_i18n::tr_args(
+                "scan-quality-frames",
+                &[
+                    ("fused", &q.fused.to_string()),
+                    ("frames", &q.frames.to_string()),
+                ],
+            )
+        };
+        caption(ui, line);
+        // the reconstruction reports its own residual, after refining
+        if job.reconstruction.is_none()
+            && let Some(mm) = q.mean_rms_mm
+        {
+            caption(
+                ui,
+                dc_i18n::tr_args("scan-quality-residual", &[("mm", &format!("{mm:.2}"))]),
+            );
+        }
+        if let Some(deg) = q.loop_error() {
+            caption(
+                ui,
+                dc_i18n::tr_args("scan-quality-loop", &[("deg", &format!("{deg:.2}"))]),
+            );
+        }
     }
-    if let Some(deg) = q.loop_error() {
-        caption(
-            ui,
-            dc_i18n::tr_args("scan-quality-loop", &[("deg", &format!("{deg:.2}"))]),
-        );
+    if let Some(r) = &job.reconstruction {
+        recon_report(ui, r);
     }
-    if let Some(code) = &q.warning {
+    if let Some(f) = &job.finish {
+        finish_report(ui, f);
+    }
+    if let Some(code) = job.quality.as_ref().and_then(|q| q.warning.as_ref()) {
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!("{} {}", ic::WARNING, t(warning_key(code))))
@@ -1159,17 +1450,34 @@ impl ScanUi {
             return;
         }
         if let Some(a) = JobSnap::running(snap.auto.as_ref()) {
-            let text = dc_i18n::tr_args(
-                "scan-auto-progress",
-                &[
-                    ("step", &a.step.to_string()),
-                    ("steps", &a.steps.to_string()),
-                    ("tilt", &deg(a.tilt_deg.unwrap_or(0.0))),
-                ],
-            );
+            // once the turning is done the job builds the mesh
+            let phase = a.phase.as_deref().and_then(phase_key);
+            let text = match phase {
+                Some(key) => dc_i18n::tr_args(
+                    "scan-auto-phase",
+                    &[
+                        ("step", &a.step.to_string()),
+                        ("steps", &a.steps.to_string()),
+                        ("what", &t(key)),
+                    ],
+                ),
+                None => dc_i18n::tr_args(
+                    "scan-auto-progress",
+                    &[
+                        ("step", &a.step.to_string()),
+                        ("steps", &a.steps.to_string()),
+                        ("tilt", &deg(a.tilt_deg.unwrap_or(0.0))),
+                    ],
+                ),
+            };
             progress(ui, &text, a);
             ui.add_space(4.0);
-            caption(ui, t("scan-auto-hint"));
+            let hint = if phase.is_some() {
+                "scan-auto-phase-hint"
+            } else {
+                "scan-auto-hint"
+            };
+            caption(ui, t(hint));
             return;
         }
         let busy = busy || JobSnap::running(snap.calibrating.as_ref()).is_some();
@@ -1179,7 +1487,7 @@ impl ScanUi {
             .add_enabled_ui(can, |ui| {
                 if table.tilt.is_some() {
                     let labels = [
-                        t("scan-auto-arch"),
+                        tr_n("scan-auto-arch", AUTO_TILTS_DEG.len().to_string()),
                         t("scan-auto-quick"),
                         t("scan-auto-custom"),
                     ];
@@ -1218,6 +1526,16 @@ impl ScanUi {
                     360.0,
                 );
                 self.table.capture_ui(ui, matching(snap).is_some());
+                ui.add_space(10.0);
+                sub_heading(ui, "scan-quality-settings");
+                // only the stop and capture scan keeps the stops the fine
+                // mesh is built from
+                let stops = matching(snap).is_some() && self.table.capture == CAPTURE_STOP;
+                ui.add_enabled_ui(stops, |ui| self.table.quality_ui(ui, true));
+                if !stops {
+                    ui.add_space(4.0);
+                    caption(ui, t("scan-quality-needs-stops"));
+                }
                 tilts
             })
             .inner;
@@ -1247,8 +1565,8 @@ impl ScanUi {
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             caption(ui, t("scan-auto-hint"));
         });
-        if !busy && let Some(q) = snap.auto.as_ref().and_then(|j| j.quality.as_ref()) {
-            quality_report(ui, q);
+        if !busy && let Some(j) = snap.auto.as_ref() {
+            auto_report(ui, j);
         }
     }
 
@@ -1482,14 +1800,25 @@ mod tests {
     fn automatic_scan_parameters() {
         let mut ui = TableUi::default();
         assert_eq!(ui.capture, CAPTURE_STOP);
-        assert_eq!((ui.stop_step_deg, ui.frames_per_stop), (10.0, 3.0));
+        assert_eq!(
+            (ui.stop_step_deg, ui.frames_per_stop),
+            (AUTO_STEP_DEG, AUTO_FRAMES_PER_STOP as f32)
+        );
+        // the quality defaults: the resolution of the core, finished, refined
+        assert!((ui.resolution_mm() - AUTO_RESOLUTION_MM).abs() < 0.05);
+        assert!(ui.finish && ui.refine);
+        let quality = json!({
+            "resolution_mm": ui.resolution_mm(), "finish": true, "refine": true,
+        });
         // calibrated: stop and capture, the table moves at its own pace
         let p = ui.auto_params(vec![0.0, 20.0], true);
         assert_eq!(
             p,
             json!({
                 "tilts_deg": [0.0, 20.0], "rotation_deg": 360.0,
-                "mode": "stop-and-capture", "step_deg": 10.0, "frames_per_stop": 3,
+                "mode": "stop-and-capture", "step_deg": AUTO_STEP_DEG,
+                "frames_per_stop": AUTO_FRAMES_PER_STOP,
+                "resolution_mm": quality["resolution_mm"], "finish": true, "refine": true,
             })
         );
         // not calibrated: only continuous turning works
@@ -1498,6 +1827,7 @@ mod tests {
             json!({
                 "tilts_deg": [0.0], "rotation_deg": 360.0,
                 "mode": "continuous", "deg_per_s": DEFAULT_SPEED_DEG_S,
+                "resolution_mm": quality["resolution_mm"], "finish": true, "refine": true,
             })
         );
         // calibrated, continuous chosen
@@ -1510,6 +1840,70 @@ mod tests {
         assert_eq!(
             (&p["step_deg"], &p["frames_per_stop"]),
             (&json!(15.0), &json!(4))
+        );
+    }
+
+    #[test]
+    fn the_quality_choices_reach_the_automatic_scan() {
+        // every choice is inside the range of `scan.reconstruct`
+        assert!(
+            MESH_RESOLUTIONS_MM
+                .iter()
+                .all(|mm| (0.05..=1.0).contains(mm))
+        );
+        let mut ui = TableUi {
+            resolution: MESH_RESOLUTIONS_MM.len() - 1,
+            finish: false,
+            refine: false,
+            ..TableUi::default()
+        };
+        let p = ui.auto_params(vec![0.0], true);
+        assert_eq!(p["resolution_mm"], json!(0.3_f32));
+        assert_eq!((&p["finish"], &p["refine"]), (&json!(false), &json!(false)));
+        // an out-of-range choice falls back to the default of the core
+        ui.resolution = 99;
+        assert_eq!(ui.resolution_mm(), AUTO_RESOLUTION_MM);
+    }
+
+    #[test]
+    fn a_job_names_its_phase_and_what_it_built() {
+        let j = JobSnap::from_json(&json!({
+            "kind": "auto", "state": "running", "step": 40, "steps": 43, "phase": "fill-holes",
+            "reconstruction": {
+                "resolution_mm": 0.1, "stops": 74, "refined": 70, "mean_rms_before_mm": 0.21,
+                "mean_rms_mm": 0.09,
+                "vertices": 90000, "faces": 180000, "seconds": 12.5,
+            },
+            "finish": {
+                "islands_removed": 3, "nonmanifold_fixed": 12, "holes_filled": 5,
+                "holes_left": 1, "faces_before": 180000, "faces_after": 90000,
+                "max_error_mm": 0.02,
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            j.phase.as_deref().and_then(phase_key),
+            Some("scan-phase-fill-holes")
+        );
+        let r = j.reconstruction.unwrap();
+        assert_eq!((r.stops, r.vertices, r.faces), (74, 90000, 180_000));
+        assert_eq!((r.refined, r.mean_rms_before_mm), (70, Some(0.21)));
+        assert_eq!(
+            (r.resolution_mm, r.mean_rms_mm, r.seconds),
+            (Some(0.1), Some(0.09), Some(12.5))
+        );
+        let f = j.finish.unwrap();
+        assert_eq!((f.islands_removed, f.nonmanifold_fixed), (3, 12));
+        assert_eq!((f.holes_filled, f.holes_left), (5, 1));
+        assert_eq!((f.faces_before, f.faces_after), (180_000, 90_000));
+        assert_eq!(f.max_error_mm, Some(0.02));
+        // acquiring, a job of an older core and a phase of a newer one
+        assert_eq!(phase_key("acquire"), None);
+        assert_eq!(phase_key("later"), Some("scan-phase-other"));
+        let old = JobSnap::from_json(&json!({ "state": "done", "steps": 3 })).unwrap();
+        assert_eq!(
+            (old.phase, old.reconstruction, old.finish),
+            (None, None, None)
         );
     }
 
@@ -1554,5 +1948,138 @@ mod tests {
         // a null report is no report
         let n = JobSnap::from_json(&json!({ "state": "done", "steps": 1, "quality": null }));
         assert_eq!(n.unwrap().quality, None);
+    }
+
+    /// Runs `id` on `popup` as an agent does and waits for its answer.
+    fn run(popup: &mut crate::ScanPopup, id: &str, params: Value) -> Value {
+        let ticket = popup.start_command(id, params).unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            popup.poll();
+            if let Some(r) = popup.take_result(ticket) {
+                return r.unwrap_or_else(|e| panic!("{id}: {e}"));
+            }
+            assert!(start.elapsed().as_secs() < 300, "{id} did not end");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A default automatic scan (the parameters the window sends) on the
+    /// simulated rig ends with the finished mesh in the view, its report in
+    /// the window and the same mesh in the file handed to the host.
+    #[test]
+    fn a_default_automatic_scan_ends_with_the_finished_mesh_for_the_host() {
+        use crate::{ScanPopup, ScanTarget};
+        use dc_scanner::control;
+        use dc_scanner::{RigJobState, ScanState};
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut popup = ScanPopup::new(None);
+        popup.controller.lock().unwrap().set_rig_dir(dir.path());
+        popup.set_target(ScanTarget::new([dc_case::ScanRole::Lower]));
+        run(
+            &mut popup,
+            control::SCAN_CONNECT,
+            json!({"backend": "sim", "options": {"realtime": false, "width": 200, "height": 125}}),
+        );
+        run(
+            &mut popup,
+            control::TURNTABLE_CONNECT,
+            json!({"backend": "sim", "options": {"fast": true}}),
+        );
+        run(&mut popup, control::TURNTABLE_CALIBRATE, json!({}));
+        let start = std::time::Instant::now();
+        loop {
+            popup.poll();
+            let seen = popup.try_with(|c| {
+                (
+                    c.calibration_job().map(|j| j.state),
+                    c.session().status().state,
+                )
+            });
+            if let Some((Some(job), ScanState::Connected)) = seen
+                && !matches!(job, RigJobState::Running | RigJobState::Paused)
+            {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 300, "calibration: {seen:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(popup.try_with(|c| c.calibration().is_some()), Some(true));
+
+        // the window's own parameters, the defaults of its controls
+        let mut params = TableUi::default().auto_params(vec![0.0], true);
+        params["settle_s"] = json!(0);
+        params["deg_per_s"] = json!(90);
+        // a debug build of the simulated scan is slow at the 0.1 mm default
+        params["resolution_mm"] = json!(0.5);
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 1000.0))
+            // the device pickers are the window's own ComboBoxes
+            .with_accessibility_check(false)
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui_state(|ui, p: &mut ScanPopup| p.show(ui), popup);
+        h.state_mut().command(control::SCAN_AUTO, params);
+        let start = std::time::Instant::now();
+        let snap = loop {
+            h.step();
+            let p = h.state();
+            if let Some(s) = &p.ui.snap
+                && let Some(a) = &s.auto
+                && !a.active
+                && !p.ui.auto_pending
+                && !s.live()
+            {
+                assert!(
+                    a.error.is_none(),
+                    "the automatic scan failed: {:?}",
+                    a.error
+                );
+                break s.clone();
+            }
+            assert!(
+                start.elapsed().as_secs() < 600,
+                "the automatic scan did not end"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let job = snap.auto.clone().unwrap();
+        let (r, f) = (
+            job.reconstruction.expect("a reconstruction report"),
+            job.finish.expect("a finish report"),
+        );
+        assert!(r.refined > 0 && r.stops > 0 && r.faces > 0, "{r:?}");
+        assert!((r.resolution_mm.unwrap() - 0.5).abs() < 1e-3, "{r:?}");
+        assert!(
+            f.faces_after > 0 && f.faces_after <= f.faces_before,
+            "{f:?}"
+        );
+        let mesh = snap.mesh.as_ref().expect("the finished mesh");
+        assert_eq!(mesh.face_count() as u64, f.faces_after);
+        // the view shows the mesh and the window its report
+        assert!(h.state().ui.show_surface);
+        h.step();
+        assert!(h.query_by_label_contains("before optimising").is_some());
+        assert!(h.query_by_label_contains("stops joined").is_some());
+
+        // the file for the host is that mesh
+        let ticket = h
+            .state_mut()
+            .start_command(control::SCAN_IMPORT, json!({ "role": "lower" }))
+            .unwrap();
+        let start = std::time::Instant::now();
+        let mut faces = None;
+        while h.state_mut().take_result(ticket).is_none() {
+            h.step();
+            for out in h.state_mut().take_outputs() {
+                faces = Some(dc_mesh::io::read(out.path()).unwrap().face_count());
+                h.state_mut().output_done(out.id(), Ok(json!({})));
+            }
+            assert!(start.elapsed().as_secs() < 300, "scan.import did not end");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(faces, Some(mesh.face_count()));
     }
 }

@@ -741,6 +741,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("scan.redo", Skip(SCANNER)),
         ("scan.export", Skip(FILES)),
         ("scan.auto", Skip(SCANNER)),
+        ("scan.reconstruct", Skip(SCANNER)),
         // the turntable of the scan window (`turntable.*`)
         ("turntable.devices", Skip(TURNTABLE)),
         ("turntable.connect", Skip(TURNTABLE)),

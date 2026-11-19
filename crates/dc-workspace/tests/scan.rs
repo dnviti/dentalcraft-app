@@ -212,8 +212,12 @@ fn an_agent_runs_an_automatic_scan_on_the_simulated_turntable() {
     // without a calibration of this rig the automatic scan asks for the
     // consent of `allow_uncalibrated` (a calibration of this computer may
     // exist: then it starts at once)
-    let auto =
-        json!({ "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 20.0, "settle_s": 0.1 });
+    // `finish: false`: a calibrated rig (of this computer) would otherwise
+    // finish the mesh and stop the scan, and the stop below needs it paused
+    let auto = json!({
+        "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 20.0, "settle_s": 0.1,
+        "finish": false,
+    });
     if let Err(e) = scan(&mut ws, "scan.auto", auto.clone()) {
         assert!(e.starts_with("rig-uncalibrated"), "{e}");
         let mut anyway = auto;

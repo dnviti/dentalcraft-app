@@ -5,12 +5,16 @@
 //! order of the work:
 //!
 //! 1. Acquisition: start, pause / resume, stop, start over, the automatic
-//!    scan with the turntable, and the settings of the acquisition;
+//!    scan with the turntable (with the quality of its mesh: resolution,
+//!    refinement, finish; its result is the finished mesh, shown framed,
+//!    with a report), and the settings of the acquisition;
 //! 2. Point cloud: stray points, largest piece, smoothing, thinning, a
 //!    rectangle selection to delete, a cut below a level;
 //! 3. Surface: its resolution (Fine 0.15, Standard 0.3, Fast 0.6 mm or a
-//!    custom value) and the button that builds it;
-//! 4. Surface tools: holes, smoothing, loose pieces, simplification;
+//!    custom value) and the button that builds it, and the rebuild from the
+//!    stops of an automatic scan at a finer resolution;
+//! 4. Surface tools: finish (clean, close the holes, optimise), holes,
+//!    smoothing, loose pieces, simplification;
 //! 5. Import: one of the roles of the [`crate::ScanTarget`], and the
 //!    hand-over of the surface to the host (`scan.import`).
 //!
@@ -27,8 +31,8 @@ use dc_case::ScanRole;
 use dc_mesh::TriMesh;
 use dc_scanner::control::{
     SCAN_AUTO, SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD,
-    SCAN_PAUSE, SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START, SCAN_STOP,
-    SCAN_UNDO, TURNTABLE_CONNECT, TURNTABLE_DEVICES,
+    SCAN_PAUSE, SCAN_RECONSTRUCT, SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START,
+    SCAN_STOP, SCAN_UNDO, TURNTABLE_CONNECT, TURNTABLE_DEVICES,
 };
 use dc_scanner::{
     CloudOp, DeviceInfo, LivePreview, MeshOp, PointCloud, ScanSettings, ScanState, ScanStatus,
@@ -48,7 +52,10 @@ use framing::Follow;
 use glam::Vec3;
 use serde_json::{Value, json};
 pub(crate) use turntable::OPEN_SEARCH_S;
-use turntable::{CalSnap, JobSnap, TableSnap, TableUi};
+use turntable::{
+    CalSnap, FinishSnap, JobSnap, ReconSnap, TableSnap, TableUi, finish_report, recon_report,
+    sub_heading,
+};
 
 use crate::{
     ImportWords, ScanFailure, ScanPopup, ScanTarget, caption, scene_color, select, t, tr_n,
@@ -271,6 +278,12 @@ pub(crate) struct ScanUi {
     follow: Follow,
     /// A calibration was running when the view was last drawn.
     calibrating_before: bool,
+    /// An automatic scan was seen running: its result is shown (and the
+    /// view framed) once it ends.
+    auto_pending: bool,
+    /// What the latest manual mesh finish and rebuild reported.
+    manual_finish: Option<FinishSnap>,
+    manual_recon: Option<ReconSnap>,
 }
 
 impl ScanUi {
@@ -315,6 +328,9 @@ impl ScanUi {
             fit: true,
             follow: Follow::default(),
             calibrating_before: false,
+            auto_pending: false,
+            manual_finish: None,
+            manual_recon: None,
         }
     }
 
@@ -420,7 +436,11 @@ impl ScanUi {
             }
             TURNTABLE_DEVICES => self.table.listed(out),
             TURNTABLE_CONNECT => self.table.connected(out),
-            SCAN_START | SCAN_AUTO => self.refit(),
+            SCAN_START | SCAN_AUTO => {
+                self.manual_finish = None;
+                self.manual_recon = None;
+                self.refit();
+            }
             SCAN_STOP => {
                 self.show_surface = false;
                 self.selection = None;
@@ -428,6 +448,8 @@ impl ScanUi {
             SCAN_RESET => {
                 self.selection = None;
                 self.imported = None;
+                self.manual_finish = None;
+                self.manual_recon = None;
                 self.refit();
             }
             SCAN_SETTINGS => {
@@ -439,7 +461,23 @@ impl ScanUi {
                 self.show_surface = false;
                 self.selection = None;
             }
-            SCAN_MESH_BUILD => self.show_surface = true,
+            // from the stops (a fine reconstruction) or from the cloud
+            SCAN_MESH_BUILD => {
+                self.manual_recon = out.get("reconstruction").and_then(ReconSnap::from_json);
+                self.manual_finish = None;
+                self.show_surface = true;
+            }
+            // a rebuild from the stops replaces the surface
+            SCAN_RECONSTRUCT => {
+                self.manual_recon = out.get("reconstruction").and_then(ReconSnap::from_json);
+                self.manual_finish = None;
+                self.show_surface = true;
+                self.refit();
+            }
+            // the report of a finish; any other mesh tool leaves none
+            SCAN_MESH => {
+                self.manual_finish = out.get("finish").and_then(FinishSnap::from_json);
+            }
             SCAN_UNDO | SCAN_REDO => self.selection = None,
             _ => {}
         }
@@ -483,7 +521,6 @@ impl ScanUi {
 
     /// Hands what the view shows to the viewport, when it changed.
     fn sync_view(&mut self, ui: &Ui) {
-        let content = self.content();
         let Some(snap) = self.snap.clone() else {
             return;
         };
@@ -492,6 +529,17 @@ impl ScanUi {
         if std::mem::replace(&mut self.calibrating_before, calibrating) && !calibrating {
             self.refit();
         }
+        // an automatic scan that ended shows its result, framed: the
+        // finished mesh when it made one, else the points
+        if JobSnap::running(snap.auto.as_ref()).is_some() {
+            self.auto_pending = true;
+        } else if self.auto_pending && !snap.live() && snap.cloud.is_some() {
+            self.auto_pending = false;
+            self.show_surface =
+                snap.mesh.is_some() && snap.auto.as_ref().is_some_and(|j| j.finish.is_some());
+            self.refit();
+        }
+        let content = self.content();
         let c = *colors(ui);
         let key = ShownKey {
             content,
@@ -1131,6 +1179,34 @@ impl ScanUi {
                 out.push(Act::Run(SCAN_MESH_BUILD, json!({ "resolution_mm": mm })));
             }
         });
+        ui.add_enabled_ui(has_cloud && !busy, |ui| {
+            // a scan with stops (the automatic scan) can be rebuilt finer
+            ui.add_space(12.0);
+            sub_heading(ui, "scan-rebuild-title");
+            caption(ui, t("scan-rebuild-hint"));
+            ui.add_space(6.0);
+            self.table.quality_ui(ui, false);
+            ui.add_space(6.0);
+            if Button::secondary(t("scan-rebuild-stops"))
+                .icon(ic::ARROWS_CLOCKWISE)
+                .enabled(has_cloud && !busy)
+                .full_width(true)
+                .show(ui)
+                .clicked()
+            {
+                out.push(Act::Run(
+                    SCAN_RECONSTRUCT,
+                    json!({
+                        "resolution_mm": self.table.resolution_mm(),
+                        "refine": self.table.refine,
+                    }),
+                ));
+            }
+            if let Some(r) = &self.manual_recon {
+                ui.add_space(6.0);
+                recon_report(ui, r);
+            }
+        });
 
         // 4 surface tools
         step(ui, 4, "scan-step-tools");
@@ -1491,6 +1567,16 @@ impl ScanUi {
                 .show(ui)
                 .clicked()
         };
+        if button(ui, "scan-finish-mesh", ic::MAGIC_WAND) {
+            out.push(Act::Run(SCAN_MESH, json!({ "op": "finish" })));
+        }
+        ui.add_space(2.0);
+        caption(ui, t("scan-finish-mesh-hint"));
+        if let Some(f) = &self.manual_finish {
+            ui.add_space(4.0);
+            finish_report(ui, f);
+        }
+        ui.add_space(10.0);
         widgets::labeled_slider(
             ui,
             &t("scan-hole-size"),

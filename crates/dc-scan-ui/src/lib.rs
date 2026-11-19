@@ -168,6 +168,7 @@ const KNOWN_CODES: &[&str] = &[
     "calibration-inaccurate",
     "calibration-implausible",
     "scan-quality-low",
+    "scan-no-stops",
 ];
 
 impl ScanFailure {
