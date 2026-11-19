@@ -363,3 +363,9 @@ support-diagnostics-on = La diagnostica anonima è attiva. Puoi disattivarla dal
 support-diagnostics-off = La diagnostica anonima è disattivata. Puoi attivarla dal menu account.
 support-diagnostics-unset = Diagnostica anonima: non hai ancora scelto. Scegli dal menu account.
 support-diagnostics-show = Mostra cosa viene inviato
+
+## Comandi della finestra per gli agenti
+app-cmd-menu-select = Seleziona una voce del menu
+app-cmd-menu-select-doc = Seleziona una voce del menu del progetto aperto, come un clic su di essa: l'ispettore mostra i suoi parametri, il pulsante che la esegue e i suoi strumenti; non viene eseguito nulla. Parametro: id, l'id della voce o del comando che il suo ispettore esegue (per esempio aligners.teeth.find).
+app-cmd-window-screenshot = Istantanea della finestra
+app-cmd-window-screenshot-doc = Scrive la finestra così come la vede l'utente (menu, ispettore, vista 3D, finestre aperte) in un file PNG al fotogramma successivo. Parametro: path, il file PNG. Risponde con path, width e height.

@@ -363,3 +363,9 @@ support-diagnostics-on = Anonymous diagnostics are on. You can turn them off in 
 support-diagnostics-off = Anonymous diagnostics are off. You can turn them on in the account menu.
 support-diagnostics-unset = Anonymous diagnostics: you have not chosen yet. Choose in the account menu.
 support-diagnostics-show = Show what is sent
+
+## Agent commands of the window
+app-cmd-menu-select = Select a menu entry
+app-cmd-menu-select-doc = Selects an entry of the menu of the open project, as a click on it does: its inspector shows its parameters, its run button and its tools; nothing runs. Parameter: id, the id of the entry or of the command its inspector runs (for example aligners.teeth.find).
+app-cmd-window-screenshot = Screenshot of the window
+app-cmd-window-screenshot-doc = Writes the window as the user sees it (menu, inspector, 3D view, open dialogs) to a PNG file at the next frame. Parameter: path, the PNG file. Answers path, width and height.

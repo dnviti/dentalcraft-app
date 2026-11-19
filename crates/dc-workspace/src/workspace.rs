@@ -626,6 +626,19 @@ impl Workspace {
         self.menu_view.reveal(&self.menu, id);
     }
 
+    /// Selects the menu entry `id`, or else the leaf that runs command `id`,
+    /// as a click on it does ([`Workspace::select_item`]): its id, or
+    /// `None` when the menu has neither (an agent's click).
+    pub fn select_entry(&mut self, id: &str) -> Option<&'static str> {
+        let items = || self.menu.iter().map(|(_, i)| i);
+        let found = items()
+            .find(|i| i.id == id)
+            .or_else(|| items().find(|i| i.command_id() == Some(id)))?
+            .id;
+        self.select_item(found);
+        Some(found)
+    }
+
     /// Selects the leaf of the menu that runs `command_id`; `false` when the
     /// menu has none.
     pub(crate) fn select_command(&mut self, command_id: &str) -> bool {

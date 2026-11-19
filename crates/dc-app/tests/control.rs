@@ -85,6 +85,7 @@ fn bridge_runs_commands_through_the_workspace() {
     h.run_steps(2);
     let project = dir.path().join("bridge.dcprj");
     let project_s = project.to_string_lossy().into_owned();
+    let dir_s = dir.path().to_string_lossy().into_owned();
 
     let client = std::thread::spawn(move || {
         let mut c = Client::connect(port);
@@ -115,6 +116,46 @@ fn bridge_runs_commands_through_the_workspace() {
         assert_eq!(c.scans(), 0);
         assert_eq!(c.call("redo", json!({})).unwrap()["done"], true);
         assert_eq!(c.scans(), 1);
+
+        // a click on the menu, by id or by the command of its inspector:
+        // it selects, nothing runs
+        assert!(ids.contains(&"app.menu.select"));
+        let by_command = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": "aligners.teeth.find"}}),
+            )
+            .unwrap();
+        let leaf = by_command["selected"].as_str().unwrap().to_owned();
+        let by_id = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": leaf}}),
+            )
+            .unwrap();
+        assert_eq!(by_id["selected"], by_command["selected"]);
+        assert_eq!(c.scans(), 1);
+        let none = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": "no.such"}}),
+            )
+            .unwrap_err();
+        assert_eq!(none["code"], -32602, "{none}");
+        // the window as the user sees it: this harness draws no pixels
+        assert!(ids.contains(&"app.window.screenshot"));
+        let shot = format!("{dir_s}/window.png");
+        let e = c
+            .call(
+                "execute",
+                json!({"id": "app.window.screenshot", "params": {"path": shot}}),
+            )
+            .unwrap_err();
+        assert!(e["message"].as_str().unwrap().contains("no image"), "{e}");
+        let e = c
+            .call("execute", json!({"id": "app.window.screenshot"}))
+            .unwrap_err();
+        assert_eq!(e["code"], -32602, "{e}");
 
         let outs = c
             .call(

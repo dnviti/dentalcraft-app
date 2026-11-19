@@ -45,6 +45,14 @@
 //! (the first-start question is answered), `send` sends the waiting
 //! reports now and answers when the server did.
 //!
+//! `list` also has `app.menu.select` (source `app`, parameter `id`: a menu
+//! entry, or the command its inspector runs): it selects that entry of the
+//! open project as a click does, so the inspector shows; it never runs
+//! anything (the menu law). Then `execute` runs the function, as its
+//! inspector's button does. `app.window.screenshot` (parameter `path`)
+//! writes the window as the user sees it to a PNG file (a GPU read-back of
+//! the next frame; it does not wait for the jobs).
+//!
 //! `list` also has the scanner's commands `scan.*` and the turntable's
 //! `turntable.*` (`dc_scanner::control`): they run on the scan controller
 //! of the open workspace, the one its scan window shows, in the same queue
@@ -74,7 +82,7 @@ use std::time::Duration;
 use base64::Engine;
 use dc_case::CaseState;
 use dc_command::{Command, CommandError, JobCtx};
-use dc_module_api::CommandSpec;
+use dc_module_api::{CommandOutput, CommandSpec};
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::builtins;
@@ -300,6 +308,71 @@ fn serve_connection(stream: TcpStream, tx: &mpsc::Sender<Request>, waker: &Waker
     }
 }
 
+/// `app.menu.select`: selects an entry of the menu of the open project, as a
+/// click on it does: its inspector shows, nothing runs (the menu law).
+pub const MENU_SELECT: &str = "app.menu.select";
+
+fn menu_select_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "MenuSelectParams",
+        "type": "object",
+        "properties": {
+            "id": {
+                "description": "The menu entry: its id, or the id of the command its inspector runs (for example aligners.teeth.find).",
+                "type": "string"
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    })
+}
+
+/// `app.window.screenshot`: the window as the user sees it, as a PNG file.
+pub const WINDOW_SCREENSHOT: &str = "app.window.screenshot";
+
+fn window_screenshot_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowScreenshotParams",
+        "type": "object",
+        "properties": {
+            "path": {
+                "description": "The PNG file to write (absolute path).",
+                "type": "string"
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
+}
+
+fn run_by_the_app(_: &CaseState, _: &Value, _: &JobCtx) -> Result<CommandOutput, CommandError> {
+    Err(CommandError::Invalid(
+        "app command: the app bridge runs it".into(),
+    ))
+}
+
+/// The commands of the app window itself (source `app`).
+fn window_specs() -> Vec<CommandSpec> {
+    vec![
+        CommandSpec {
+            id: MENU_SELECT,
+            label_key: "app-cmd-menu-select",
+            doc_key: "app-cmd-menu-select-doc",
+            params_schema: menu_select_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_SCREENSHOT,
+            label_key: "app-cmd-window-screenshot",
+            doc_key: "app-cmd-window-screenshot-doc",
+            params_schema: window_screenshot_params,
+            run: run_by_the_app,
+        },
+    ]
+}
+
 /// A [`CommandSpec`] bound to its parameters that keeps the JSON output of
 /// its run (the workspace's undo stack only keeps the state).
 struct Capturing {
@@ -377,12 +450,33 @@ fn idle(ws: &mut Workspace) -> bool {
     ws.wait_for_jobs(Duration::ZERO)
 }
 
+/// How long `app.window.screenshot` waits for the window's image.
+const SCREENSHOT_WAIT: Duration = Duration::from_secs(5);
+
+/// Writes `img` to `path` as PNG; answers `{path, width, height}`.
+fn write_png(path: &Path, img: &egui::ColorImage) -> Result<Value, String> {
+    let [w, h] = img.size;
+    let rgba: Vec<u8> = img
+        .pixels
+        .iter()
+        .flat_map(|p| p.to_srgba_unmultiplied())
+        .collect();
+    let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| "the window image has a wrong size".to_owned())?;
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json!({ "path": path.display().to_string(), "width": w, "height": h }))
+}
+
 /// The app as the bridge sees it: the shell plus the view parameters set
 /// with `view.set`.
 pub struct Bridge {
     /// The application.
     pub app: DentalCraftApp,
     view: Map<String, Value>,
+    /// The context of the window, once it drew a frame.
+    ctx: Option<egui::Context>,
 }
 
 impl Bridge {
@@ -391,7 +485,33 @@ impl Bridge {
         Self {
             app,
             view: Map::new(),
+            ctx: None,
         }
+    }
+
+    /// `app.window.screenshot`: the window as the user sees it, read back
+    /// from the GPU at the next frame, written to `path` as PNG.
+    fn window_screenshot(&mut self, params: &Value) -> Step {
+        let path = match str_param(params, "path") {
+            Ok(p) => PathBuf::from(p),
+            Err(e) => return Step::Done(Err(e)),
+        };
+        let Some(ctx) = self.ctx.clone() else {
+            return Step::Done(Err(RpcError::host("the window has not drawn yet")));
+        };
+        let (tx, rx) = mpsc::channel();
+        ctx.request_screenshot(move |img| {
+            let _ = tx.send(img);
+        });
+        ctx.request_repaint();
+        let deadline = std::time::Instant::now() + SCREENSHOT_WAIT;
+        Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
+            Ok(img) => Some(write_png(&path, &img).map_err(RpcError::host)),
+            Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < deadline => None,
+            Err(_) => Some(Err(RpcError::host(
+                "the window gave no image (no GPU read-back)",
+            ))),
+        }))
     }
 
     /// The commands: the session built-ins, the scanner's (`scan.*`, run on
@@ -423,6 +543,7 @@ impl Bridge {
                 .into_iter()
                 .map(|s| (dc_diagnostics::commands::SOURCE, s)),
         );
+        out.extend(window_specs().into_iter().map(|s| ("app", s)));
         out
     }
 
@@ -505,7 +626,8 @@ impl Bridge {
         self.app.workspace_mut().is_none_or(idle)
     }
 
-    /// Runs command `id` once the jobs already running are done.
+    /// Runs command `id` once the jobs already running are done (a window
+    /// screenshot at once).
     fn execute(&mut self, id: &str, params: Value) -> Step {
         let spec = match self.find(id) {
             Ok((_, s)) => s,
@@ -513,6 +635,9 @@ impl Bridge {
         };
         if dc_scanner::control::is_scan_command(spec.id) {
             return Self::execute_scan(spec.id, params);
+        }
+        if spec.id == WINDOW_SCREENSHOT {
+            return self.window_screenshot(&params);
         }
         let mut running: Option<Wait> = None;
         Step::Wait(Box::new(move |b: &mut Bridge| {
@@ -683,6 +808,17 @@ impl Bridge {
                 }
                 _ => Err(invalid("parameters: expected an object".into())),
             },
+            // a click on the menu: selects, never runs
+            MENU_SELECT => {
+                let id = match str_param(params, "id") {
+                    Ok(id) => id.to_owned(),
+                    Err(e) => return Step::Done(Err(e)),
+                };
+                self.workspace().and_then(|ws| match ws.select_entry(&id) {
+                    Some(selected) => Ok(json!({ "selected": selected })),
+                    None => Err(invalid(format!("no menu entry {id}"))),
+                })
+            }
             // the installation, not the case: through the update dialog
             dc_update::commands::CHECK => {
                 if let Err(e) = self.app.agent_update_check() {
@@ -1040,6 +1176,7 @@ impl ControlledApp {
         if !self.server.waker_set {
             let ctx = ui.ctx().clone();
             self.server.set_waker(move || ctx.request_repaint());
+            self.bridge.ctx = Some(ui.ctx().clone());
         }
         if self.server.pump(&mut self.bridge) {
             // a request waits for a job: keep polling
