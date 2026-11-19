@@ -2309,10 +2309,8 @@ mod tests {
         );
         assert!(r.refined > 0 && r.stops > 0 && r.faces > 0, "{r:?}");
         assert!((r.resolution_mm.unwrap() - 0.5).abs() < 1e-3, "{r:?}");
-        assert!(
-            f.faces_after > 0 && f.faces_after <= f.faces_before,
-            "{f:?}"
-        );
+        // closing holes can add triangles as much as optimising removes them
+        assert!(f.faces_before > 0 && f.faces_after > 0, "{f:?}");
         let mesh = snap.mesh.as_ref().expect("the finished mesh");
         assert_eq!(mesh.face_count() as u64, f.faces_after);
         // the view shows the mesh and the window its report

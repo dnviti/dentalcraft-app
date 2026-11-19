@@ -196,3 +196,47 @@ fn the_button_of_any_screen_opens_the_window_and_starts_nothing() {
     h.step();
     assert!(!h.state().scan.is_open());
 }
+
+#[test]
+fn an_agent_closes_the_window_once_the_scan_is_done() {
+    let mut host = Host::default();
+    host.scan.set_target(ScanTarget::new([ScanRole::Lower]));
+    host.ok(
+        "scan.connect",
+        json!({
+            "backend": "sim",
+            "device": "sim-typodont-lower",
+            "options": { "realtime": false, "frames": 20, "width": 160, "height": 100 },
+        }),
+    );
+    assert!(host.scan.is_open());
+    host.ok("scan.start", Value::Null);
+    // a scan under way is not closed under the agent
+    let refused = host.run("scan.close", Value::Null).unwrap_err();
+    assert!(refused.starts_with("invalid-state"), "{refused}");
+    assert!(
+        host.scan.is_open(),
+        "the refused close left the window open"
+    );
+    let start = Instant::now();
+    while host.ok("scan.status", Value::Null)["frames"].as_u64() != Some(20) {
+        assert!(start.elapsed() < WAIT, "the frames did not come");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    host.ok("scan.stop", Value::Null);
+    host.ok("scan.mesh-build", json!({ "resolution_mm": 0.6 }));
+    host.ok("scan.import", json!({ "role": "lower" }));
+    assert_eq!(host.taken.len(), 1);
+    // imported: the agent closes the window, which disconnects the scanner
+    assert!(host.scan.is_open());
+    host.ok("scan.close", Value::Null);
+    assert!(!host.scan.is_open(), "scan.close closes the window");
+    assert!(!host.scan.is_busy());
+    // the imported file stays the host's
+    assert!(host.taken[0].path().is_file());
+    // closed twice is fine, and does not open it again
+    host.ok("scan.close", Value::Null);
+    assert!(!host.scan.is_open());
+    let status = host.ok("scan.status", Value::Null);
+    assert_eq!(status["state"], json!("idle"), "{status}");
+}

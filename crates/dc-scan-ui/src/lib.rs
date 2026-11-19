@@ -632,6 +632,11 @@ impl ScanPopup {
             log_failure(id, f);
         }
         self.ui.after(id, &r);
+        // `scan.close` ended the session on the controller: the window goes
+        // with it (refused while a scan or a job runs: it stays)
+        if id == control::SCAN_CLOSE && r.is_ok() {
+            self.ui.close();
+        }
         self.finish(ticket, origin, r);
     }
 }
@@ -655,7 +660,10 @@ fn log_failure(command: &str, f: &ScanFailure) {
         "empty",
     ];
     let code = f.code.as_str();
-    if matches!(code, "cancelled" | "busy" | "turntable-busy") {
+    // a refused `scan.close` (a scan or a job runs) is an answer, no fault
+    if matches!(code, "cancelled" | "busy" | "turntable-busy")
+        || (command == control::SCAN_CLOSE && code == "invalid-state")
+    {
         return;
     }
     let source = if ["turntable", "ble", "rig"]
@@ -718,8 +726,8 @@ fn role_of(name: Option<&str>) -> Option<ScanRole> {
     ALL_ROLES.into_iter().find(|&r| role_id(r) == name)
 }
 
-/// The scan and turntable commands that only read: an agent asking them
-/// does not open the window.
+/// The scan and turntable commands that only read, or that close the
+/// window: an agent asking them does not open it.
 fn reads_only(id: &str) -> bool {
     matches!(
         id,
@@ -728,6 +736,7 @@ fn reads_only(id: &str) -> bool {
             | control::TURNTABLE_DEVICES
             | control::TURNTABLE_STATUS
             | control::TURNTABLE_CALIBRATION
+            | control::SCAN_CLOSE
     )
 }
 
