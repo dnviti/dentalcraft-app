@@ -158,9 +158,18 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
     // The overlay toggle keeps its own room at the right (the widest label
     // is the Italian one); the transport and the readout or hint share what
     // is left, and the hint is cut with an ellipsis rather than run under it.
+    // In a narrow 3D view the toggle drops its label (it stays its tooltip
+    // and accessible name), so no control of the row is ever cut.
     // (The arch toggles live in the viewport toolbar.)
     let toggle_gap = 16.0;
-    let toggles_w = widgets::toggle_width(ui, &t("ws-tl-overlay0"));
+    let label = t("ws-tl-overlay0");
+    let compact =
+        ui.available_width() < TRANSPORT_WIDTH + toggle_gap + widgets::toggle_width(ui, &label);
+    let toggles_w = if compact {
+        widgets::toggle_width(ui, "")
+    } else {
+        widgets::toggle_width(ui, &label)
+    };
     let row_h = 36.0;
     let mut hint_below = false;
     ui.horizontal(|ui| {
@@ -178,7 +187,11 @@ pub(crate) fn show(ui: &mut Ui, model: &TimelineModel, st: &mut TimelineState) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = toggle_gap;
-            widgets::toggle(ui, &mut st.overlay0, t("ws-tl-overlay0"));
+            if compact {
+                widgets::toggle_compact(ui, &mut st.overlay0, label);
+            } else {
+                widgets::toggle(ui, &mut st.overlay0, label);
+            }
         });
     });
     ui.add_space(6.0);

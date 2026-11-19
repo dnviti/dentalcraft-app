@@ -195,6 +195,9 @@ impl DentalCraftApp {
             .map_or(AuthState::SignedOut, AuthClient::state);
         let new_project = NewProjectState::new(&deps.store.dirs().projects);
         let new_project_scan = ScanPopup::new(deps.render_state.clone());
+        if let Some(w) = settings.scan_steps_width {
+            dc_scan_ui::restore_steps_width(w as f32);
+        }
         Self {
             store: deps.store,
             settings,
@@ -321,6 +324,14 @@ impl DentalCraftApp {
             self.start_diagnostics();
         }
         self.poll_background(&ctx);
+        // the steps panel of a scan window resized by the user: saved
+        if let Some(w) = dc_scan_ui::take_resized_steps_width() {
+            let w = Some(w.round() as u32);
+            if self.settings.scan_steps_width != w {
+                self.settings.scan_steps_width = w;
+                self.store.save_settings(&self.settings);
+            }
+        }
         // leaving the form closes its scan window and drops the surfaces of
         // the scanner with their files
         if self.screen != Screen::NewProject {
@@ -383,12 +394,17 @@ impl DentalCraftApp {
         if !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
+        // the log says why the app ended (a close of the window: its button,
+        // the dock's "Quit", the session; an exit with an error says so)
         if !self.close_requested() {
+            tracing::info!("the window was asked to close: the open project is saved first");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         } else if !self.finish_update_on_close() {
             // the restart into the new version failed: the dialog says why
             self.closing = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        } else {
+            tracing::info!("the window was asked to close: closing");
         }
     }
 

@@ -40,13 +40,14 @@ use dc_scanner::{
 use dc_scene::MeshColoring;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
+use dc_ui::panels::{Side, SidePanel};
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_viewport::camera::look_rotation;
 use dc_viewport::{ViewMesh, ViewPoints, Viewport};
 use egui::{
     Align, Align2, Color32, Id, Key, Layout, Margin, Modal, Modifiers, PointerButton, Pos2, Rect,
-    RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
+    RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, vec2,
 };
 use framing::Follow;
 use glam::Vec3;
@@ -64,8 +65,39 @@ use crate::{
 /// Resolutions of the surface (mm): Fine, Standard, Fast; the fourth choice
 /// is the custom value.
 const RESOLUTIONS: [f32; 3] = [0.15, 0.3, 0.6];
-/// Width of the steps panel.
-const PANEL_WIDTH: f32 = 340.0;
+/// The width of the steps panel the user chose (every scan window shares
+/// it), and whether they resized it since the host last saved it.
+static STEPS_WIDTH: std::sync::Mutex<(Option<f32>, bool)> = std::sync::Mutex::new((None, false));
+
+fn steps_width() -> f32 {
+    let saved = STEPS_WIDTH.lock().map_or(None, |s| s.0);
+    saved.unwrap_or(dc_ui::tokens::tokens().size.scan_steps_width)
+}
+
+fn set_steps_width(width: f32, resized: bool) {
+    if let Ok(mut s) = STEPS_WIDTH.lock() {
+        s.0 = Some(width);
+        s.1 |= resized;
+    }
+}
+
+/// Sets the width of the steps panel of the scan windows (the saved one).
+pub fn restore_steps_width(width: f32) {
+    let sz = dc_ui::tokens::tokens().size;
+    if width.is_finite()
+        && let Ok(mut s) = STEPS_WIDTH.lock()
+    {
+        s.0 = Some(width.clamp(sz.scan_steps_min_width, sz.scan_steps_max_width));
+    }
+}
+
+/// The width of the steps panel once the user finished resizing it (a drag
+/// of its edge, or a double-click that restores the default): the host
+/// saves it.
+pub fn take_resized_steps_width() -> Option<f32> {
+    let mut s = STEPS_WIDTH.lock().ok()?;
+    std::mem::take(&mut s.1).then(|| s.0).flatten()
+}
 /// Frames per second of the live view while scanning.
 const LIVE_FRAME: Duration = Duration::from_millis(66);
 /// Height of the 3D view's starting viewpoint above the platter, as an
@@ -657,19 +689,34 @@ impl ScanUi {
         ui.add_space(8.0);
         self.status_row(ui);
         ui.add_space(10.0);
+        // the steps at the right, as wide as the user dragged their edge
+        // (double-click: back to the default); the 3D view keeps the rest
         let body = ui.available_rect_before_wrap();
-        let panel = Rect::from_min_max(pos2(body.right() - PANEL_WIDTH, body.top()), body.max);
-        let view = Rect::from_min_max(body.min, pos2(panel.left() - 12.0, body.bottom()));
-        ui.scope_builder(UiBuilder::new().max_rect(view), |ui| {
-            self.view(ui, view);
-        });
-        ui.scope_builder(UiBuilder::new().max_rect(panel), |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_width(PANEL_WIDTH - 12.0);
-                    self.steps(ui, busy, out);
-                });
+        ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+            let sz = dc_ui::tokens::tokens().size;
+            let mut width = steps_width();
+            let r = SidePanel::new(
+                Side::Right,
+                "dc-scan-steps",
+                sz.scan_steps_width,
+                sz.scan_steps_min_width..=sz.scan_steps_max_width,
+            )
+            .reserve(sz.viewport_min_width)
+            .frame(egui::Frame::new().inner_margin(Margin {
+                left: 12,
+                ..Margin::ZERO
+            }))
+            .show(ui, &mut width, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("dc-scan-steps-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.steps(ui, busy, out));
+            });
+            set_steps_width(width, r.resized);
+            let view = ui.available_rect_before_wrap();
+            ui.scope_builder(UiBuilder::new().max_rect(view), |ui| {
+                self.view(ui, view);
+            });
         });
         ui.allocate_rect(body, Sense::hover());
     }

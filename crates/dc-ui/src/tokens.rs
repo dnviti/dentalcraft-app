@@ -280,6 +280,11 @@ pub struct Sizes {
     pub inspector_max_width: f32,
     /// The 3D view keeps at least this width beside the side panels.
     pub viewport_min_width: f32,
+    /// Default width of the steps panel of the scan window; the user drags
+    /// it within `scan_steps_min_width..=scan_steps_max_width`.
+    pub scan_steps_width: f32,
+    pub scan_steps_min_width: f32,
+    pub scan_steps_max_width: f32,
     pub timeline_height: f32,
     pub button_h: f32,
     pub button_h_large: f32,

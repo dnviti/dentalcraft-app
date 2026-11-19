@@ -114,7 +114,7 @@ fn main() -> eframe::Result {
         },
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "DentalCraft",
         options,
         Box::new(move |cc| {
@@ -141,5 +141,10 @@ fn main() -> eframe::Result {
                 None => Box::new(app),
             })
         }),
-    )
+    );
+    match &result {
+        Ok(()) => tracing::info!("DentalCraft ended: the window closed"),
+        Err(e) => tracing::error!("DentalCraft ended with an error: {e}"),
+    }
+    result
 }

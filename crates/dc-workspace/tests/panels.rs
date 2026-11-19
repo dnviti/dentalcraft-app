@@ -6,6 +6,7 @@ use dc_workspace::{PanelWidths, Workspace, WorkspaceLayout};
 use dca_module::AlignersModule;
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, Vec2, pos2, vec2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 
 /// The workspace in a window of `size`, with the panels `widths` wide.
 fn harness(size: Vec2, widths: Option<PanelWidths>) -> Harness<'static, Workspace> {
@@ -120,6 +121,17 @@ fn chosen_widths_stay_in_their_ranges_and_leave_the_view_its_room() {
     assert_view_fills_the_centre(&l, "1280x800 at the maximum");
     assert!(l.view.width() >= sz.viewport_min_width - 0.5, "{l:?}");
     assert!(l.menu.width() >= sz.left_menu_min_width, "{l:?}");
+    // the timeline under the narrowest view keeps every control in it: the
+    // overlay toggle drops its label but stays (its name is the label)
+    let toggle = h
+        .get_all_by_label("Overlay stage 0")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the overlay toggle");
+    assert!(
+        toggle.left() >= l.view.left() && toggle.right() <= l.view.right(),
+        "{toggle:?} is cut by {l:?}"
+    );
     // the choice is kept for a larger window
     assert_eq!(h.state().panel_widths(), widths);
 }

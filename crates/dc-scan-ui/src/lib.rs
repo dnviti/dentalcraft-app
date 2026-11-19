@@ -61,7 +61,7 @@ use egui::{RichText, Ui};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-pub use popup::{scan_button, scan_button_width};
+pub use popup::{restore_steps_width, scan_button, scan_button_width, take_resized_steps_width};
 
 use popup::ScanUi;
 

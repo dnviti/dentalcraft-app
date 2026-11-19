@@ -118,6 +118,9 @@ pub struct Settings {
     /// Width (points) of the workspace's inspector the user dragged it to;
     /// the design's width when absent.
     pub inspector_width: Option<u32>,
+    /// Width (points) of the steps panel of the scan window the user
+    /// dragged it to; the design's width when absent.
+    pub scan_steps_width: Option<u32>,
 }
 
 impl Default for Settings {
@@ -132,6 +135,7 @@ impl Default for Settings {
             install_id: None,
             menu_width: None,
             inspector_width: None,
+            scan_steps_width: None,
         }
     }
 }

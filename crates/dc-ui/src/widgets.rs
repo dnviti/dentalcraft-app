@@ -567,12 +567,31 @@ pub fn toggle_width(ui: &Ui, label: &str) -> f32 {
 
 /// Toggle switch (track 36 x 20, knob 14) with a label on its right.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
-    let c = *colors(ui);
+    toggle_impl(ui, on, label.into(), true)
+}
+
+/// [`toggle`] without the visible label, for a row with no room for it:
+/// the label stays its accessible name and becomes its tooltip.
+pub fn toggle_compact(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
     let label = label.into();
+    toggle_impl(ui, on, label.clone(), false).on_hover_text(label)
+}
+
+fn toggle_impl(ui: &mut Ui, on: &mut bool, label: String, show_label: bool) -> Response {
+    let c = *colors(ui);
+    let shown = if show_label {
+        label.clone()
+    } else {
+        String::new()
+    };
     let galley = ui
         .painter()
-        .layout_no_wrap(label.clone(), fonts::ui(13.0), c.text_primary);
-    let gap = if label.is_empty() { 0.0 } else { 8.0 };
+        .layout_no_wrap(shown, fonts::ui(13.0), c.text_primary);
+    let gap = if !show_label || label.is_empty() {
+        0.0
+    } else {
+        8.0
+    };
     let size = vec2(36.0 + gap + galley.size().x, 24.0_f32.max(galley.size().y));
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
