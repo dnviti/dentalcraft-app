@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.0-alpha.11](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.10...v0.2.0-alpha.11) (2026-11-19)
+
+
+### Features
+
+* **app:** select a menu entry and take a window screenshot from the bridge ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **app:** set the view of the window from the bridge ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** best-quality automatic scan with the finished surface ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** scan.close closes the scan window for an agent ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** show a turntable link drop, the processing phase and the rejected views ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** stop-and-capture by default, show the scan quality and calibration reports ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+
+
+### Bug Fixes
+
+* **app:** 60 fps cap with vsync, resizable side panels that never slide under the 3D view ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **app:** resizable scan steps panel, timeline toggle never cut, log why the app ends ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **app:** run a menu leaf from the bridge as the button of its inspector ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **deps:** move to core v0.3.0-alpha.6 and aligners v0.2.0-alpha.10 ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** finish an ended calibration or automatic scan while the window only polls ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** keep the object framed in the scan popup, show the calibration fit, slower default turn ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** say when only the tilt of the calibration failed ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** show the table angle wrapped and frame the scan in the rig world ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **scan-ui:** start the 3D view from the scanner's side with +Z up ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **workspace:** a refused step's message goes with the next success ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+* **workspace:** wrap the long choices of the inspector at its narrowest width ([0d80225](https://github.com/dnviti-personal-org/dentalcraft-app/commit/0d80225aef49dd692db62c1298c95d4c0952cb28))
+
 ## [0.2.0-alpha.10](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.9...v0.2.0-alpha.10) (2026-11-18)
 
 
