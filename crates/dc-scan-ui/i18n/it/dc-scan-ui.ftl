@@ -202,6 +202,7 @@ scan-err-rig-uncalibrated = Il piatto rotante non è calibrato con questo scanne
 scan-err-calibration = Non è stato possibile calcolare la calibrazione da questa prova: riprova con un oggetto fermo e con una forma.
 scan-err-calibration-no-object = Non è stato trovato nessun oggetto sul piatto. Mettici un oggetto fermo e con una forma e tieni libero il resto del piatto.
 scan-err-calibration-tracking = Lo scanner ha perso l'oggetto mentre il piatto girava. Usa un oggetto opaco e con una forma, a circa 20 cm dallo scanner, e riprova.
+scan-err-calibration-tilt = La rotazione del piatto è stata misurata, ma non la sua inclinazione: le viste con il piatto inclinato non combaciano. Fissa l'oggetto perché non scivoli, tienilo inquadrato quando il piatto si inclina e calibra di nuovo.
 scan-err-calibration-inaccurate = L'asse misurato è troppo incerto per essere usato. Fissa l'oggetto perché non scivoli e calibra di nuovo.
 scan-err-calibration-implausible = L'asse misurato non è dove può stare il piatto. Controlla che lo scanner guardi il piatto dall'alto e calibra di nuovo.
 scan-err-scan-quality-low = Sono state registrate troppo poche viste per fidarsi di questa scansione. Controlla la calibrazione e l'oggetto, poi acquisisci di nuovo.

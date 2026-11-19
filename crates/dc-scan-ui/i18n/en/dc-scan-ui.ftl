@@ -202,6 +202,7 @@ scan-err-rig-uncalibrated = The turntable is not calibrated with this scanner: c
 scan-err-calibration = The calibration could not be computed from this run: try again with a still object with some shape.
 scan-err-calibration-no-object = No object was found on the platter. Put a still object with some shape on it and keep the rest of the platter clear.
 scan-err-calibration-tracking = The scanner lost the object while the platter turned. Use a matte object with some shape, keep it about 20 cm from the scanner and try again.
+scan-err-calibration-tilt = The turn of the platter was measured, but not its tilt: the views with the platter tilted could not be matched. Fix the object so it cannot slip, keep it in view when the platter tilts and calibrate again.
 scan-err-calibration-inaccurate = The measured axis is too uncertain to use. Fix the object so it cannot slip and calibrate again.
 scan-err-calibration-implausible = The measured axis is not where the platter can be. Check that the scanner looks down at the platter and calibrate again.
 scan-err-scan-quality-low = Too few views were registered to trust this scan. Check the calibration and the object, then scan again.
