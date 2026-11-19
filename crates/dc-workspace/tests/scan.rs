@@ -325,9 +325,14 @@ fn the_turntable_block_connects_the_simulated_turntable() {
         h.query_by_role_and_label(Role::Button, "Disconnect the turntable")
             .is_some()
     );
-    // without a calibration the automatic scan asks first; "Calibrate
-    // first" goes back to the calibration
-    if h.query_by_label("Not calibrated yet").is_some() {
+    // without a calibration of this rig (none, or the one of a real rig of
+    // this computer: the test reads the user's data directory) the
+    // automatic scan asks first; "Calibrate first" goes back to the
+    // calibration
+    let other_rig = "made with another scanner or turntable";
+    if h.query_by_label("Not calibrated yet").is_some()
+        || h.query_by_label_contains(other_rig).is_some()
+    {
         let ticket = h
             .state_mut()
             .ws
@@ -357,6 +362,7 @@ fn the_turntable_block_connects_the_simulated_turntable() {
     }
     assert!(
         h.query_by_label("Not calibrated yet").is_some()
+            || h.query_by_label_contains(other_rig).is_some()
             || h.query_by_label_contains("Calibrated").is_some()
     );
     // the automatic scan waits for the scanner
