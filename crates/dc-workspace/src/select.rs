@@ -674,7 +674,7 @@ impl Workspace {
             Some(GizmoEvent::Drag(d)) => {
                 self.selection.preview = Some(d);
                 if let Some(ctx) = ctx {
-                    ctx.request_repaint();
+                    dc_ui::pacing::request_next_frame(ctx);
                 }
             }
             Some(GizmoEvent::Commit(d)) => {

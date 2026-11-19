@@ -15,7 +15,7 @@ use dc_project::LoadOutcome;
 use dc_scan_ui::ScanPopup;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_ui::{fonts, icons, theme, tokens};
-use dc_workspace::{Workspace, WorkspaceAction};
+use dc_workspace::{PanelWidths, Workspace, WorkspaceAction};
 use egui::{
     Align, Align2, CornerRadius, Frame, Key, Layout, Margin, Panel, RichText, Sense, Stroke,
     TextureHandle, Ui, vec2,
@@ -30,6 +30,7 @@ use crate::create_job::{
 use crate::diagnostics::{GpuInfo, SystemInfo};
 use crate::dialogs::{self, PendingDialog, Purpose, Spec};
 use crate::modules::{self, ModuleInfo};
+use crate::pacing::FramePacer;
 use crate::paint;
 use crate::screens::new_project::NewProjectState;
 use crate::screens::sign_in::SignInState;
@@ -159,6 +160,8 @@ pub struct DentalCraftApp {
     ctx: Option<egui::Context>,
     /// The open project is saved (or its user chose): the window may close.
     closing: bool,
+    /// Holds the frames of the window to the frame rate cap.
+    pacer: FramePacer,
 }
 
 impl DentalCraftApp {
@@ -192,6 +195,9 @@ impl DentalCraftApp {
             .map_or(AuthState::SignedOut, AuthClient::state);
         let new_project = NewProjectState::new(&deps.store.dirs().projects);
         let new_project_scan = ScanPopup::new(deps.render_state.clone());
+        if let Some(w) = settings.scan_steps_width {
+            dc_scan_ui::restore_steps_width(w as f32);
+        }
         Self {
             store: deps.store,
             settings,
@@ -223,6 +229,7 @@ impl DentalCraftApp {
             thumbs: HashMap::new(),
             ctx: None,
             closing: false,
+            pacer: FramePacer::default(),
         }
     }
 
@@ -242,6 +249,41 @@ impl DentalCraftApp {
     /// The installed modules registry.
     pub fn registry(&self) -> &ModuleRegistry {
         &self.registry
+    }
+
+    /// Waits before a frame of the window until the frame rate cap allows
+    /// it (eframe's `raw_input_hook`; see [`FramePacer`]).
+    pub fn pace_frame(&mut self, raw_input: &mut egui::RawInput) {
+        self.pacer.pace(raw_input);
+    }
+
+    /// The widths of the side panels of the workspace in the settings (the
+    /// design's where none were saved).
+    pub fn saved_panel_widths(&self) -> PanelWidths {
+        let d = PanelWidths::default();
+        PanelWidths {
+            menu: self.settings.menu_width.map_or(d.menu, |w| w as f32),
+            inspector: self
+                .settings
+                .inspector_width
+                .map_or(d.inspector, |w| w as f32),
+        }
+        .clamped()
+    }
+
+    /// Saves the widths of the side panels the user chose, for the next
+    /// workspace and the next start.
+    pub fn remember_panel_widths(&mut self, widths: PanelWidths) {
+        let w = widths.clamped();
+        let (menu, inspector) = (
+            Some(w.menu.round() as u32),
+            Some(w.inspector.round() as u32),
+        );
+        if (self.settings.menu_width, self.settings.inspector_width) != (menu, inspector) {
+            self.settings.menu_width = menu;
+            self.settings.inspector_width = inspector;
+            self.store.save_settings(&self.settings);
+        }
     }
 
     /// The open workspace, if any.
@@ -282,6 +324,14 @@ impl DentalCraftApp {
             self.start_diagnostics();
         }
         self.poll_background(&ctx);
+        // the steps panel of a scan window resized by the user: saved
+        if let Some(w) = dc_scan_ui::take_resized_steps_width() {
+            let w = Some(w.round() as u32);
+            if self.settings.scan_steps_width != w {
+                self.settings.scan_steps_width = w;
+                self.store.save_settings(&self.settings);
+            }
+        }
         // leaving the form closes its scan window and drops the surfaces of
         // the scanner with their files
         if self.screen != Screen::NewProject {
@@ -292,7 +342,11 @@ impl DentalCraftApp {
 
         if self.screen == Screen::Workspace {
             if let Some(ws) = &mut self.workspace {
-                match ws.show(ui) {
+                let action = ws.show(ui);
+                if let Some(widths) = ws.take_resized_panels() {
+                    self.remember_panel_widths(widths);
+                }
+                match action {
                     WorkspaceAction::None => {}
                     WorkspaceAction::GoHome | WorkspaceAction::Closed => {
                         self.workspace = None;
@@ -340,12 +394,17 @@ impl DentalCraftApp {
         if !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
+        // the log says why the app ended (a close of the window: its button,
+        // the dock's "Quit", the session; an exit with an error says so)
         if !self.close_requested() {
+            tracing::info!("the window was asked to close: the open project is saved first");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         } else if !self.finish_update_on_close() {
             // the restart into the new version failed: the dialog says why
             self.closing = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        } else {
+            tracing::info!("the window was asked to close: closing");
         }
     }
 
@@ -547,6 +606,7 @@ impl DentalCraftApp {
         };
         let mut ws = ws;
         ws.set_read_only(read_only);
+        ws.set_panel_widths(self.saved_panel_widths());
         self.workspace = Some(ws);
         self.screen = Screen::Workspace;
     }
@@ -1278,6 +1338,10 @@ fn read_thumbnail(path: &Path) -> Option<egui::ColorImage> {
 impl eframe::App for DentalCraftApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.pace_frame(raw_input);
     }
 }
 

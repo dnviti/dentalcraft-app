@@ -25,6 +25,7 @@ pub mod diagnostics;
 pub mod dialogs;
 pub mod logging;
 pub mod modules;
+pub mod pacing;
 mod paint;
 mod screens;
 pub mod support_client;

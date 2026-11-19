@@ -64,6 +64,17 @@ impl ViewChoice {
         }
     }
 
+    /// Name of the view for agents (`app.window.view`).
+    fn name(self) -> &'static str {
+        match self {
+            ViewChoice::Occlusal => "occlusal",
+            ViewChoice::Front => "front",
+            ViewChoice::Left => "left",
+            ViewChoice::Right => "right",
+            ViewChoice::Back => "back",
+        }
+    }
+
     /// The dc-viewport view; the occlusal view looks at the upper arch from
     /// below unless only the lower arch is shown.
     fn std_view(self, upper_shown: bool) -> StdView {
@@ -1052,6 +1063,7 @@ impl Workspace {
                 // the clicks and strokes go to the manual tool that is open,
                 // else to the selection and its gizmo
                 let vr = vp.ui(ui);
+                self.panels.layout.view = vr.response.rect;
                 // the tooth numbers, the Alt+click that chooses the brush tooth
                 // and the click on a number or a mark ("Delete a tooth")
                 let mark_click;
@@ -1123,7 +1135,7 @@ impl Workspace {
             None => {
                 ui.painter()
                     .rect_filled(rect, CornerRadius::ZERO, c.bg_viewport);
-                ui.allocate_rect(rect, Sense::hover());
+                self.panels.layout.view = ui.allocate_rect(rect, Sense::hover()).rect;
             }
         }
 
@@ -1394,6 +1406,59 @@ impl Workspace {
         if layers.study && none {
             self.toast(Toast::new(ToastLevel::Info, "ws-toast-study-none"));
         }
+    }
+
+    /// Sets the view of the window as the toolbar and the timeline do, for
+    /// an agent connected to the app (`app.window.view`): `view` a standard
+    /// view (`occlusal`, `front`, `left`, `right`, `back`), `stage` the
+    /// stage shown (at most the last one; the playback stops), `study` and
+    /// `target` the "Study models" and "Final position" layers (the final
+    /// position stays off, with its notice, in a case without one). What is
+    /// `None` stays. Answers what the view shows then.
+    ///
+    /// # Errors
+    /// An unknown view; nothing changes.
+    pub fn set_window_view(
+        &mut self,
+        view: Option<&str>,
+        stage: Option<u32>,
+        study: Option<bool>,
+        target: Option<bool>,
+    ) -> Result<serde_json::Value, String> {
+        let choice = match view {
+            None => None,
+            Some(v) => Some(
+                ViewChoice::ALL
+                    .into_iter()
+                    .find(|c| c.name() == v)
+                    .ok_or_else(|| {
+                        format!("unknown view {v}: occlusal, front, left, right or back")
+                    })?,
+            ),
+        };
+        if let Some(c) = choice {
+            self.set_view(c);
+        }
+        let last = TimelineModel::from_state(self.undo.current()).last();
+        if let Some(s) = stage {
+            self.timeline.current = s.min(last);
+            self.timeline.playing = false;
+        }
+        if study.is_some_and(|on| on != self.view.layers.study) {
+            self.toggle_study_layer();
+        }
+        if target.is_some_and(|on| on != self.view.layers.target) {
+            self.toggle_target_layer();
+        }
+        Ok(serde_json::json!({
+            "view": self.view.view.name(),
+            "stage": self.timeline.current,
+            "last_stage": last,
+            "study": self.view.layers.study,
+            "target": self.view.layers.target,
+            "study_shown": self.study_shown(),
+            "teeth_shown": self.teeth_shown(),
+        }))
     }
 
     /// The IPR layer on or off: a mark at each contact where the final

@@ -45,6 +45,17 @@
 //! (the first-start question is answered), `send` sends the waiting
 //! reports now and answers when the server did.
 //!
+//! `list` also has `app.menu.select` (source `app`, parameter `id`: a menu
+//! entry, or the command its inspector runs): it selects that entry of the
+//! open project as a click does, so the inspector shows; it never runs
+//! anything (the menu law). Then `execute` runs the function, as its
+//! inspector's button does. `app.window.screenshot` (parameter `path`)
+//! writes the window as the user sees it to a PNG file (a GPU read-back of
+//! the next frame; it does not wait for the jobs). `app.window.layout`
+//! (parameters `width` + `height`, `menu`, `inspector`, each optional) sizes
+//! the window and the side panels, as the user does by dragging, and
+//! answers where the menu, the inspector and the 3D view are.
+//!
 //! `list` also has the scanner's commands `scan.*` and the turntable's
 //! `turntable.*` (`dc_scanner::control`): they run on the scan controller
 //! of the open workspace, the one its scan window shows, in the same queue
@@ -74,12 +85,12 @@ use std::time::Duration;
 use base64::Engine;
 use dc_case::CaseState;
 use dc_command::{Command, CommandError, JobCtx};
-use dc_module_api::CommandSpec;
+use dc_module_api::{CommandOutput, CommandSpec};
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::builtins;
-use dc_workspace::{ScanTicket, Workspace};
-use egui::Ui;
+use dc_workspace::{PanelWidths, ScanTicket, Workspace};
+use egui::{Rect, Ui, Vec2};
 use serde_json::{Map, Value, json};
 
 use crate::DentalCraftApp;
@@ -300,6 +311,274 @@ fn serve_connection(stream: TcpStream, tx: &mpsc::Sender<Request>, waker: &Waker
     }
 }
 
+/// `app.menu.select`: selects an entry of the menu of the open project, as a
+/// click on it does: its inspector shows, nothing runs (the menu law).
+pub const MENU_SELECT: &str = "app.menu.select";
+
+fn menu_select_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "MenuSelectParams",
+        "type": "object",
+        "properties": {
+            "id": {
+                "description": "The menu entry: its id, or the id of the command its inspector runs (for example aligners.teeth.find).",
+                "type": "string"
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    })
+}
+
+/// `app.window.screenshot`: the window as the user sees it, as a PNG file.
+pub const WINDOW_SCREENSHOT: &str = "app.window.screenshot";
+
+fn window_screenshot_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowScreenshotParams",
+        "type": "object",
+        "properties": {
+            "path": {
+                "description": "The PNG file to write (absolute path).",
+                "type": "string"
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
+}
+
+/// `app.window.view`: what the 3D view of the window shows, as the toolbar
+/// and the timeline set it.
+pub const WINDOW_VIEW: &str = "app.window.view";
+
+fn window_view_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowViewParams",
+        "type": "object",
+        "properties": {
+            "view": {
+                "description": "Standard view of the camera.",
+                "type": "string",
+                "enum": ["occlusal", "front", "left", "right", "back"]
+            },
+            "stage": {
+                "description": "Stage shown on the timeline (0 = initial position; at most the last one).",
+                "type": "integer",
+                "minimum": 0
+            },
+            "study": {
+                "description": "The \"Study models\" layer.",
+                "type": "boolean"
+            },
+            "target": {
+                "description": "The \"Final position\" layer (the ghost of the teeth at their final position).",
+                "type": "boolean"
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// The optional boolean parameter `key`.
+fn opt_bool_param(params: &Value, key: &str) -> Result<Option<bool>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(RpcError::new(
+            codes::INVALID_PARAMS,
+            format!("parameter `{key}` must be a boolean"),
+        )),
+    }
+}
+
+/// The optional stage number parameter `key`.
+fn opt_u32_param(params: &Value, key: &str) -> Result<Option<u32>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                RpcError::new(
+                    codes::INVALID_PARAMS,
+                    format!("parameter `{key}` must be a whole number from 0"),
+                )
+            }),
+    }
+}
+
+/// The parameters of `app.window.view`: view, stage, study, target.
+type WindowViewArgs = (Option<String>, Option<u32>, Option<bool>, Option<bool>);
+
+fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
+    let known = ["view", "stage", "study", "target"];
+    if let Some(k) = params
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
+    {
+        return Err(RpcError::new(
+            codes::INVALID_PARAMS,
+            format!("{WINDOW_VIEW}: unknown parameter `{k}`"),
+        ));
+    }
+    Ok((
+        opt_str_param(params, "view")?.map(str::to_owned),
+        opt_u32_param(params, "stage")?,
+        opt_bool_param(params, "study")?,
+        opt_bool_param(params, "target")?,
+    ))
+}
+
+/// `app.window.layout`: the size of the window and of the side panels of
+/// the workspace, and where its parts are.
+pub const WINDOW_LAYOUT: &str = "app.window.layout";
+
+fn window_layout_params() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WindowLayoutParams",
+        "type": "object",
+        "properties": {
+            "width": {
+                "description": "Width of the inside of the window (points); give it with height.",
+                "type": "number",
+                "exclusiveMinimum": 0
+            },
+            "height": {
+                "description": "Height of the inside of the window (points); give it with width.",
+                "type": "number",
+                "exclusiveMinimum": 0
+            },
+            "menu": {
+                "description": "Width of the left menu (points), as a drag of its edge sets it: kept within its range, and saved.",
+                "type": "number"
+            },
+            "inspector": {
+                "description": "Width of the inspector (points), as a drag of its edge sets it: kept within its range, and saved.",
+                "type": "number"
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// The parameters of `app.window.layout`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowLayoutArgs {
+    window: Option<Vec2>,
+    menu: Option<f32>,
+    inspector: Option<f32>,
+}
+
+/// The optional number parameter `key`.
+fn opt_f32_param(params: &Value, key: &str) -> Result<Option<f32>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| n.is_finite())
+            .map(Some)
+            .ok_or_else(|| {
+                RpcError::new(
+                    codes::INVALID_PARAMS,
+                    format!("parameter `{key}` must be a number"),
+                )
+            }),
+    }
+}
+
+fn window_layout_args(params: &Value) -> Result<WindowLayoutArgs, RpcError> {
+    let invalid = |e: String| RpcError::new(codes::INVALID_PARAMS, format!("{WINDOW_LAYOUT}: {e}"));
+    let known = ["width", "height", "menu", "inspector"];
+    if let Some(k) = params
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
+    {
+        return Err(invalid(format!("unknown parameter `{k}`")));
+    }
+    let window = match (
+        opt_f32_param(params, "width")?,
+        opt_f32_param(params, "height")?,
+    ) {
+        (None, None) => None,
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some(Vec2::new(w, h)),
+        (Some(_), Some(_)) => return Err(invalid("width and height must be above 0".into())),
+        _ => return Err(invalid("give width and height together".into())),
+    };
+    Ok(WindowLayoutArgs {
+        window,
+        menu: opt_f32_param(params, "menu")?,
+        inspector: opt_f32_param(params, "inspector")?,
+    })
+}
+
+/// How long `app.window.layout` waits for the window to take its size.
+const LAYOUT_WAIT: Duration = Duration::from_secs(3);
+
+/// The answer of `app.window.layout`: the window, the parts of the
+/// workspace as the last frame drew them, the widths chosen for the panels
+/// and how far their contents run past them.
+fn layout_json(window: Vec2, ws: &Workspace) -> Value {
+    let l = ws.layout();
+    let chosen = ws.panel_widths();
+    let rect =
+        |r: Rect| json!({ "x": r.min.x, "y": r.min.y, "width": r.width(), "height": r.height() });
+    json!({
+        "window": { "width": window.x, "height": window.y },
+        "menu": rect(l.menu),
+        "inspector": rect(l.inspector),
+        "view": rect(l.view),
+        "chosen": { "menu": chosen.menu, "inspector": chosen.inspector },
+        "overflow": { "menu": l.menu_overflow, "inspector": l.inspector_overflow },
+    })
+}
+
+fn run_by_the_app(_: &CaseState, _: &Value, _: &JobCtx) -> Result<CommandOutput, CommandError> {
+    Err(CommandError::Invalid(
+        "app command: the app bridge runs it".into(),
+    ))
+}
+
+/// The commands of the app window itself (source `app`).
+fn window_specs() -> Vec<CommandSpec> {
+    vec![
+        CommandSpec {
+            id: MENU_SELECT,
+            label_key: "app-cmd-menu-select",
+            doc_key: "app-cmd-menu-select-doc",
+            params_schema: menu_select_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_SCREENSHOT,
+            label_key: "app-cmd-window-screenshot",
+            doc_key: "app-cmd-window-screenshot-doc",
+            params_schema: window_screenshot_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_VIEW,
+            label_key: "app-cmd-window-view",
+            doc_key: "app-cmd-window-view-doc",
+            params_schema: window_view_params,
+            run: run_by_the_app,
+        },
+        CommandSpec {
+            id: WINDOW_LAYOUT,
+            label_key: "app-cmd-window-layout",
+            doc_key: "app-cmd-window-layout-doc",
+            params_schema: window_layout_params,
+            run: run_by_the_app,
+        },
+    ]
+}
+
 /// A [`CommandSpec`] bound to its parameters that keeps the JSON output of
 /// its run (the workspace's undo stack only keeps the state).
 struct Capturing {
@@ -377,12 +656,33 @@ fn idle(ws: &mut Workspace) -> bool {
     ws.wait_for_jobs(Duration::ZERO)
 }
 
+/// How long `app.window.screenshot` waits for the window's image.
+const SCREENSHOT_WAIT: Duration = Duration::from_secs(5);
+
+/// Writes `img` to `path` as PNG; answers `{path, width, height}`.
+fn write_png(path: &Path, img: &egui::ColorImage) -> Result<Value, String> {
+    let [w, h] = img.size;
+    let rgba: Vec<u8> = img
+        .pixels
+        .iter()
+        .flat_map(|p| p.to_srgba_unmultiplied())
+        .collect();
+    let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| "the window image has a wrong size".to_owned())?;
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json!({ "path": path.display().to_string(), "width": w, "height": h }))
+}
+
 /// The app as the bridge sees it: the shell plus the view parameters set
 /// with `view.set`.
 pub struct Bridge {
     /// The application.
     pub app: DentalCraftApp,
     view: Map<String, Value>,
+    /// The context of the window, once it drew a frame.
+    ctx: Option<egui::Context>,
 }
 
 impl Bridge {
@@ -391,7 +691,81 @@ impl Bridge {
         Self {
             app,
             view: Map::new(),
+            ctx: None,
         }
+    }
+
+    /// `app.window.screenshot`: the window as the user sees it, read back
+    /// from the GPU at the next frame, written to `path` as PNG.
+    fn window_screenshot(&mut self, params: &Value) -> Step {
+        let path = match str_param(params, "path") {
+            Ok(p) => PathBuf::from(p),
+            Err(e) => return Step::Done(Err(e)),
+        };
+        let Some(ctx) = self.ctx.clone() else {
+            return Step::Done(Err(RpcError::host("the window has not drawn yet")));
+        };
+        let (tx, rx) = mpsc::channel();
+        ctx.request_screenshot(move |img| {
+            let _ = tx.send(img);
+        });
+        ctx.request_repaint();
+        let deadline = std::time::Instant::now() + SCREENSHOT_WAIT;
+        Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
+            Ok(img) => Some(write_png(&path, &img).map_err(RpcError::host)),
+            Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < deadline => None,
+            Err(_) => Some(Err(RpcError::host(
+                "the window gave no image (no GPU read-back)",
+            ))),
+        }))
+    }
+
+    /// `app.window.layout`: sets the panel widths (saved, as after a drag of
+    /// their edges) and the window size, then answers the layout once the
+    /// window has its size and drew with it (or after [`LAYOUT_WAIT`]).
+    fn window_layout(&mut self, params: &Value) -> Step {
+        let args = match window_layout_args(params) {
+            Ok(a) => a,
+            Err(e) => return Step::Done(Err(e)),
+        };
+        let Some(ctx) = self.ctx.clone() else {
+            return Step::Done(Err(RpcError::host("the window has not drawn yet")));
+        };
+        let ws = match self.workspace() {
+            Ok(ws) => ws,
+            Err(e) => return Step::Done(Err(e)),
+        };
+        if args.menu.is_some() || args.inspector.is_some() {
+            let now = ws.panel_widths();
+            ws.set_panel_widths(PanelWidths {
+                menu: args.menu.unwrap_or(now.menu),
+                inspector: args.inspector.unwrap_or(now.inspector),
+            });
+            let widths = ws.panel_widths();
+            self.app.remember_panel_widths(widths);
+        }
+        if let Some(size) = args.window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        ctx.request_repaint();
+        let deadline = std::time::Instant::now() + LAYOUT_WAIT;
+        // frames drawn at the asked size (the layout is the last frame's)
+        let mut drawn = 0u32;
+        Step::Wait(Box::new(move |b: &mut Bridge| {
+            let size = ctx.content_rect().size();
+            let at_size = args
+                .window
+                .is_none_or(|w| (w - size).abs().max_elem() < 1.0);
+            drawn = if at_size { drawn + 1 } else { 0 };
+            if drawn < 3 && std::time::Instant::now() < deadline {
+                ctx.request_repaint();
+                return None;
+            }
+            Some(match b.app.workspace() {
+                Some(ws) => Ok(layout_json(size, ws)),
+                None => Err(RpcError::host("the workspace was closed")),
+            })
+        }))
     }
 
     /// The commands: the session built-ins, the scanner's (`scan.*`, run on
@@ -423,6 +797,7 @@ impl Bridge {
                 .into_iter()
                 .map(|s| (dc_diagnostics::commands::SOURCE, s)),
         );
+        out.extend(window_specs().into_iter().map(|s| ("app", s)));
         out
     }
 
@@ -505,7 +880,8 @@ impl Bridge {
         self.app.workspace_mut().is_none_or(idle)
     }
 
-    /// Runs command `id` once the jobs already running are done.
+    /// Runs command `id` once the jobs already running are done (a window
+    /// screenshot at once).
     fn execute(&mut self, id: &str, params: Value) -> Step {
         let spec = match self.find(id) {
             Ok((_, s)) => s,
@@ -513,6 +889,9 @@ impl Bridge {
         };
         if dc_scanner::control::is_scan_command(spec.id) {
             return Self::execute_scan(spec.id, params);
+        }
+        if spec.id == WINDOW_SCREENSHOT {
+            return self.window_screenshot(&params);
         }
         let mut running: Option<Wait> = None;
         Step::Wait(Box::new(move |b: &mut Bridge| {
@@ -683,6 +1062,30 @@ impl Bridge {
                 }
                 _ => Err(invalid("parameters: expected an object".into())),
             },
+            // a click on the menu: selects, never runs
+            MENU_SELECT => {
+                let id = match str_param(params, "id") {
+                    Ok(id) => id.to_owned(),
+                    Err(e) => return Step::Done(Err(e)),
+                };
+                self.workspace().and_then(|ws| match ws.select_entry(&id) {
+                    Some(selected) => Ok(json!({ "selected": selected })),
+                    None => Err(invalid(format!("no menu entry {id}"))),
+                })
+            }
+            // the toolbar and the timeline of the 3D view
+            WINDOW_VIEW => {
+                let (view, stage, study, target) = match window_view_args(params) {
+                    Ok(p) => p,
+                    Err(e) => return Step::Done(Err(e)),
+                };
+                self.workspace().and_then(|ws| {
+                    ws.set_window_view(view.as_deref(), stage, study, target)
+                        .map_err(invalid)
+                })
+            }
+            // the window and its side panels, as the user sizes them
+            WINDOW_LAYOUT => return self.window_layout(params),
             // the installation, not the case: through the update dialog
             dc_update::commands::CHECK => {
                 if let Err(e) = self.app.agent_update_check() {
@@ -749,6 +1152,16 @@ impl Bridge {
                     Ok(ws) => ws,
                     Err(e) => return Step::Done(Err(e)),
                 };
+                // the command of a menu leaf runs as the button of its
+                // inspector: the window shows what a click shows (its
+                // report, the study models just built, the new tooth colours)
+                if ws.run_leaf_command(spec.id, params.clone()) {
+                    return Self::after_jobs(move |ws| match ws.take_leaf_answer() {
+                        Some(Ok(v)) => Ok(v),
+                        Some(Err(e)) => Err(RpcError::host(format!("{}: {e}", spec.id))),
+                        None => Err(RpcError::host(format!("{}: did not run", spec.id))),
+                    });
+                }
                 let out = Arc::new(Mutex::new(None));
                 ws.run_command(Box::new(Capturing {
                     spec,
@@ -1040,10 +1453,12 @@ impl ControlledApp {
         if !self.server.waker_set {
             let ctx = ui.ctx().clone();
             self.server.set_waker(move || ctx.request_repaint());
+            self.bridge.ctx = Some(ui.ctx().clone());
         }
         if self.server.pump(&mut self.bridge) {
             // a request waits for a job: keep polling
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            ui.ctx()
+                .request_repaint_after(dc_ui::pacing::FRAME_INTERVAL);
         }
         self.bridge.app.show(ui);
     }
@@ -1052,5 +1467,9 @@ impl ControlledApp {
 impl eframe::App for ControlledApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.bridge.app.pace_frame(raw_input);
     }
 }

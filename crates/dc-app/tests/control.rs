@@ -85,6 +85,7 @@ fn bridge_runs_commands_through_the_workspace() {
     h.run_steps(2);
     let project = dir.path().join("bridge.dcprj");
     let project_s = project.to_string_lossy().into_owned();
+    let dir_s = dir.path().to_string_lossy().into_owned();
 
     let client = std::thread::spawn(move || {
         let mut c = Client::connect(port);
@@ -115,6 +116,46 @@ fn bridge_runs_commands_through_the_workspace() {
         assert_eq!(c.scans(), 0);
         assert_eq!(c.call("redo", json!({})).unwrap()["done"], true);
         assert_eq!(c.scans(), 1);
+
+        // a click on the menu, by id or by the command of its inspector:
+        // it selects, nothing runs
+        assert!(ids.contains(&"app.menu.select"));
+        let by_command = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": "aligners.teeth.find"}}),
+            )
+            .unwrap();
+        let leaf = by_command["selected"].as_str().unwrap().to_owned();
+        let by_id = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": leaf}}),
+            )
+            .unwrap();
+        assert_eq!(by_id["selected"], by_command["selected"]);
+        assert_eq!(c.scans(), 1);
+        let none = c
+            .call(
+                "execute",
+                json!({"id": "app.menu.select", "params": {"id": "no.such"}}),
+            )
+            .unwrap_err();
+        assert_eq!(none["code"], -32602, "{none}");
+        // the window as the user sees it: this harness draws no pixels
+        assert!(ids.contains(&"app.window.screenshot"));
+        let shot = format!("{dir_s}/window.png");
+        let e = c
+            .call(
+                "execute",
+                json!({"id": "app.window.screenshot", "params": {"path": shot}}),
+            )
+            .unwrap_err();
+        assert!(e["message"].as_str().unwrap().contains("no image"), "{e}");
+        let e = c
+            .call("execute", json!({"id": "app.window.screenshot"}))
+            .unwrap_err();
+        assert_eq!(e["code"], -32602, "{e}");
 
         let outs = c
             .call(
@@ -179,4 +220,90 @@ fn bridge_runs_commands_through_the_workspace() {
     drive(&mut h, client);
     assert_eq!(h.state().bridge().app.screen(), Screen::Workspace);
     assert!(project.is_file());
+}
+
+#[test]
+fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let demo = |c: &mut Client, arch: &str| {
+            c.call(
+                "execute",
+                json!({"id": "aligners.demo", "params": {"arch": arch}}),
+            )
+            .unwrap();
+        };
+        demo(&mut c, "lower");
+        // a leaf that fails answers with its error, as before
+        let e = c
+            .call("execute", json!({"id": "aligners.occlusion.align"}))
+            .unwrap_err();
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("aligners.occlusion.align: "),
+            "{e}"
+        );
+        demo(&mut c, "upper");
+        let out = c
+            .call(
+                "execute",
+                json!({"id": "aligners.preparation.segmentation.automatic",
+                       "params": {"arch": "upper"}}),
+            )
+            .unwrap();
+        assert!(out["teeth"].as_u64().is_some_and(|n| n > 0), "{out}");
+        let out = c
+            .call(
+                "execute",
+                json!({"id": "aligners.output.study-models", "params": {}}),
+            )
+            .unwrap();
+        assert!(
+            out["kept"].as_array().is_some_and(|k| !k.is_empty()),
+            "{out}"
+        );
+        assert_eq!(c.scans(), 2);
+
+        // the view of the window: as after a click on their buttons, the new
+        // tooth colours show the scan and the study models just built are
+        // shown; the toolbar and the timeline change them
+        let view = |c: &mut Client, p: Value| {
+            c.call("execute", json!({"id": "app.window.view", "params": p}))
+        };
+        let now = view(&mut c, json!({})).unwrap();
+        assert_eq!(
+            (&now["teeth_shown"], &now["study_shown"], &now["view"]),
+            (&json!(false), &json!(true), &json!("occlusal")),
+            "{now}"
+        );
+        let set = view(&mut c, json!({"view": "front", "stage": 4, "study": false})).unwrap();
+        assert_eq!(set["view"], "front", "{set}");
+        assert_eq!(set["stage"], set["last_stage"], "{set}");
+        assert_eq!(set["study_shown"], false, "{set}");
+        for bad in [
+            json!({"view": "top"}),
+            json!({"stage": -1}),
+            json!({"zoom": 2}),
+        ] {
+            let e = view(&mut c, bad).unwrap_err();
+            assert_eq!(e["code"], -32602, "{e}");
+        }
+    });
+    drive(&mut h, client);
+    let ws = h.state().bridge().app.workspace().unwrap();
+    assert!(!ws.teeth_shown() && !ws.study_shown());
 }

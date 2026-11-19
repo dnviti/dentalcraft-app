@@ -61,7 +61,7 @@ use egui::{RichText, Ui};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-pub use popup::{scan_button, scan_button_width};
+pub use popup::{restore_steps_width, scan_button, scan_button_width, take_resized_steps_width};
 
 use popup::ScanUi;
 
@@ -161,6 +161,14 @@ const KNOWN_CODES: &[&str] = &[
     "ble-disconnected",
     "ble-platform",
     "rig-uncalibrated",
+    "calibration",
+    "calibration-no-object",
+    "calibration-tracking",
+    "calibration-tilt",
+    "calibration-inaccurate",
+    "calibration-implausible",
+    "scan-quality-low",
+    "scan-no-stops",
 ];
 
 impl ScanFailure {
@@ -306,6 +314,10 @@ struct Pending {
     origin: Origin,
 }
 
+/// The popup's own step on its command thread, not a scan command: it
+/// finalises a rig job that ended ([`ScanController::finish_rig_job`]).
+const FINISH_RIG_JOB: &str = "popup.finish-rig-job";
+
 /// What a command's job returns: its answer and, for `scan.import`, the
 /// folder of the file it wrote.
 type JobOut = Result<(Value, Option<TempDir>), ScanFailure>;
@@ -450,6 +462,12 @@ impl ScanPopup {
             };
             self.ended(a.ticket, &a.id, a.origin, r);
         }
+        // a rig job that ended leaves the acquisition held, as it ran, until
+        // a command finalises it: without one the window would go on showing
+        // a scan under way that fuses nothing
+        if !self.is_busy() && self.try_with(ScanController::rig_job_ended) == Some(true) {
+            self.enqueue(FINISH_RIG_JOB, Value::Null, Origin::Ui);
+        }
         self.pump();
     }
 
@@ -557,6 +575,10 @@ impl ScanPopup {
                     .map_err(ScanFailure::from);
             }
             let mut c = controller.lock().unwrap_or_else(PoisonError::into_inner);
+            if id == FINISH_RIG_JOB {
+                c.finish_rig_job();
+                return Ok((Value::Null, None));
+            }
             if id == SCAN_IMPORT {
                 let role = control::import_role(&params)?;
                 let dir = tempfile::Builder::new()
@@ -585,6 +607,10 @@ impl ScanPopup {
     /// A command ended: the window follows it, the file of `scan.import`
     /// goes to the host, an agent gets its answer.
     fn ended(&mut self, ticket: u64, id: &str, origin: Origin, r: JobOut) {
+        if id == FINISH_RIG_JOB {
+            // the window reads what the job left from the controller
+            return;
+        }
         let r = match r {
             Ok((out, Some(dir))) => {
                 self.outputs.push(ScanOutput {
@@ -606,6 +632,11 @@ impl ScanPopup {
             log_failure(id, f);
         }
         self.ui.after(id, &r);
+        // `scan.close` ended the session on the controller: the window goes
+        // with it (refused while a scan or a job runs: it stays)
+        if id == control::SCAN_CLOSE && r.is_ok() {
+            self.ui.close();
+        }
         self.finish(ticket, origin, r);
     }
 }
@@ -614,7 +645,7 @@ impl ScanPopup {
 /// anonymous diagnostics: a fault as an error, a missing or switched-off
 /// device as a flagged warning; a cancel or a busy device is no failure.
 fn log_failure(command: &str, f: &ScanFailure) {
-    const SETUP: [&str; 11] = [
+    const SETUP: [&str; 12] = [
         "device-not-found",
         "not-connected",
         "turntable-not-connected",
@@ -624,11 +655,15 @@ fn log_failure(command: &str, f: &ScanFailure) {
         "sdk-missing",
         "platform-unsupported",
         "rig-uncalibrated",
+        "calibration-no-object",
         "invalid-params",
         "empty",
     ];
     let code = f.code.as_str();
-    if matches!(code, "cancelled" | "busy" | "turntable-busy") {
+    // a refused `scan.close` (a scan or a job runs) is an answer, no fault
+    if matches!(code, "cancelled" | "busy" | "turntable-busy")
+        || (command == control::SCAN_CLOSE && code == "invalid-state")
+    {
         return;
     }
     let source = if ["turntable", "ble", "rig"]
@@ -691,8 +726,8 @@ fn role_of(name: Option<&str>) -> Option<ScanRole> {
     ALL_ROLES.into_iter().find(|&r| role_id(r) == name)
 }
 
-/// The scan and turntable commands that only read: an agent asking them
-/// does not open the window.
+/// The scan and turntable commands that only read, or that close the
+/// window: an agent asking them does not open it.
 fn reads_only(id: &str) -> bool {
     matches!(
         id,
@@ -701,6 +736,7 @@ fn reads_only(id: &str) -> bool {
             | control::TURNTABLE_DEVICES
             | control::TURNTABLE_STATUS
             | control::TURNTABLE_CALIBRATION
+            | control::SCAN_CLOSE
     )
 }
 
@@ -771,5 +807,63 @@ mod tests {
         drop(popup);
         assert!(!rig.attached(), "the turntable stayed open");
         assert!(!held.lock().unwrap().turntable_status().connected);
+    }
+
+    /// Runs `id` on `popup` as an agent does and waits for its answer.
+    fn run(popup: &mut ScanPopup, id: &str, params: Value) -> Value {
+        let ticket = popup.start_command(id, params).unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            popup.poll();
+            if let Some(r) = popup.take_result(ticket) {
+                return r.unwrap_or_else(|e| panic!("{id}: {e}"));
+            }
+            assert!(start.elapsed().as_secs() < 300, "{id} did not end");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_rig_job_that_ended_is_finalised_while_the_window_only_polls() {
+        use dc_scanner::{RigJobState, ScanState};
+        let dir = tempfile::tempdir().unwrap();
+        let mut popup = ScanPopup::new(None);
+        popup.controller.lock().unwrap().set_rig_dir(dir.path());
+        let sim =
+            json!({"backend": "sim", "options": {"realtime": false, "width": 160, "height": 100}});
+        run(&mut popup, control::SCAN_CONNECT, sim);
+        run(
+            &mut popup,
+            control::TURNTABLE_CONNECT,
+            json!({"backend": "sim", "options": {"fast": true}}),
+        );
+        run(
+            &mut popup,
+            control::TURNTABLE_CALIBRATE,
+            json!({"steps": 6, "step_deg": 30, "frames_per_stop": 1, "settle_s": 0}),
+        );
+        // from here on nothing but the window's polling: once the job ends
+        // the acquisition it held stops, without waiting for a command
+        let start = std::time::Instant::now();
+        loop {
+            popup.poll();
+            let seen = popup.try_with(|c| {
+                (
+                    c.calibration_job().map(|j| j.state),
+                    c.session().status().state,
+                )
+            });
+            if let Some((Some(job), ScanState::Connected)) = seen
+                && !matches!(job, RigJobState::Running | RigJobState::Paused)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed().as_secs() < 120,
+                "the calibration ended, the acquisition did not: {seen:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(popup.try_with(ScanController::rig_job_ended) == Some(false));
     }
 }

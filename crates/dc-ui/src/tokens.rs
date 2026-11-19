@@ -268,8 +268,23 @@ pub struct Sizes {
     pub topbar_home: f32,
     pub topbar_workspace: f32,
     pub statusbar: f32,
+    /// Default width of the left menu; the user drags it within
+    /// `left_menu_min_width..=left_menu_max_width`.
     pub left_menu_width: f32,
+    pub left_menu_min_width: f32,
+    pub left_menu_max_width: f32,
+    /// Default width of the inspector; the user drags it within
+    /// `inspector_min_width..=inspector_max_width`.
     pub inspector_width: f32,
+    pub inspector_min_width: f32,
+    pub inspector_max_width: f32,
+    /// The 3D view keeps at least this width beside the side panels.
+    pub viewport_min_width: f32,
+    /// Default width of the steps panel of the scan window; the user drags
+    /// it within `scan_steps_min_width..=scan_steps_max_width`.
+    pub scan_steps_width: f32,
+    pub scan_steps_min_width: f32,
+    pub scan_steps_max_width: f32,
     pub timeline_height: f32,
     pub button_h: f32,
     pub button_h_large: f32,

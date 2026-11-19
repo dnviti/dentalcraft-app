@@ -112,6 +112,15 @@ pub struct Settings {
     /// Random number of this installation while diagnostics are on, not
     /// linked to the account; removed when they are turned off.
     pub install_id: Option<String>,
+    /// Width (points) of the workspace's left menu the user dragged it to;
+    /// the design's width when absent.
+    pub menu_width: Option<u32>,
+    /// Width (points) of the workspace's inspector the user dragged it to;
+    /// the design's width when absent.
+    pub inspector_width: Option<u32>,
+    /// Width (points) of the steps panel of the scan window the user
+    /// dragged it to; the design's width when absent.
+    pub scan_steps_width: Option<u32>,
 }
 
 impl Default for Settings {
@@ -124,6 +133,9 @@ impl Default for Settings {
             skipped_update: None,
             diagnostics: None,
             install_id: None,
+            menu_width: None,
+            inspector_width: None,
+            scan_steps_width: None,
         }
     }
 }
@@ -291,6 +303,8 @@ mod tests {
             language: Some("it".into()),
             check_updates: false,
             skipped_update: Some("0.3.0".into()),
+            menu_width: Some(320),
+            inspector_width: Some(420),
             ..Settings::default()
         };
         store.save_settings(&s);

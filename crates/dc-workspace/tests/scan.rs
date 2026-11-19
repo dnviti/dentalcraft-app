@@ -212,8 +212,12 @@ fn an_agent_runs_an_automatic_scan_on_the_simulated_turntable() {
     // without a calibration of this rig the automatic scan asks for the
     // consent of `allow_uncalibrated` (a calibration of this computer may
     // exist: then it starts at once)
-    let auto =
-        json!({ "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 90.0, "settle_s": 0.1 });
+    // `finish: false`: a calibrated rig (of this computer) would otherwise
+    // finish the mesh and stop the scan, and the stop below needs it paused
+    let auto = json!({
+        "tilts_deg": [0.0], "rotation_deg": 90.0, "deg_per_s": 20.0, "settle_s": 0.1,
+        "finish": false,
+    });
     if let Err(e) = scan(&mut ws, "scan.auto", auto.clone()) {
         assert!(e.starts_with("rig-uncalibrated"), "{e}");
         let mut anyway = auto;
@@ -264,6 +268,26 @@ fn frames_until(
         std::thread::sleep(Duration::from_millis(10));
     }
     h.step();
+}
+
+/// Steps until the "Start the automatic scan" button stops moving (a
+/// scroll to it has ended), within [`WAIT`].
+fn settle(h: &mut Harness<'static, App>) {
+    let start = Instant::now();
+    let at = |h: &Harness<'static, App>| {
+        h.get_by_role_and_label(Role::Button, "Start the automatic scan")
+            .rect()
+    };
+    let mut last = at(h);
+    let mut still = 0;
+    while still < 3 {
+        assert!(start.elapsed() < WAIT, "the scroll to Start settles");
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+        let now = at(h);
+        still = if now == last { still + 1 } else { 0 };
+        last = now;
+    }
 }
 
 #[test]
@@ -325,9 +349,14 @@ fn the_turntable_block_connects_the_simulated_turntable() {
         h.query_by_role_and_label(Role::Button, "Disconnect the turntable")
             .is_some()
     );
-    // without a calibration the automatic scan asks first; "Calibrate
-    // first" goes back to the calibration
-    if h.query_by_label("Not calibrated yet").is_some() {
+    // without a calibration of this rig (none, or the one of a real rig of
+    // this computer: the test reads the user's data directory) the
+    // automatic scan asks first; "Calibrate first" goes back to the
+    // calibration
+    let other_rig = "made with another scanner or turntable";
+    if h.query_by_label("Not calibrated yet").is_some()
+        || h.query_by_label_contains(other_rig).is_some()
+    {
         let ticket = h
             .state_mut()
             .ws
@@ -343,20 +372,31 @@ fn the_turntable_block_connects_the_simulated_turntable() {
         // the folded turntable controls bring Acquisition into view
         h.get_by_label("Hide the turntable controls").click();
         h.step();
+        // the quality settings of the automatic scan push Start down the
+        // scrolling panel
+        h.get_by_role_and_label(Role::Button, "Start the automatic scan")
+            .scroll_to_me();
+        // the scroll settles before the click (a click on a button still
+        // moving is lost); then the confirmation comes within a bounded
+        // wait, however loaded the machine is
+        settle(&mut h);
         h.get_by_role_and_label(Role::Button, "Start the automatic scan")
             .click();
-        h.step();
-        h.step();
-        assert!(h.query_by_label("Scan without calibrating?").is_some());
+        frames_until(
+            &mut h,
+            "the confirmation of a scan without calibration",
+            |h| h.query_by_label("Scan without calibrating?").is_some(),
+        );
         h.get_by_role_and_label(Role::Button, "Calibrate first")
             .click();
-        h.step();
-        h.step();
-        assert!(h.query_by_label("Scan without calibrating?").is_none());
+        frames_until(&mut h, "the confirmation closes", |h| {
+            h.query_by_label("Scan without calibrating?").is_none()
+        });
         assert!(!h.state().ws.is_scan_busy(), "nothing was started");
     }
     assert!(
         h.query_by_label("Not calibrated yet").is_some()
+            || h.query_by_label_contains(other_rig).is_some()
             || h.query_by_label_contains("Calibrated").is_some()
     );
     // the automatic scan waits for the scanner

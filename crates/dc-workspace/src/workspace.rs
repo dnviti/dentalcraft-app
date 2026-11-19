@@ -85,6 +85,9 @@ pub(crate) struct ShownToast {
     /// Stays until the user closes it (errors always do), and is always
     /// drawn: an arch warning must not time out or be pushed off the stack.
     pub sticky: bool,
+    /// The failure of a step (a refused command): it goes when another
+    /// command succeeds or the selection changes, not only when closed.
+    pub until_next: bool,
 }
 
 impl ShownToast {
@@ -297,6 +300,8 @@ pub struct Workspace {
     /// Whether the case needs the bite before "Final position".
     pub(crate) bite_check: leaf::BiteCheck,
     pub(crate) menu_view: MenuView,
+    /// The widths of the side panels and where the last frame drew them.
+    pub(crate) panels: crate::panels::Panels,
     pub(crate) selected: Option<&'static str>,
     /// Role the user chose for the next import (`None` = auto): it applies
     /// to the next file dialog or drop and goes back to auto.
@@ -319,6 +324,9 @@ pub struct Workspace {
     /// The surface of the popup being imported: its file lives until the
     /// import job has read it.
     pub(crate) scan_output: Option<dc_scan_ui::ScanOutput>,
+    /// The command of a menu leaf an agent runs
+    /// ([`Workspace::run_leaf_command`]) and its answer once it ended.
+    agent_leaf: Option<(&'static str, Option<Result<Value, String>>)>,
     actions: VecDeque<WorkspaceAction>,
 }
 
@@ -390,6 +398,7 @@ impl Workspace {
             .expect("cannot start the background job threads");
         Self {
             menu_view: MenuView::new(&menu),
+            panels: crate::panels::Panels::default(),
             module,
             menu,
             commands,
@@ -437,6 +446,7 @@ impl Workspace {
             show_help: false,
             scan: dc_scan_ui::ScanPopup::default(),
             scan_output: None,
+            agent_leaf: None,
             actions: VecDeque::new(),
         }
     }
@@ -611,6 +621,10 @@ impl Workspace {
     /// `function`): the inspector of a function has the button that runs it.
     /// The tool of another function closes.
     pub fn select_item(&mut self, id: &'static str) {
+        // a refused step's message belongs to the function it was shown for
+        if self.selected != Some(id) {
+            self.clear_step_errors();
+        }
         let command = self.menu.find(id).and_then(|i| i.command_id());
         if let Some(tool) = self.manual.tool
             && crate::function::owner(tool) != command
@@ -624,6 +638,19 @@ impl Workspace {
         self.selected = Some(id);
         self.module.select(id);
         self.menu_view.reveal(&self.menu, id);
+    }
+
+    /// Selects the menu entry `id`, or else the leaf that runs command `id`,
+    /// as a click on it does ([`Workspace::select_item`]): its id, or
+    /// `None` when the menu has neither (an agent's click).
+    pub fn select_entry(&mut self, id: &str) -> Option<&'static str> {
+        let items = || self.menu.iter().map(|(_, i)| i);
+        let found = items()
+            .find(|i| i.id == id)
+            .or_else(|| items().find(|i| i.command_id() == Some(id)))?
+            .id;
+        self.select_item(found);
+        Some(found)
     }
 
     /// Selects the leaf of the menu that runs `command_id`; `false` when the
@@ -647,6 +674,9 @@ impl Workspace {
     /// Nothing selected (Escape): the inspector shows the overview and the
     /// open tool closes.
     pub(crate) fn clear_selection(&mut self) {
+        if self.selected.is_some() {
+            self.clear_step_errors();
+        }
         self.selected = None;
         self.close_tool();
         self.set_region_view(false);
@@ -756,6 +786,39 @@ impl Workspace {
                 );
             }
         }
+    }
+
+    /// Runs the command of a menu leaf for an agent connected to the app
+    /// (`dentalcraft --control`) with `params`, as the button of its
+    /// inspector runs it: in the background, one undo step when it changes
+    /// the case, its report, and what it shows in the view (the study models
+    /// just built, the scan with new tooth colours). The answer comes from
+    /// [`Workspace::take_leaf_answer`]. `false` when `command_id` is not the
+    /// command of a menu leaf.
+    pub fn run_leaf_command(&mut self, command_id: &str, params: Value) -> bool {
+        let Some(id) = self
+            .menu
+            .iter()
+            .find_map(|(_, i)| i.command_id().filter(|c| *c == command_id))
+        else {
+            return false;
+        };
+        let Some(spec) = self.module_spec(id) else {
+            return false;
+        };
+        self.agent_leaf = Some((id, None));
+        self.spawn_leaf(id, spec, params);
+        true
+    }
+
+    /// The output of the command [`Workspace::run_leaf_command`] started
+    /// (its failure as text) once it ended; `None` while it runs, or when it
+    /// did not start.
+    pub fn take_leaf_answer(&mut self) -> Option<Result<Value, String>> {
+        if self.agent_leaf.as_ref().is_some_and(|(_, a)| a.is_some()) {
+            return self.agent_leaf.take().and_then(|(_, a)| a);
+        }
+        None
     }
 
     /// The button "Import the bite scans" of Bite (`oa.import_bite`): the
@@ -1284,6 +1347,7 @@ impl Workspace {
             toast,
             born: None,
             sticky: false,
+            until_next: false,
         });
     }
 
@@ -1293,7 +1357,14 @@ impl Workspace {
             toast,
             born: None,
             sticky: true,
+            until_next: false,
         });
+    }
+
+    /// Drops the failure messages of refused steps: another command
+    /// succeeded, or the selection changed.
+    fn clear_step_errors(&mut self) {
+        self.toasts.retain(|t| !t.until_next);
     }
 
     pub(crate) fn module_ctx_run(&mut self, f: impl FnOnce(&mut dyn Module, &mut ModuleCtx<'_>)) {
@@ -1462,7 +1533,10 @@ impl Workspace {
                 self.finish_spec(kind, command, label, taken);
             }
             Task::Command { label, handle } => match handle.try_take() {
-                Some(Ok(Ok(state))) => self.undo.push(Arc::new(state), label),
+                Some(Ok(Ok(state))) => {
+                    self.clear_step_errors();
+                    self.undo.push(Arc::new(state), label);
+                }
                 Some(Ok(Err(CommandError::Cancelled))) => {
                     self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
                 }
@@ -1481,7 +1555,8 @@ impl Workspace {
     }
 
     /// A registered command run as a job ended: its state lands as one undo
-    /// step and its output is reported, or its failure is shown.
+    /// step and its output is reported, or its failure is shown. The leaf an
+    /// agent runs keeps its answer ([`Workspace::take_leaf_answer`]).
     fn finish_spec(
         &mut self,
         kind: SpecKind,
@@ -1489,8 +1564,21 @@ impl Workspace {
         label: String,
         taken: Option<Result<Result<CommandOutput, CommandError>, JobError>>,
     ) {
+        if let SpecKind::Leaf(id) = kind
+            && let Some((asked, answer)) = self.agent_leaf.as_mut()
+            && *asked == id
+            && answer.is_none()
+        {
+            *answer = Some(match &taken {
+                Some(Ok(Ok((_, out)))) => Ok(out.clone()),
+                Some(Ok(Err(e))) => Err(e.to_string()),
+                Some(Err(e)) => Err(e.to_string()),
+                None => Err("the command did not end".to_owned()),
+            });
+        }
         match taken {
             Some(Ok(Ok((state, out)))) => {
+                self.clear_step_errors();
                 if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
                     self.undo.push(Arc::new(state), label);
                 }
@@ -1687,7 +1775,14 @@ impl Workspace {
     }
 
     fn job_error(&mut self, key: &str, detail: String) {
-        self.toast(Toast::new(ToastLevel::Error, key).with_detail(detail));
+        // a refused step says why until the next one works or the user
+        // selects something else
+        self.toasts.push(ShownToast {
+            toast: Toast::new(ToastLevel::Error, key).with_detail(detail),
+            born: None,
+            sticky: false,
+            until_next: key == "ws-toast-command-failed",
+        });
     }
 
     fn job_panic(&mut self, command: Option<&str>, label: &str, e: &JobError) {
@@ -1749,6 +1844,7 @@ mod tests {
             toast: Toast::new(level, "k"),
             born: None,
             sticky,
+            until_next: false,
         }
     }
 

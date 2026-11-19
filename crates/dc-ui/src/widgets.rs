@@ -195,9 +195,9 @@ impl Button {
                 }
             }
         };
-        let galley = ui
-            .painter()
-            .layout_no_wrap(self.label.clone(), font, Color32::PLACEHOLDER);
+        let mut galley =
+            ui.painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), Color32::PLACEHOLDER);
         let icon_galley = self.icon.map(|i| {
             ui.painter()
                 .layout_no_wrap(i.into(), fonts::icon(16.0), Color32::PLACEHOLDER)
@@ -206,17 +206,29 @@ impl Button {
             .as_ref()
             .map(|g| g.size().x + if self.label.is_empty() { 0.0 } else { 8.0 })
             .unwrap_or(0.0);
+        // a label wider than the room (a full-width button, or a column)
+        // wraps onto more lines and the button grows taller, never wider
+        let room = ui.available_width();
+        if (self.full_width || !ui.layout().is_horizontal())
+            && icon_w + galley.size().x + 2.0 * pad > room
+        {
+            let wrap = (room - 2.0 * pad - icon_w).max(40.0);
+            galley = ui
+                .painter()
+                .layout(self.label.clone(), font, Color32::PLACEHOLDER, wrap);
+        }
         let content_w = icon_w + galley.size().x;
         let mut width = (content_w + 2.0 * pad).max(self.min_width);
         if self.full_width {
-            width = width.max(ui.available_width());
+            width = width.max(room);
         }
+        let height = self.size.height().max(galley.size().y + 12.0);
         let sense = if self.enabled {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(vec2(width, self.size.height()), sense);
+        let (rect, response) = ui.allocate_exact_size(vec2(width, height), sense);
         let label = self.label.clone();
         let enabled = self.enabled;
         let selected = self.selected;
@@ -555,12 +567,31 @@ pub fn toggle_width(ui: &Ui, label: &str) -> f32 {
 
 /// Toggle switch (track 36 x 20, knob 14) with a label on its right.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
-    let c = *colors(ui);
+    toggle_impl(ui, on, label.into(), true)
+}
+
+/// [`toggle`] without the visible label, for a row with no room for it:
+/// the label stays its accessible name and becomes its tooltip.
+pub fn toggle_compact(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
     let label = label.into();
+    toggle_impl(ui, on, label.clone(), false).on_hover_text(label)
+}
+
+fn toggle_impl(ui: &mut Ui, on: &mut bool, label: String, show_label: bool) -> Response {
+    let c = *colors(ui);
+    let shown = if show_label {
+        label.clone()
+    } else {
+        String::new()
+    };
     let galley = ui
         .painter()
-        .layout_no_wrap(label.clone(), fonts::ui(13.0), c.text_primary);
-    let gap = if label.is_empty() { 0.0 } else { 8.0 };
+        .layout_no_wrap(shown, fonts::ui(13.0), c.text_primary);
+    let gap = if !show_label || label.is_empty() {
+        0.0
+    } else {
+        8.0
+    };
     let size = vec2(36.0 + gap + galley.size().x, 24.0_f32.max(galley.size().y));
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
@@ -1266,7 +1297,7 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, width: f32) -> Response 
             if bar.width() > 0.0 {
                 p.rect_filled(bar, radius(2.0), c.select_blue);
             }
-            ui.ctx().request_repaint();
+            crate::pacing::request_next_frame(ui.ctx());
         }
     }
     response

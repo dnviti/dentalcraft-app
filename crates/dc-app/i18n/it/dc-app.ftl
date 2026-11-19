@@ -363,3 +363,13 @@ support-diagnostics-on = La diagnostica anonima è attiva. Puoi disattivarla dal
 support-diagnostics-off = La diagnostica anonima è disattivata. Puoi attivarla dal menu account.
 support-diagnostics-unset = Diagnostica anonima: non hai ancora scelto. Scegli dal menu account.
 support-diagnostics-show = Mostra cosa viene inviato
+
+## Comandi della finestra per gli agenti
+app-cmd-menu-select = Seleziona una voce del menu
+app-cmd-menu-select-doc = Seleziona una voce del menu del progetto aperto, come un clic su di essa: l'ispettore mostra i suoi parametri, il pulsante che la esegue e i suoi strumenti; non viene eseguito nulla. Parametro: id, l'id della voce o del comando che il suo ispettore esegue (per esempio aligners.teeth.find).
+app-cmd-window-screenshot = Istantanea della finestra
+app-cmd-window-screenshot-doc = Scrive la finestra così come la vede l'utente (menu, ispettore, vista 3D, finestre aperte) in un file PNG al fotogramma successivo. Parametro: path, il file PNG. Risponde con path, width e height.
+app-cmd-window-view = Vista della finestra
+app-cmd-window-view-doc = Imposta cosa mostra la vista 3D della finestra, come fanno la sua barra degli strumenti e la sua linea del tempo; il caso non cambia. Parametri, ciascuno facoltativo (quello che non viene dato resta com'è): view (occlusal, front, left, right o back), stage (lo stadio mostrato sulla linea del tempo, al massimo l'ultimo; 0 è la posizione iniziale), study (il livello Modelli da studio), target (il livello Posizione finale, l'ombra dei denti nella loro posizione finale). Risponde con view, stage, last_stage, study, target, study_shown e teeth_shown.
+app-cmd-window-layout = Disposizione della finestra
+app-cmd-window-layout-doc = Dimensiona la finestra e i suoi pannelli laterali come fa l'utente, poi risponde con la posizione delle parti della finestra; il caso non cambia. Parametri, ciascuno facoltativo: width e height (l'interno della finestra, in punti, dati insieme), menu e inspector (le larghezze del menu a sinistra e dell'ispettore, in punti, come le imposta il trascinamento dei loro bordi: restano entro i loro limiti e vengono salvate per il prossimo avvio). Risponde con window, menu, inspector e view (x, y, width, height di ciascuno), chosen (le larghezze scelte dei pannelli) e overflow (di quanto il contenuto di ciascun pannello supera la sua larghezza).

@@ -40,6 +40,8 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 static METHOD: Mutex<&'static str> = Mutex::new("virtual_bite");
 /// The case holds the result of `OTHER`.
 static OTHER_DONE: AtomicBool = AtomicBool::new(false);
+/// The next run of `OTHER` is refused.
+static REFUSE: AtomicBool = AtomicBool::new(false);
 
 fn exclusive() -> MutexGuard<'static, ()> {
     let g = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -47,6 +49,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     SLOW.store(false, Ordering::SeqCst);
     STUBBORN.store(false, Ordering::SeqCst);
     OTHER_DONE.store(false, Ordering::SeqCst);
+    REFUSE.store(false, Ordering::SeqCst);
     g
 }
 
@@ -99,6 +102,11 @@ fn run_other(
     _ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((OTHER, params.clone()));
+    if REFUSE.load(Ordering::SeqCst) {
+        return Err(CommandError::Invalid(
+            "the bite needs both arches".to_owned(),
+        ));
+    }
     Ok((state.clone(), json!({})))
 }
 
@@ -259,6 +267,39 @@ fn a_scan_answer_runs_the_visit_with_the_scan_parameter_in_one_undo_step() {
     assert!(ws.undo(), "one undo step");
     assert!(!ws.is_dirty());
     assert!(!ws.undo(), "and only one");
+}
+
+#[test]
+fn a_refused_step_says_why_until_another_step_works_or_the_selection_changes() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let failed = |ws: &Workspace| {
+        ws.toast_keys()
+            .contains(&"ws-toast-command-failed".to_owned())
+    };
+    REFUSE.store(true, Ordering::SeqCst);
+    ws.run_leaf(OTHER);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.toast_keys(), ["ws-toast-command-failed"]);
+    // it stays while nothing else happens
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(failed(&ws));
+    // another step works: the message goes
+    REFUSE.store(false, Ordering::SeqCst);
+    ws.run_leaf(VISIT);
+    ws.answer_leaf_input(VISIT, Some(PathBuf::from("/tmp/visit.stl")));
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(!failed(&ws), "{:?}", ws.toast_keys());
+    // refused again: selecting the same item keeps it, another one clears it
+    REFUSE.store(true, Ordering::SeqCst);
+    ws.select_item(OTHER);
+    ws.run_leaf(OTHER);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(failed(&ws));
+    ws.select_item(OTHER);
+    assert!(failed(&ws), "the same selection keeps it");
+    ws.select_item(BITE);
+    assert!(!failed(&ws), "another selection clears it");
 }
 
 #[test]

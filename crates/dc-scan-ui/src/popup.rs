@@ -5,18 +5,23 @@
 //! order of the work:
 //!
 //! 1. Acquisition: start, pause / resume, stop, start over, the automatic
-//!    scan with the turntable, and the settings of the acquisition;
+//!    scan with the turntable (with the quality of its mesh: resolution,
+//!    refinement, finish; its result is the finished mesh, shown framed,
+//!    with a report), and the settings of the acquisition;
 //! 2. Point cloud: stray points, largest piece, smoothing, thinning, a
 //!    rectangle selection to delete, a cut below a level;
 //! 3. Surface: its resolution (Fine 0.15, Standard 0.3, Fast 0.6 mm or a
-//!    custom value) and the button that builds it;
-//! 4. Surface tools: holes, smoothing, loose pieces, simplification;
+//!    custom value) and the button that builds it, and the rebuild from the
+//!    stops of an automatic scan at a finer resolution;
+//! 4. Surface tools: finish (clean, close the holes, optimise), holes,
+//!    smoothing, loose pieces, simplification;
 //! 5. Import: one of the roles of the [`crate::ScanTarget`], and the
 //!    hand-over of the surface to the host (`scan.import`).
 //!
 //! Each control runs a `scan.*` or `turntable.*` command
 //! ([`ScanPopup::command`]); the drawing only reads the controller.
 
+mod framing;
 mod turntable;
 
 use std::sync::Arc;
@@ -25,9 +30,9 @@ use std::time::Duration;
 use dc_case::ScanRole;
 use dc_mesh::TriMesh;
 use dc_scanner::control::{
-    SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD, SCAN_PAUSE,
-    SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START, SCAN_STOP, SCAN_UNDO,
-    TURNTABLE_CONNECT, TURNTABLE_DEVICES,
+    SCAN_AUTO, SCAN_CLOUD, SCAN_CONNECT, SCAN_DEVICES, SCAN_IMPORT, SCAN_MESH, SCAN_MESH_BUILD,
+    SCAN_PAUSE, SCAN_RECONSTRUCT, SCAN_REDO, SCAN_RESET, SCAN_RESUME, SCAN_SETTINGS, SCAN_START,
+    SCAN_STOP, SCAN_UNDO, TURNTABLE_CONNECT, TURNTABLE_DEVICES,
 };
 use dc_scanner::{
     CloudOp, DeviceInfo, LivePreview, MeshOp, PointCloud, ScanSettings, ScanState, ScanStatus,
@@ -35,18 +40,23 @@ use dc_scanner::{
 use dc_scene::MeshColoring;
 use dc_ui::fonts;
 use dc_ui::icons as ic;
+use dc_ui::panels::{Side, SidePanel};
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_viewport::camera::look_rotation;
 use dc_viewport::{ViewMesh, ViewPoints, Viewport};
 use egui::{
     Align, Align2, Color32, Id, Key, Layout, Margin, Modal, Modifiers, PointerButton, Pos2, Rect,
-    RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
+    RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, vec2,
 };
+use framing::Follow;
 use glam::Vec3;
 use serde_json::{Value, json};
 pub(crate) use turntable::OPEN_SEARCH_S;
-use turntable::{CalSnap, JobSnap, TableSnap, TableUi};
+use turntable::{
+    CalSnap, FinishSnap, JobSnap, ReconSnap, TableSnap, TableUi, finish_report, recon_report,
+    sub_heading,
+};
 
 use crate::{
     ImportWords, ScanFailure, ScanPopup, ScanTarget, caption, scene_color, select, t, tr_n,
@@ -55,10 +65,45 @@ use crate::{
 /// Resolutions of the surface (mm): Fine, Standard, Fast; the fourth choice
 /// is the custom value.
 const RESOLUTIONS: [f32; 3] = [0.15, 0.3, 0.6];
-/// Width of the steps panel.
-const PANEL_WIDTH: f32 = 340.0;
+/// The width of the steps panel the user chose (every scan window shares
+/// it), and whether they resized it since the host last saved it.
+static STEPS_WIDTH: std::sync::Mutex<(Option<f32>, bool)> = std::sync::Mutex::new((None, false));
+
+fn steps_width() -> f32 {
+    let saved = STEPS_WIDTH.lock().map_or(None, |s| s.0);
+    saved.unwrap_or(dc_ui::tokens::tokens().size.scan_steps_width)
+}
+
+fn set_steps_width(width: f32, resized: bool) {
+    if let Ok(mut s) = STEPS_WIDTH.lock() {
+        s.0 = Some(width);
+        s.1 |= resized;
+    }
+}
+
+/// Sets the width of the steps panel of the scan windows (the saved one).
+pub fn restore_steps_width(width: f32) {
+    let sz = dc_ui::tokens::tokens().size;
+    if width.is_finite()
+        && let Ok(mut s) = STEPS_WIDTH.lock()
+    {
+        s.0 = Some(width.clamp(sz.scan_steps_min_width, sz.scan_steps_max_width));
+    }
+}
+
+/// The width of the steps panel once the user finished resizing it (a drag
+/// of its edge, or a double-click that restores the default): the host
+/// saves it.
+pub fn take_resized_steps_width() -> Option<f32> {
+    let mut s = STEPS_WIDTH.lock().ok()?;
+    std::mem::take(&mut s.1).then(|| s.0).flatten()
+}
 /// Frames per second of the live view while scanning.
 const LIVE_FRAME: Duration = Duration::from_millis(66);
+/// Height of the 3D view's starting viewpoint above the platter, as an
+/// angle from the scanner's side (degrees): about where the scanner of a
+/// turntable rig looks from.
+const VIEW_ELEVATION_DEG: f32 = 25.0;
 
 /// Ids of the clouds of the 3D view.
 const CLOUD_ID: u64 = 1;
@@ -137,6 +182,21 @@ impl Snapshot {
             .and_then(|j| j.error.as_ref())
             .or_else(|| self.calibrating.as_ref().and_then(|j| j.error.as_ref()))
     }
+
+    /// A job of the rig is reconnecting the turntable whose link dropped.
+    fn reconnecting(&self) -> bool {
+        [self.auto.as_ref(), self.calibrating.as_ref()]
+            .into_iter()
+            .any(|j| JobSnap::running(j).is_some_and(|j| j.reconnecting))
+    }
+
+    /// The automatic scan is building the surface from its stops: the
+    /// acquisition is stopped (or about to be), nothing is tracked or
+    /// turning, only the phase of the job shows.
+    fn finishing(&self) -> bool {
+        JobSnap::running(self.auto.as_ref())
+            .is_some_and(|j| j.finishing() || self.status.state == ScanState::Stopped)
+    }
 }
 
 /// What the 3D view shows.
@@ -193,6 +253,21 @@ fn addr<T>(a: &Arc<T>) -> usize {
     Arc::as_ptr(a) as *const () as usize
 }
 
+/// What the live view frames: the cylinder of the region of interest when
+/// the scan world is the calibrated rig frame (+Z the turntable axis), else
+/// the robust bounds of the fused cloud (the points of the latest frame
+/// only when there is no cloud yet).
+fn live_box(snap: &Snapshot) -> Option<(Vec3, Vec3)> {
+    let preview = snap.preview.as_ref()?;
+    if snap.settings.use_roi && snap.status.rig_world {
+        return Some(turntable::roi_box(
+            snap.settings.roi_radius_mm,
+            snap.settings.roi_height_mm,
+        ));
+    }
+    framing::robust_box(&preview.cloud.points).or_else(|| framing::bounds(&preview.frame_points))
+}
+
 /// A control of the popup that was used this frame.
 enum Act {
     Run(&'static str, Value),
@@ -246,6 +321,16 @@ pub(crate) struct ScanUi {
     edited: Option<Uploaded>,
     /// Frame the view on the next content.
     fit: bool,
+    /// Whether the live view follows the growing scan.
+    follow: Follow,
+    /// A calibration was running when the view was last drawn.
+    calibrating_before: bool,
+    /// An automatic scan was seen running: its result is shown (and the
+    /// view framed) once it ends.
+    auto_pending: bool,
+    /// What the latest manual mesh finish and rebuild reported.
+    manual_finish: Option<FinishSnap>,
+    manual_recon: Option<ReconSnap>,
 }
 
 impl ScanUi {
@@ -288,6 +373,11 @@ impl ScanUi {
             live: None,
             edited: None,
             fit: true,
+            follow: Follow::default(),
+            calibrating_before: false,
+            auto_pending: false,
+            manual_finish: None,
+            manual_recon: None,
         }
     }
 
@@ -393,7 +483,11 @@ impl ScanUi {
             }
             TURNTABLE_DEVICES => self.table.listed(out),
             TURNTABLE_CONNECT => self.table.connected(out),
-            SCAN_START => self.fit |= self.snap.as_ref().is_none_or(|s| s.cloud.is_none()),
+            SCAN_START | SCAN_AUTO => {
+                self.manual_finish = None;
+                self.manual_recon = None;
+                self.refit();
+            }
             SCAN_STOP => {
                 self.show_surface = false;
                 self.selection = None;
@@ -401,7 +495,9 @@ impl ScanUi {
             SCAN_RESET => {
                 self.selection = None;
                 self.imported = None;
-                self.fit = true;
+                self.manual_finish = None;
+                self.manual_recon = None;
+                self.refit();
             }
             SCAN_SETTINGS => {
                 if let Ok(s) = serde_json::from_value::<ScanSettings>(out.clone()) {
@@ -412,7 +508,23 @@ impl ScanUi {
                 self.show_surface = false;
                 self.selection = None;
             }
-            SCAN_MESH_BUILD => self.show_surface = true,
+            // from the stops (a fine reconstruction) or from the cloud
+            SCAN_MESH_BUILD => {
+                self.manual_recon = out.get("reconstruction").and_then(ReconSnap::from_json);
+                self.manual_finish = None;
+                self.show_surface = true;
+            }
+            // a rebuild from the stops replaces the surface
+            SCAN_RECONSTRUCT => {
+                self.manual_recon = out.get("reconstruction").and_then(ReconSnap::from_json);
+                self.manual_finish = None;
+                self.show_surface = true;
+                self.refit();
+            }
+            // the report of a finish; any other mesh tool leaves none
+            SCAN_MESH => {
+                self.manual_finish = out.get("finish").and_then(FinishSnap::from_json);
+            }
             SCAN_UNDO | SCAN_REDO => self.selection = None,
             _ => {}
         }
@@ -456,10 +568,25 @@ impl ScanUi {
 
     /// Hands what the view shows to the viewport, when it changed.
     fn sync_view(&mut self, ui: &Ui) {
-        let content = self.content();
         let Some(snap) = self.snap.clone() else {
             return;
         };
+        // a calibration that ended: the rig and the view start afresh
+        let calibrating = JobSnap::running(snap.calibrating.as_ref()).is_some();
+        if std::mem::replace(&mut self.calibrating_before, calibrating) && !calibrating {
+            self.refit();
+        }
+        // an automatic scan that ended shows its result, framed: the
+        // finished mesh when it made one, else the points
+        if JobSnap::running(snap.auto.as_ref()).is_some() {
+            self.auto_pending = true;
+        } else if self.auto_pending && !snap.live() && snap.cloud.is_some() {
+            self.auto_pending = false;
+            self.show_surface =
+                snap.mesh.is_some() && snap.auto.as_ref().is_some_and(|j| j.finish.is_some());
+            self.refit();
+        }
+        let content = self.content();
         let c = *colors(ui);
         let key = ShownKey {
             content,
@@ -531,11 +658,28 @@ impl ScanUi {
         vp.settings.wireframe = self.wireframe && content == Content::Surface;
         vp.set_points(points);
         vp.set_meshes(meshes);
-        if self.fit && content != Content::Nothing {
-            vp.fit();
-            self.fit = false;
+        if content != Content::Nothing {
+            let live = content == Content::Live;
+            let points = snap.preview.as_ref().map_or(0, |p| p.cloud.len());
+            if self.fit || (live && self.follow.due(points)) {
+                if !live {
+                    vp.fit();
+                    self.fit = false;
+                } else if let Some((lo, hi)) = live_box(&snap) {
+                    vp.fit_box(lo, hi);
+                    self.follow.framed(points);
+                    self.fit = false;
+                }
+            }
         }
         self.shown = Some(key);
+    }
+
+    /// The view is framed again from the next content on, and follows the
+    /// scan again if the user had moved the camera.
+    fn refit(&mut self) {
+        self.fit = true;
+        self.follow.restart();
     }
 
     // ------------------------------------------------------------ drawing
@@ -545,19 +689,34 @@ impl ScanUi {
         ui.add_space(8.0);
         self.status_row(ui);
         ui.add_space(10.0);
+        // the steps at the right, as wide as the user dragged their edge
+        // (double-click: back to the default); the 3D view keeps the rest
         let body = ui.available_rect_before_wrap();
-        let panel = Rect::from_min_max(pos2(body.right() - PANEL_WIDTH, body.top()), body.max);
-        let view = Rect::from_min_max(body.min, pos2(panel.left() - 12.0, body.bottom()));
-        ui.scope_builder(UiBuilder::new().max_rect(view), |ui| {
-            self.view(ui, view);
-        });
-        ui.scope_builder(UiBuilder::new().max_rect(panel), |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_width(PANEL_WIDTH - 12.0);
-                    self.steps(ui, busy, out);
-                });
+        ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+            let sz = dc_ui::tokens::tokens().size;
+            let mut width = steps_width();
+            let r = SidePanel::new(
+                Side::Right,
+                "dc-scan-steps",
+                sz.scan_steps_width,
+                sz.scan_steps_min_width..=sz.scan_steps_max_width,
+            )
+            .reserve(sz.viewport_min_width)
+            .frame(egui::Frame::new().inner_margin(Margin {
+                left: 12,
+                ..Margin::ZERO
+            }))
+            .show(ui, &mut width, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("dc-scan-steps-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.steps(ui, busy, out));
+            });
+            set_steps_width(width, r.resized);
+            let view = ui.available_rect_before_wrap();
+            ui.scope_builder(UiBuilder::new().max_rect(view), |ui| {
+                self.view(ui, view);
+            });
         });
         ui.allocate_rect(body, Sense::hover());
     }
@@ -689,10 +848,22 @@ impl ScanUi {
             if points > 0 {
                 text(ui, tr_n("scan-points", points.to_string()));
             }
+            if let Some([tilt, yaw]) = s.status.scanner_deg {
+                text(
+                    ui,
+                    dc_i18n::tr_args(
+                        "scan-scanner-pose",
+                        &[
+                            ("tilt", &turntable::deg(tilt)),
+                            ("yaw", &turntable::deg(yaw)),
+                        ],
+                    ),
+                );
+            }
             if let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
                 text(ui, tr_n("scan-triangles", m.face_count().to_string()));
             }
-            if s.live() {
+            if s.live() && !s.finishing() {
                 let (dot, key) = if s.status.tracking_ok {
                     (c.status_success, "scan-tracking-ok")
                 } else {
@@ -714,7 +885,10 @@ impl ScanUi {
                 code: code.clone(),
                 detail: s.status.error_detail.clone().unwrap_or_default(),
             });
-            if let Some(f) = self
+            if s.reconnecting() {
+                // not a failure: the job reconnects and goes on
+                widgets::badge(ui, BadgeKind::Warning, t("turntable-reconnecting"));
+            } else if let Some(f) = self
                 .error
                 .as_ref()
                 .or(stream.as_ref())
@@ -734,15 +908,23 @@ impl ScanUi {
         {
             let mut vp = Viewport::new(rs);
             vp.settings.hover_pick = false;
-            // as the scanner sees it: its first frame looks along +Z, Y down
-            vp.camera_mut().rotation = look_rotation(Vec3::Z, Vec3::NEG_Y);
+            // as the scanner sees the scan world (+Z up, the scanner on +X):
+            // from its side, a little from above
+            let e = VIEW_ELEVATION_DEG.to_radians();
+            vp.camera_mut().rotation = look_rotation(Vec3::new(-e.cos(), 0.0, -e.sin()), Vec3::Z);
             self.viewport = Some(vp);
         }
         self.sync_view(ui);
         let mut response = None;
         if let Some(vp) = self.viewport.as_mut() {
             vp.settings.background = Some(scene_color(c.bg_viewport));
-            response = Some(vp.ui(ui).response);
+            let r = vp.ui(ui);
+            // a camera that moved without a framing is the user's: the view
+            // stays where they put it until the next framing is asked for
+            if r.camera_changed && !r.fit_applied {
+                self.follow.user_moved = true;
+            }
+            response = Some(r.response);
         } else {
             ui.allocate_rect(rect, Sense::hover());
             centered(ui, rect, &t("scan-no-gpu"), c.text_disabled);
@@ -757,10 +939,9 @@ impl ScanUi {
         }
         // tracking lost: the view says so all around
         if content == Content::Live
-            && self
-                .snap
-                .as_ref()
-                .is_some_and(|s| s.status.state == ScanState::Scanning && !s.status.tracking_ok)
+            && self.snap.as_ref().is_some_and(|s| {
+                s.status.state == ScanState::Scanning && !s.status.tracking_ok && !s.finishing()
+            })
         {
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
@@ -802,7 +983,7 @@ impl ScanUi {
                 if content != Content::Nothing
                     && widgets::icon_button(ui, ic::CORNERS_OUT, t("scan-fit")).clicked()
                 {
-                    self.fit = true;
+                    self.refit();
                     self.shown = None;
                 }
             },
@@ -923,6 +1104,9 @@ impl ScanUi {
             });
             ui.add_space(8.0);
         }
+        // the surface being built: no other work meanwhile (a new job is
+        // refused anyway); Stop below cancels the job and keeps its stops
+        let busy = busy || snap.finishing();
         if has_cloud {
             ui.horizontal(|ui| {
                 let edit = !busy;
@@ -1060,6 +1244,34 @@ impl ScanUi {
                 .clicked()
             {
                 out.push(Act::Run(SCAN_MESH_BUILD, json!({ "resolution_mm": mm })));
+            }
+        });
+        ui.add_enabled_ui(has_cloud && !busy, |ui| {
+            // a scan with stops (the automatic scan) can be rebuilt finer
+            ui.add_space(12.0);
+            sub_heading(ui, "scan-rebuild-title");
+            caption(ui, t("scan-rebuild-hint"));
+            ui.add_space(6.0);
+            self.table.quality_ui(ui, false);
+            ui.add_space(6.0);
+            if Button::secondary(t("scan-rebuild-stops"))
+                .icon(ic::ARROWS_CLOCKWISE)
+                .enabled(has_cloud && !busy)
+                .full_width(true)
+                .show(ui)
+                .clicked()
+            {
+                out.push(Act::Run(
+                    SCAN_RECONSTRUCT,
+                    json!({
+                        "resolution_mm": self.table.resolution_mm(),
+                        "refine": self.table.refine,
+                    }),
+                ));
+            }
+            if let Some(r) = &self.manual_recon {
+                ui.add_space(6.0);
+                recon_report(ui, r);
             }
         });
 
@@ -1422,6 +1634,16 @@ impl ScanUi {
                 .show(ui)
                 .clicked()
         };
+        if button(ui, "scan-finish-mesh", ic::MAGIC_WAND) {
+            out.push(Act::Run(SCAN_MESH, json!({ "op": "finish" })));
+        }
+        ui.add_space(2.0);
+        caption(ui, t("scan-finish-mesh-hint"));
+        if let Some(f) = &self.manual_finish {
+            ui.add_space(4.0);
+            finish_report(ui, f);
+        }
+        ui.add_space(10.0);
         widgets::labeled_slider(
             ui,
             &t("scan-hole-size"),

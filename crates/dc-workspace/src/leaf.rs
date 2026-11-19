@@ -1116,7 +1116,8 @@ fn correction_row(
             }
         });
     });
-    ui.horizontal(|ui| {
+    // the computed value, the badge and the reset wrap in a narrow inspector
+    ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new(dc_i18n::tr_args(
                 "ws-ca-edit-computed",
