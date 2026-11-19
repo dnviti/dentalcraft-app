@@ -270,6 +270,26 @@ fn frames_until(
     h.step();
 }
 
+/// Steps until the "Start the automatic scan" button stops moving (a
+/// scroll to it has ended), within [`WAIT`].
+fn settle(h: &mut Harness<'static, App>) {
+    let start = Instant::now();
+    let at = |h: &Harness<'static, App>| {
+        h.get_by_role_and_label(Role::Button, "Start the automatic scan")
+            .rect()
+    };
+    let mut last = at(h);
+    let mut still = 0;
+    while still < 3 {
+        assert!(start.elapsed() < WAIT, "the scroll to Start settles");
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+        let now = at(h);
+        still = if now == last { still + 1 } else { 0 };
+        last = now;
+    }
+}
+
 #[test]
 fn the_scan_button_opens_the_window_and_starts_nothing() {
     let mut h = harness(Workspace::new_headless(module(), None, None));
@@ -356,18 +376,22 @@ fn the_turntable_block_connects_the_simulated_turntable() {
         // scrolling panel
         h.get_by_role_and_label(Role::Button, "Start the automatic scan")
             .scroll_to_me();
-        h.step();
-        h.step();
+        // the scroll settles before the click (a click on a button still
+        // moving is lost); then the confirmation comes within a bounded
+        // wait, however loaded the machine is
+        settle(&mut h);
         h.get_by_role_and_label(Role::Button, "Start the automatic scan")
             .click();
-        h.step();
-        h.step();
-        assert!(h.query_by_label("Scan without calibrating?").is_some());
+        frames_until(
+            &mut h,
+            "the confirmation of a scan without calibration",
+            |h| h.query_by_label("Scan without calibrating?").is_some(),
+        );
         h.get_by_role_and_label(Role::Button, "Calibrate first")
             .click();
-        h.step();
-        h.step();
-        assert!(h.query_by_label("Scan without calibrating?").is_none());
+        frames_until(&mut h, "the confirmation closes", |h| {
+            h.query_by_label("Scan without calibrating?").is_none()
+        });
         assert!(!h.state().ws.is_scan_busy(), "nothing was started");
     }
     assert!(
