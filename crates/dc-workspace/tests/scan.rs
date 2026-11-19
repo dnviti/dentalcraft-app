@@ -352,6 +352,12 @@ fn the_turntable_block_connects_the_simulated_turntable() {
         // the folded turntable controls bring Acquisition into view
         h.get_by_label("Hide the turntable controls").click();
         h.step();
+        // the quality settings of the automatic scan push Start down the
+        // scrolling panel
+        h.get_by_role_and_label(Role::Button, "Start the automatic scan")
+            .scroll_to_me();
+        h.step();
+        h.step();
         h.get_by_role_and_label(Role::Button, "Start the automatic scan")
             .click();
         h.step();

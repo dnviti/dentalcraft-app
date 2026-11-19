@@ -150,6 +150,21 @@ impl Snapshot {
             .and_then(|j| j.error.as_ref())
             .or_else(|| self.calibrating.as_ref().and_then(|j| j.error.as_ref()))
     }
+
+    /// A job of the rig is reconnecting the turntable whose link dropped.
+    fn reconnecting(&self) -> bool {
+        [self.auto.as_ref(), self.calibrating.as_ref()]
+            .into_iter()
+            .any(|j| JobSnap::running(j).is_some_and(|j| j.reconnecting))
+    }
+
+    /// The automatic scan is building the surface from its stops: the
+    /// acquisition is stopped (or about to be), nothing is tracked or
+    /// turning, only the phase of the job shows.
+    fn finishing(&self) -> bool {
+        JobSnap::running(self.auto.as_ref())
+            .is_some_and(|j| j.finishing() || self.status.state == ScanState::Stopped)
+    }
 }
 
 /// What the 3D view shows.
@@ -801,7 +816,7 @@ impl ScanUi {
             if let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
                 text(ui, tr_n("scan-triangles", m.face_count().to_string()));
             }
-            if s.live() {
+            if s.live() && !s.finishing() {
                 let (dot, key) = if s.status.tracking_ok {
                     (c.status_success, "scan-tracking-ok")
                 } else {
@@ -823,7 +838,10 @@ impl ScanUi {
                 code: code.clone(),
                 detail: s.status.error_detail.clone().unwrap_or_default(),
             });
-            if let Some(f) = self
+            if s.reconnecting() {
+                // not a failure: the job reconnects and goes on
+                widgets::badge(ui, BadgeKind::Warning, t("turntable-reconnecting"));
+            } else if let Some(f) = self
                 .error
                 .as_ref()
                 .or(stream.as_ref())
@@ -874,10 +892,9 @@ impl ScanUi {
         }
         // tracking lost: the view says so all around
         if content == Content::Live
-            && self
-                .snap
-                .as_ref()
-                .is_some_and(|s| s.status.state == ScanState::Scanning && !s.status.tracking_ok)
+            && self.snap.as_ref().is_some_and(|s| {
+                s.status.state == ScanState::Scanning && !s.status.tracking_ok && !s.finishing()
+            })
         {
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
@@ -1040,6 +1057,9 @@ impl ScanUi {
             });
             ui.add_space(8.0);
         }
+        // the surface being built: no other work meanwhile (a new job is
+        // refused anyway); Stop below cancels the job and keeps its stops
+        let busy = busy || snap.finishing();
         if has_cloud {
             ui.horizontal(|ui| {
                 let edit = !busy;

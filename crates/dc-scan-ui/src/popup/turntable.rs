@@ -124,6 +124,13 @@ pub(super) struct JobSnap {
     pub reconstruction: Option<ReconSnap>,
     /// `scan.auto`: what the mesh finish changed.
     pub finish: Option<FinishSnap>,
+    /// Times the link to the turntable dropped and came back during the job.
+    pub reconnects: u32,
+    /// The link dropped and the job is reconnecting the turntable now.
+    pub reconnecting: bool,
+    /// `scan.auto` stop-and-capture, once ended: the stops kept for a
+    /// rebuild (also when the job failed or was cancelled).
+    pub kept_stops: Option<u32>,
 }
 
 impl JobSnap {
@@ -148,7 +155,16 @@ impl JobSnap {
             phase: v["phase"].as_str().map(str::to_owned),
             reconstruction: v.get("reconstruction").and_then(ReconSnap::from_json),
             finish: v.get("finish").and_then(FinishSnap::from_json),
+            reconnects: u32::try_from(count(v, "reconnects")).unwrap_or(u32::MAX),
+            reconnecting: v["reconnecting"].as_bool().unwrap_or(false),
+            kept_stops: v["kept_stops"].as_u64().and_then(|n| u32::try_from(n).ok()),
         })
+    }
+
+    /// The job is past the acquisition, building the surface: the scanner
+    /// and the turntable are idle and only the phase shows.
+    pub fn finishing(&self) -> bool {
+        self.active && self.phase.as_deref().is_some_and(|p| p != "acquire")
     }
 
     /// The job while it runs.
@@ -283,6 +299,16 @@ pub(super) struct ReconSnap {
     pub vertices: u64,
     pub faces: u64,
     pub seconds: Option<f32>,
+    /// Stops left out because they disagree with the others (the piece
+    /// may have moved), whole tilt passes left out, and stops registered
+    /// again on their own.
+    pub rejected_stops: u64,
+    pub rejected_passes: u64,
+    pub rescued_stops: u64,
+    /// Per tilt pass, by tilt.
+    pub passes: Vec<PassSnap>,
+    /// The code of the warning of a reconstruction that left views out.
+    pub warning: Option<String>,
 }
 
 impl ReconSnap {
@@ -303,8 +329,55 @@ impl ReconSnap {
             vertices: count(v, "vertices"),
             faces: count(v, "faces"),
             seconds: num(&v["seconds"]),
+            rejected_stops: count(v, "rejected_stops"),
+            rejected_passes: count(v, "rejected_passes"),
+            rescued_stops: count(v, "rescued_stops"),
+            passes: v["pass_details"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(PassSnap::from_json)
+                .collect(),
+            warning: v["warning"].as_str().map(str::to_owned),
         })
     }
+}
+
+/// One tilt pass of a reconstruction.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PassSnap {
+    pub tilt_deg: f32,
+    pub stops: u64,
+    /// Rotation (degrees) and shift (mm) of the correction of the pass.
+    pub corrected_deg: f32,
+    pub corrected_mm: f32,
+    pub rescued_stops: u64,
+    pub rejected_stops: u64,
+    /// The whole pass was left out.
+    pub rejected: bool,
+}
+
+impl PassSnap {
+    fn from_json(v: &Value) -> Self {
+        Self {
+            tilt_deg: num(&v["tilt_deg"]).unwrap_or(0.0),
+            stops: count(v, "stops"),
+            corrected_deg: num(&v["corrected_deg"]).unwrap_or(0.0),
+            corrected_mm: num(&v["corrected_mm"]).unwrap_or(0.0),
+            rescued_stops: count(v, "rescued_stops"),
+            rejected_stops: count(v, "rejected_stops"),
+            rejected: v["rejected"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
+/// The tilts as the custom field writes them (`-20, 0, 20`).
+fn tilts_text(tilts: &[f32]) -> String {
+    tilts
+        .iter()
+        .map(f32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What the mesh finish did (`scan.auto`'s `finish`, the answer of the
@@ -632,7 +705,7 @@ impl Default for TableUi {
             tilt_deg: 0.0,
             speed: DEFAULT_SPEED_DEG_S,
             preset: 0,
-            custom: "-20, 0, 20".to_owned(),
+            custom: tilts_text(&AUTO_TILTS_DEG),
             rotation_deg: 360.0,
             expanded: true,
             confirm_auto: None,
@@ -747,8 +820,8 @@ impl TableUi {
                 &t("scan-auto-stop-step"),
                 &mut self.stop_step_deg,
                 2.0..=45.0,
-                1.0,
-                0,
+                0.5,
+                1,
                 "°",
                 AUTO_STEP_DEG,
             );
@@ -877,6 +950,39 @@ fn progress(ui: &mut Ui, text: &str, job: &JobSnap) {
     widgets::progress_bar(ui, Some(job.fraction()), width);
 }
 
+/// The warning that the link to the turntable dropped `count` times and
+/// the job went on.
+fn reconnect_warning(ui: &mut Ui, count: u32) {
+    let c = *colors(ui);
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(format!(
+            "{} {}",
+            ic::WARNING,
+            dc_i18n::tr_args("scan-auto-reconnected", &[("count", &count.to_string())])
+        ))
+        .font(fonts::ui(12.0))
+        .color(c.status_warning),
+    );
+}
+
+/// The progress of a calibration under way: its move, or the reconnection
+/// of the turntable when the link dropped.
+fn calibration_progress(ui: &mut Ui, job: &JobSnap) {
+    let text = if job.reconnecting {
+        t("turntable-reconnecting")
+    } else {
+        tr_n(
+            "turntable-cal-progress",
+            format!("{} / {}", job.step, job.steps),
+        )
+    };
+    progress(ui, &text, job);
+    if job.reconnects > 0 {
+        reconnect_warning(ui, job.reconnects);
+    }
+}
+
 /// What a calibration run measured: the errors of the fit, the stop pairs
 /// registered and the angle gain.
 fn calibration_report(ui: &mut Ui, r: &CalReport) {
@@ -976,6 +1082,67 @@ pub(super) fn recon_report(ui: &mut Ui, r: &ReconSnap) {
             ],
         ),
     );
+    // what was left out, and what was registered again
+    if r.rejected_stops > 0 || r.rejected_passes > 0 {
+        caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-recon-left-out",
+                &[
+                    ("stops", &r.rejected_stops.to_string()),
+                    ("passes", &r.rejected_passes.to_string()),
+                ],
+            ),
+        );
+    }
+    if r.rescued_stops > 0 {
+        caption(
+            ui,
+            dc_i18n::tr_args(
+                "scan-recon-rescued",
+                &[("count", &r.rescued_stops.to_string())],
+            ),
+        );
+    }
+    for p in &r.passes {
+        let tilt = deg(p.tilt_deg);
+        if p.rejected {
+            caption(
+                ui,
+                dc_i18n::tr_args("scan-recon-pass-rejected", &[("tilt", &tilt)]),
+            );
+        } else {
+            caption(
+                ui,
+                dc_i18n::tr_args(
+                    "scan-recon-pass",
+                    &[
+                        ("tilt", &tilt),
+                        ("stops", &p.stops.to_string()),
+                        ("deg", &format!("{:.2}", p.corrected_deg)),
+                        ("mm", &format!("{:.2}", p.corrected_mm)),
+                        ("rejected", &p.rejected_stops.to_string()),
+                    ],
+                ),
+            );
+        }
+    }
+    if r.warning.is_some() {
+        let c = *colors(ui);
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "{} {}",
+                ic::WARNING,
+                dc_i18n::tr_args(
+                    "scan-warn-views-rejected",
+                    &[("count", &r.rejected_stops.to_string())],
+                )
+            ))
+            .font(fonts::ui(12.0))
+            .color(c.status_warning),
+        );
+    }
 }
 
 /// What the mesh finish removed, closed and optimised.
@@ -1028,7 +1195,12 @@ pub(super) fn finish_report(ui: &mut Ui, f: &FinishSnap) {
 /// finish did and the warning of a weak scan.
 fn auto_report(ui: &mut Ui, job: &JobSnap) {
     let c = *colors(ui);
-    if job.quality.is_none() && job.reconstruction.is_none() && job.finish.is_none() {
+    if job.quality.is_none()
+        && job.reconstruction.is_none()
+        && job.finish.is_none()
+        && job.reconnects == 0
+        && job.kept_stops.is_none()
+    {
         return;
     }
     ui.add_space(8.0);
@@ -1083,6 +1255,20 @@ fn auto_report(ui: &mut Ui, job: &JobSnap) {
                 .color(c.status_warning),
         );
     }
+    if job.reconnects > 0 {
+        reconnect_warning(ui, job.reconnects);
+    }
+    // a scan without a finished surface keeps its stops for a rebuild
+    if let Some(n) = job.kept_stops.filter(|&n| n > 0)
+        && job.finish.is_none()
+    {
+        ui.add_space(4.0);
+        caption(
+            ui,
+            dc_i18n::tr_args("scan-kept-stops", &[("count", &n.to_string())]),
+        );
+        caption(ui, t("scan-kept-stops-hint"));
+    }
 }
 
 impl ScanUi {
@@ -1100,11 +1286,16 @@ impl ScanUi {
         let job = JobSnap::running(snap.auto.as_ref())
             .or(JobSnap::running(snap.calibrating.as_ref()))
             .is_some();
+        // the link dropped: the table is known but not reachable
+        let dropped = !table.connected && table.info.is_some();
+        let reconnecting = snap.reconnecting();
+        // the surface is being built: nothing moves any more
+        let finishing = snap.finishing();
 
         // picker, refresh, connection
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_enabled_ui(!table.connected && !busy, |ui| {
+            ui.add_enabled_ui(!table.connected && !dropped && !busy, |ui| {
                 let shown = table
                     .info
                     .as_ref()
@@ -1164,13 +1355,17 @@ impl ScanUi {
                     out.push(Act::Run(TURNTABLE_DISCONNECT, Value::Null));
                 }
             } else {
-                let params = self.table.devices.get(self.table.device).map_or(
-                    Value::Null,
-                    |d| json!({ "backend": d.backend, "device": d.id }),
-                );
+                // a dropped link connects the same table again
+                let params = match (&table.info, dropped) {
+                    (Some(i), true) => json!({ "backend": i.backend, "device": i.id }),
+                    _ => self.table.devices.get(self.table.device).map_or(
+                        Value::Null,
+                        |d| json!({ "backend": d.backend, "device": d.id }),
+                    ),
+                };
                 if Button::secondary(t("turntable-connect"))
                     .icon(ic::PLUGS_CONNECTED)
-                    .enabled(!busy && !self.table.devices.is_empty())
+                    .enabled(!busy && !reconnecting && (dropped || !self.table.devices.is_empty()))
                     .show(ui)
                     .clicked()
                 {
@@ -1179,7 +1374,9 @@ impl ScanUi {
             }
             // a paused automatic scan holds the turntable still
             let paused = snap.auto.as_ref().is_some_and(|j| j.paused);
-            let (kind, key) = match (table.connected, table.busy && !paused) {
+            let (kind, key) = match (table.connected, table.busy && !paused && !finishing) {
+                _ if reconnecting => (BadgeKind::Warning, "turntable-state-reconnecting"),
+                (false, _) if dropped => (BadgeKind::Danger, "turntable-state-dropped"),
                 (false, _) => (BadgeKind::Neutral, "turntable-state-off"),
                 (true, false) => (BadgeKind::Info, "turntable-state-ready"),
                 (true, true) => (BadgeKind::Warning, "turntable-state-moving"),
@@ -1187,6 +1384,19 @@ impl ScanUi {
             widgets::badge(ui, kind, t(key));
         });
         if !table.connected {
+            // a job that reconnects the table shows it, and its progress
+            if reconnecting {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!("{} {}", ic::WARNING, t("turntable-reconnecting")))
+                        .font(fonts::ui(12.0))
+                        .color(c.status_warning),
+                );
+            }
+            if let Some(j) = JobSnap::running(snap.calibrating.as_ref()) {
+                ui.add_space(6.0);
+                calibration_progress(ui, j);
+            }
             return;
         }
 
@@ -1215,14 +1425,7 @@ impl ScanUi {
         if !self.table.expanded || JobSnap::running(snap.auto.as_ref()).is_some() {
             if let Some(j) = JobSnap::running(snap.calibrating.as_ref()) {
                 ui.add_space(6.0);
-                progress(
-                    ui,
-                    &tr_n(
-                        "turntable-cal-progress",
-                        format!("{} / {}", j.step, j.steps),
-                    ),
-                    j,
-                );
+                calibration_progress(ui, j);
             }
             return;
         }
@@ -1398,14 +1601,7 @@ impl ScanUi {
         }
         ui.add_space(6.0);
         if let Some(j) = JobSnap::running(snap.calibrating.as_ref()) {
-            progress(
-                ui,
-                &tr_n(
-                    "turntable-cal-progress",
-                    format!("{} / {}", j.step, j.steps),
-                ),
-                j,
-            );
+            calibration_progress(ui, j);
             return;
         }
         let scanner =
@@ -1445,13 +1641,15 @@ impl ScanUi {
         ui.add_space(10.0);
         sub_heading(ui, "scan-auto-title");
         let table = &snap.table;
-        if !table.connected {
-            caption(ui, t("scan-auto-needs"));
-            return;
-        }
         if let Some(a) = JobSnap::running(snap.auto.as_ref()) {
-            // once the turning is done the job builds the mesh
-            let phase = a.phase.as_deref().and_then(phase_key);
+            // once the turning is done the job builds the surface (the
+            // acquisition is stopped, maybe before the phase says so)
+            let processing = snap.finishing();
+            let phase = a
+                .phase
+                .as_deref()
+                .and_then(phase_key)
+                .or(processing.then_some("scan-phase-other"));
             let text = match phase {
                 Some(key) => dc_i18n::tr_args(
                     "scan-auto-phase",
@@ -1470,6 +1668,11 @@ impl ScanUi {
                     ],
                 ),
             };
+            let text = if a.reconnecting {
+                t("turntable-reconnecting")
+            } else {
+                text
+            };
             progress(ui, &text, a);
             ui.add_space(4.0);
             let hint = if phase.is_some() {
@@ -1478,6 +1681,29 @@ impl ScanUi {
                 "scan-auto-hint"
             };
             caption(ui, t(hint));
+            // Stop cancels the job; the stops taken so far are kept
+            if processing {
+                ui.add_space(6.0);
+                if Button::secondary(t("scan-stop"))
+                    .icon(ic::STOP)
+                    .full_width(true)
+                    .show(ui)
+                    .clicked()
+                {
+                    out.push(Act::Run(TURNTABLE_STOP, Value::Null));
+                }
+            }
+            if a.reconnects > 0 {
+                reconnect_warning(ui, a.reconnects);
+            }
+            return;
+        }
+        if !table.connected {
+            caption(ui, t("scan-auto-needs"));
+            // what the scan that ended left, also when the link dropped
+            if !busy && let Some(j) = snap.auto.as_ref() {
+                auto_report(ui, j);
+            }
             return;
         }
         let busy = busy || JobSnap::running(snap.calibrating.as_ref()).is_some();
@@ -1509,7 +1735,7 @@ impl ScanUi {
                         ui,
                         &t("scan-auto-tilts"),
                         &mut self.table.custom,
-                        "-20, 0, 20",
+                        &tilts_text(&AUTO_TILTS_DEG),
                         None,
                         error.as_deref(),
                     );
@@ -1871,7 +2097,14 @@ mod tests {
             "kind": "auto", "state": "running", "step": 40, "steps": 43, "phase": "fill-holes",
             "reconstruction": {
                 "resolution_mm": 0.1, "stops": 74, "refined": 70, "mean_rms_before_mm": 0.21,
-                "mean_rms_mm": 0.09,
+                "mean_rms_mm": 0.09, "rejected_stops": 3, "rejected_passes": 1,
+                "rescued_stops": 2, "warning": "scan-views-rejected",
+                "pass_details": [
+                    { "tilt_deg": -20.0, "stops": 20, "corrected_deg": 0.4, "corrected_mm": 0.3,
+                      "rescued_stops": 2, "rejected_stops": 0, "rejected": false },
+                    { "tilt_deg": 20.0, "stops": 3, "corrected_deg": 0.0, "corrected_mm": 0.0,
+                      "rescued_stops": 0, "rejected_stops": 3, "rejected": true },
+                ],
                 "vertices": 90000, "faces": 180000, "seconds": 12.5,
             },
             "finish": {
@@ -1888,6 +2121,30 @@ mod tests {
         let r = j.reconstruction.unwrap();
         assert_eq!((r.stops, r.vertices, r.faces), (74, 90000, 180_000));
         assert_eq!((r.refined, r.mean_rms_before_mm), (70, Some(0.21)));
+        assert_eq!(
+            (r.rejected_stops, r.rejected_passes, r.rescued_stops),
+            (3, 1, 2)
+        );
+        assert_eq!(r.warning.as_deref(), Some("scan-views-rejected"));
+        assert_eq!(r.passes.len(), 2);
+        assert!(!r.passes[0].rejected && r.passes[1].rejected);
+        assert_eq!(
+            (r.passes[0].tilt_deg, r.passes[0].rescued_stops),
+            (-20.0, 2)
+        );
+        assert_eq!(r.passes[1].rejected_stops, 3);
+        // a report of an older core has none of it
+        let old = ReconSnap::from_json(&json!({ "stops": 5, "faces": 9 })).unwrap();
+        assert_eq!(
+            (old.rejected_stops, old.warning, old.passes.len()),
+            (0, None, 0)
+        );
+        // the custom tilts start as the default ones of the core
+        assert_eq!(tilts_text(&[-7.5, 0.0, 20.0]), "-7.5, 0, 20");
+        assert_eq!(
+            parse_tilts(&TableUi::default().custom, -30.0, 30.0),
+            Some(AUTO_TILTS_DEG.to_vec())
+        );
         assert_eq!(
             (r.resolution_mm, r.mean_rms_mm, r.seconds),
             (Some(0.1), Some(0.09), Some(12.5))
@@ -2081,5 +2338,261 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(faces, Some(mesh.face_count()));
+    }
+
+    #[test]
+    fn a_job_reports_reconnections_and_kept_stops() {
+        let j = JobSnap::from_json(&json!({
+            "kind": "auto", "state": "running", "step": 3, "steps": 20, "phase": "acquire",
+            "reconnects": 2, "reconnecting": true, "kept_stops": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            (j.reconnects, j.reconnecting, j.kept_stops),
+            (2, true, None)
+        );
+        let failed = JobSnap::from_json(&json!({
+            "kind": "auto", "state": "failed", "step": 5, "steps": 20,
+            "error": "ble-disconnected", "kept_stops": 4,
+        }))
+        .unwrap();
+        assert_eq!((failed.kept_stops, failed.reconnects), (Some(4), 0));
+        assert!(!failed.reconnecting && failed.error.is_some());
+        // the link dropped: the table is known, not connected
+        let t = TableSnap::from_json(&json!({
+            "connected": false,
+            "info": { "backend": "sim", "id": "sim-turntable", "name": "Sim" },
+        }));
+        assert!(!t.connected && t.info.is_some());
+    }
+
+    #[test]
+    fn the_finish_phases_show_the_phase_only() {
+        let running = |phase: &str| {
+            JobSnap::from_json(
+                &json!({ "state": "running", "step": 9, "steps": 10, "phase": phase }),
+            )
+            .unwrap()
+        };
+        assert!(!running("acquire").finishing());
+        for phase in [
+            "refine",
+            "fuse",
+            "extract",
+            "clean",
+            "fill-holes",
+            "optimise",
+        ] {
+            assert!(running(phase).finishing(), "{phase}");
+        }
+        let ended = JobSnap::from_json(
+            &json!({ "state": "done", "step": 10, "steps": 10, "phase": "optimise" }),
+        )
+        .unwrap();
+        assert!(!ended.finishing());
+        let mut s = Snapshot::read(&dc_scanner::ScanController::new());
+        assert!(!s.finishing() && !s.reconnecting());
+        s.auto = Some(running("fuse"));
+        assert!(s.finishing() && !s.reconnecting());
+        s.auto = Some(running("acquire"));
+        assert!(!s.finishing());
+        // the acquisition is stopped while the job still runs: processing
+        s.status.state = ScanState::Stopped;
+        assert!(s.finishing());
+        s.status.state = ScanState::Scanning;
+        assert!(!s.finishing());
+        s.auto = Some(JobSnap::from_json(&json!({ "state": "failed", "steps": 5 })).unwrap());
+        s.status.state = ScanState::Stopped;
+        assert!(!s.finishing());
+        s.auto = None;
+        s.calibrating = Some(
+            JobSnap::from_json(&json!({ "state": "running", "steps": 24, "reconnecting": true }))
+                .unwrap(),
+        );
+        assert!(s.reconnecting() && !s.finishing());
+    }
+
+    /// A popup on the simulated rig with its true calibration stored in
+    /// `dir`, so that stop and capture runs without measuring it.
+    fn rig_popup(dir: &std::path::Path) -> crate::ScanPopup {
+        use dc_scanner::rig::{RigCalibration, rfc3339, save_calibration};
+        use dc_scanner::sim::{self, SimOptions};
+        let options = SimOptions {
+            realtime: false,
+            width: 120,
+            height: 75,
+            ..SimOptions::default()
+        };
+        let to_cam = sim::rig_camera_pose(&options).inverse();
+        let axis_dir = to_cam.transform_vector3(Vec3::Z).normalize();
+        let calibration = RigCalibration {
+            axis_point: to_cam.transform_point3(Vec3::ZERO).into(),
+            axis_dir: axis_dir.into(),
+            platter_up: axis_dir.into(),
+            tilt_axis_point: Some(
+                to_cam
+                    .transform_point3(Vec3::new(0.0, 0.0, -sim::RIG_TILT_PIVOT_MM))
+                    .into(),
+            ),
+            tilt_axis_dir: Some(to_cam.transform_vector3(Vec3::X).normalize().into()),
+            scanner_serial: None,
+            turntable_id: "sim-turntable".into(),
+            created: rfc3339(std::time::SystemTime::now()),
+            fit_rms_deg: 0.0,
+            fit_rms_mm: 0.0,
+            angle_gain: 1.0,
+            fit_pairs: 24,
+            imu_up: None,
+        };
+        save_calibration(dir, &calibration).unwrap();
+        let mut popup = crate::ScanPopup::new(None);
+        popup.controller.lock().unwrap().set_rig_dir(dir);
+        run(
+            &mut popup,
+            dc_scanner::control::SCAN_CONNECT,
+            json!({"backend": "sim", "options": {"realtime": false, "width": 120, "height": 75}}),
+        );
+        let r = run(
+            &mut popup,
+            dc_scanner::control::TURNTABLE_CONNECT,
+            json!({"backend": "sim", "options": {"fast": true}}),
+        );
+        assert_eq!(r["calibrated"], true, "{r}");
+        popup
+    }
+
+    /// The window of `popup`, drawn headless.
+    fn window(popup: crate::ScanPopup) -> egui_kittest::Harness<'static, crate::ScanPopup> {
+        egui_kittest::Harness::builder()
+            .with_size(vec2(1600.0, 1000.0))
+            .with_accessibility_check(false)
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui_state(|ui, p: &mut crate::ScanPopup| p.show(ui), popup)
+    }
+
+    /// One pass of ten stops 10° apart, no finish: the scan ends paused
+    /// or, when it fails, stopped with its stops.
+    fn quick_scan() -> Value {
+        json!({"mode": "stop-and-capture", "tilts_deg": [0], "rotation_deg": 90, "step_deg": 10,
+               "frames_per_stop": 1, "deg_per_s": 90, "settle_s": 0, "finish": false})
+    }
+
+    /// Draws the window until the automatic scan ended and the popup
+    /// finalised it; returns what the window then reads.
+    fn until_the_scan_ends(h: &mut egui_kittest::Harness<'static, crate::ScanPopup>) -> Snapshot {
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            if let Some(s) = &h.state().ui.snap
+                && s.auto.as_ref().is_some_and(|a| !a.active)
+                && !h.state().is_busy()
+            {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 300, "the scan did not end");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // the job is finalised on the command thread, then drawn
+        for _ in 0..10 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.state().ui.snap.clone().unwrap()
+    }
+
+    #[test]
+    fn a_link_that_does_not_come_back_shows_the_lost_table_and_the_kept_stops() {
+        use dc_scanner::control::{SCAN_AUTO, SCAN_RECONSTRUCT};
+        use egui::Role;
+        use egui_kittest::kittest::Queryable;
+        let dir = tempfile::tempdir().unwrap();
+        let popup = rig_popup(dir.path());
+        // the link drops on the move to the fourth stop and does not return
+        popup
+            .controller
+            .lock()
+            .unwrap()
+            .sim_rig()
+            .inject_link_drop(5, false);
+        let mut h = window(popup);
+        h.state_mut().command(SCAN_AUTO, quick_scan());
+        let snap = until_the_scan_ends(&mut h);
+        let job = snap.auto.clone().unwrap();
+        assert_eq!(
+            job.error.as_ref().map(|e| e.code.as_str()),
+            Some("ble-disconnected")
+        );
+        assert_eq!(job.kept_stops, Some(4));
+        assert!(!snap.table.connected && snap.table.info.is_some());
+        assert_eq!(snap.status.state, dc_scanner::ScanState::Stopped);
+        assert!(snap.cloud.is_some());
+        // the header: lost, with a way to connect it again, not "Ready"
+        assert!(h.query_by_label("Link lost").is_some());
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Connect the turntable")
+                .is_some()
+        );
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Disconnect the turntable")
+                .is_none()
+        );
+        assert!(h.query_by_label("Ready").is_none());
+        assert!(h.query_by_label("Reconnecting").is_none());
+        // the stops taken are kept, and the window says so
+        assert!(h.query_by_label_contains("4 stops kept").is_some());
+        // the error says they are kept
+        assert!(t(&job.error.unwrap().key()).contains("The stops taken so far are kept"));
+        // and they build a surface
+        let r = {
+            let ticket = h
+                .state_mut()
+                .start_command(
+                    SCAN_RECONSTRUCT,
+                    json!({"resolution_mm": 0.5, "refine": false}),
+                )
+                .unwrap();
+            let start = std::time::Instant::now();
+            loop {
+                h.step();
+                if let Some(r) = h.state_mut().take_result(ticket) {
+                    break r.unwrap();
+                }
+                assert!(start.elapsed().as_secs() < 300, "rebuild did not end");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        assert_eq!(r["reconstruction"]["stops"], 4, "{r}");
+        assert!(r["faces"].as_u64().unwrap() > 0, "{r}");
+    }
+
+    #[test]
+    fn a_link_that_comes_back_is_a_warning_and_the_scan_goes_on() {
+        use dc_scanner::control::SCAN_AUTO;
+        use egui_kittest::kittest::Queryable;
+        let dir = tempfile::tempdir().unwrap();
+        let popup = rig_popup(dir.path());
+        popup
+            .controller
+            .lock()
+            .unwrap()
+            .sim_rig()
+            .inject_link_drop(5, true);
+        let mut h = window(popup);
+        h.state_mut().command(SCAN_AUTO, quick_scan());
+        let snap = until_the_scan_ends(&mut h);
+        let job = snap.auto.clone().unwrap();
+        assert!(job.error.is_none(), "{:?}", job.error);
+        assert_eq!((job.reconnects, job.reconnecting), (1, false));
+        assert_eq!(job.quality.as_ref().map(|q| q.stops), Some(10));
+        assert!(snap.table.connected);
+        assert!(
+            h.query_by_label_contains(
+                "disconnected 1 times and was reconnected; the scan went on."
+            )
+            .is_some()
+        );
+        // no red banner, no lost link
+        assert!(h.query_by_label("Link lost").is_none());
+        assert!(h.query_by_label("Ready").is_some());
     }
 }
