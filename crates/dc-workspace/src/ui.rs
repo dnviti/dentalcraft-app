@@ -797,7 +797,7 @@ impl Workspace {
                         .show(ui, |ui| {
                             for (keys, what) in SHORTCUTS {
                                 ui.label(
-                                    RichText::new(*keys)
+                                    RichText::new(dc_ui::keys::platform_keys(keys))
                                         .font(fonts::mono(12.0))
                                         .color(c.text_primary),
                                 );

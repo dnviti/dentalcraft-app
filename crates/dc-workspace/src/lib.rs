@@ -72,7 +72,7 @@ dc_i18n::bundle!(pub(crate) fn loader);
 /// the module's).
 pub(crate) fn t(key: &str) -> String {
     loader();
-    dc_i18n::tr(key)
+    dc_ui::keys::platform_keys(&dc_i18n::tr(key)).into_owned()
 }
 
 #[cfg(test)]
