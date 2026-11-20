@@ -57,6 +57,7 @@ def manifest(version: str) -> bytes:
         "windows-standalone": f"dentalcraft_{version}_windows_x86_64.zip",
         "windows-exe": f"DentalCraft-{version}-setup.exe",
         "windows-msi": f"DentalCraft-{version}-x86_64.msi",
+        "macos-universal": f"dentalcraft_{version}_macos_universal.zip",
     }
     assets = {
         key: {

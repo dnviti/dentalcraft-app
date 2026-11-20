@@ -147,12 +147,12 @@ Asks the DentalCraft website for the newest version (DC_UPDATE_URL, when set, is
 for its update.json) and checks that the answer is signed with the DentalCraft release key.
 
 --check prints the answer as JSON and changes nothing: current, latest, update_available, kind
-(standalone, appimage, deb, rpm, flatpak, exe, msi or unknown: how this copy was installed),
+(standalone, appimage, deb, rpm, flatpak, exe, msi, macos-app or unknown: how this copy was installed),
 action (install, package-manager, manual or none), notes_url; command for apt, dnf and Flatpak
 installations; download {url, size} when DentalCraft installs it itself.
 
 Without --check, a newer version is downloaded, checked against the size and SHA-256 the signed
-answer gives, and installed: a standalone folder (.tar.gz, .zip) and an AppImage at once, a Windows
+answer gives, and installed: a standalone folder (.tar.gz, .zip), an AppImage and the macOS app (DentalCraft.app) at once, a Windows
 setup or MSI when dentalcraft-cli ends. Installations of apt, dnf and Flatpak are left to their
 package manager: the JSON gives the command. Prints the JSON of --check plus `updated`; the
 download progress goes to stderr. The same commands are app.update.check and app.update.apply.";

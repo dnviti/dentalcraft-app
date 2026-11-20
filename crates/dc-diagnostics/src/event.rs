@@ -234,7 +234,7 @@ pub struct AppInfo {
     /// Commit of the build, when known.
     pub commit: Option<String>,
     /// How it was installed: `deb`, `rpm`, `flatpak`, `appimage`, `setup`,
-    /// `msi`, `standalone` or `dev`.
+    /// `msi`, `macos-app`, `standalone` or `dev`.
     pub install_kind: Option<String>,
 }
 
@@ -260,6 +260,7 @@ pub fn install_kind(kind: dc_update::InstallKind) -> &'static str {
         K::Flatpak => "flatpak",
         K::Exe => "setup",
         K::Msi => "msi",
+        K::MacApp => "macos-app",
         K::Unknown => "dev",
     }
 }
@@ -341,6 +342,7 @@ mod tests {
         assert_eq!(Source::from_target("wgpu_core::device"), Source::Render);
         assert_eq!(Source::from_target("hyper"), Source::Other);
         assert_eq!(install_kind(dc_update::InstallKind::Exe), "setup");
+        assert_eq!(install_kind(dc_update::InstallKind::MacApp), "macos-app");
         assert_eq!(install_kind(dc_update::InstallKind::Unknown), "dev");
         let app = AppInfo::current();
         assert_eq!(app.version, env!("CARGO_PKG_VERSION"));

@@ -52,16 +52,20 @@ pub enum AssetKey {
     WindowsExe,
     /// `DentalCraft-V-x86_64.msi`.
     WindowsMsi,
+    /// `dentalcraft_V_macos_universal.zip`: `DentalCraft.app` for Apple
+    /// Silicon and Intel.
+    MacosUniversal,
 }
 
 impl AssetKey {
     /// Every key.
-    pub const ALL: [AssetKey; 5] = [
+    pub const ALL: [AssetKey; 6] = [
         AssetKey::LinuxStandalone,
         AssetKey::AppImage,
         AssetKey::WindowsStandalone,
         AssetKey::WindowsExe,
         AssetKey::WindowsMsi,
+        AssetKey::MacosUniversal,
     ];
 
     /// The key in `update.json`.
@@ -72,6 +76,7 @@ impl AssetKey {
             AssetKey::WindowsStandalone => "windows-standalone",
             AssetKey::WindowsExe => "windows-exe",
             AssetKey::WindowsMsi => "windows-msi",
+            AssetKey::MacosUniversal => "macos-universal",
         }
     }
 }

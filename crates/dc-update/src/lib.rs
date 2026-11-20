@@ -9,7 +9,8 @@
 //! 2. **Plan** ([`plan`]): how the running copy was installed
 //!    ([`Installation::detect`]: the `install-kind` marker, `$APPIMAGE`,
 //!    `/.flatpak-info`) decides the [`Action`]: DentalCraft installs the
-//!    standalone archives, the AppImage and the Windows installers itself;
+//!    standalone archives, the AppImage, the Windows installers and the macOS
+//!    `DentalCraft.app` itself;
 //!    the package manager updates deb, rpm and Flatpak installations (the
 //!    user gets the command); anything else is updated from the website.
 //! 3. **Prepare** ([`prepare`]): the download is checked against the size

@@ -28,6 +28,11 @@
       "url": "https://dentalcraft.app/download/DentalCraft-0.0.1-x86_64.msi",
       "sha256": "bad0bd15b279fd7622546b1850563131aadccfdb9644659374df142daa9663ee",
       "size": 28
+    },
+    "macos-universal": {
+      "url": "https://dentalcraft.app/download/dentalcraft_0.0.1_macos_universal.zip",
+      "sha256": "ecc5cf4ab8a840d4779c1abe89226cfa878745f1b887924a32c2139387df494f",
+      "size": 37
     }
   }
 }
