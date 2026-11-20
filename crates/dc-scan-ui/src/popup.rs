@@ -821,7 +821,8 @@ impl ScanUi {
     fn status_row(&self, ui: &mut Ui) {
         let c = *colors(ui);
         let state = self.state();
-        ui.horizontal(|ui| {
+        // a narrow window puts what does not fit on a second line
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             let (kind, key) = match state {
                 ScanState::Idle => (BadgeKind::Neutral, "scan-state-idle"),
@@ -1573,7 +1574,7 @@ impl ScanUi {
             let n = self.selection.as_ref().map_or(0, |s| s.indices.len());
             ui.add_space(4.0);
             caption(ui, tr_n("scan-selected", n.to_string()));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if Button::secondary(t("scan-delete-selected"))
                     .icon(ic::TRASH)
                     .enabled(n > 0)

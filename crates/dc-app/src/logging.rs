@@ -15,7 +15,10 @@ use tracing_subscriber::{EnvFilter, fmt};
 /// Starts logging to `<log_dir>/dentalcraft.log.<date>` and stderr, and to
 /// `diagnostics` (it records nothing without the user's consent). Keep the
 /// guard alive for the whole run (it flushes the file on drop). `RUST_LOG`
-/// overrides the default `info` filter.
+/// overrides the default `info` filter. A stderr that cannot be written
+/// (a closed pipe, no console) loses its lines and nothing else: the
+/// layers report no write error of their own, which they would print to
+/// that same stderr and panic.
 pub fn init(log_dir: &Path, diagnostics: Option<DiagLayer>) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
@@ -24,19 +27,32 @@ pub fn init(log_dir: &Path, diagnostics: Option<DiagLayer>) -> Option<WorkerGuar
             let appender = tracing_appender::rolling::daily(log_dir, LOG_PREFIX);
             let (writer, guard) = tracing_appender::non_blocking(appender);
             (
-                Some(fmt::layer().with_ansi(false).with_writer(writer)),
+                Some(
+                    fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(writer)
+                        .log_internal_errors(false),
+                ),
                 Some(guard),
             )
         }
         Err(e) => {
-            eprintln!("dentalcraft: cannot create {}: {e}", log_dir.display());
+            let _ = writeln!(
+                std::io::stderr(),
+                "dentalcraft: cannot create {}: {e}",
+                log_dir.display()
+            );
             (None, None)
         }
     };
     let res = tracing_subscriber::registry()
         .with(filter)
         .with(file_layer)
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .log_internal_errors(false),
+        )
         .with(diagnostics)
         .try_init();
     if res.is_err() {
@@ -74,7 +90,12 @@ pub fn install_panic_hook(log_dir: PathBuf, diagnostics: Option<Diagnostics>) {
             && let Ok(mut f) = std::fs::File::create(&path)
         {
             let _ = f.write_all(report.as_bytes());
-            eprintln!("dentalcraft: crash report written to {}", path.display());
+            // a panic inside the hook would abort: a closed stderr is ignored
+            let _ = writeln!(
+                std::io::stderr(),
+                "dentalcraft: crash report written to {}",
+                path.display()
+            );
         }
         previous(info);
     }));

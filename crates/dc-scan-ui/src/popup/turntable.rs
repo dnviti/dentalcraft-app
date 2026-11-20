@@ -939,10 +939,13 @@ fn progress(ui: &mut Ui, text: &str, job: &JobSnap) {
         } else {
             widgets::spinner(ui, 14.0);
         }
-        ui.label(
-            RichText::new(text)
-                .font(fonts::medium(13.0))
-                .color(c.text_primary),
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .font(fonts::medium(13.0))
+                    .color(c.text_primary),
+            )
+            .wrap(),
         );
     });
     ui.add_space(4.0);
@@ -1343,7 +1346,8 @@ impl ScanUi {
             });
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        // the column may be narrow: the state goes under the button then
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             if table.connected {
                 if Button::secondary(t("turntable-disconnect"))
@@ -1402,7 +1406,7 @@ impl ScanUi {
 
         // where it is
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             let text = |ui: &mut Ui, s: String| {
                 ui.label(
@@ -1444,7 +1448,8 @@ impl ScanUi {
                 "°",
                 45.0,
             );
-            ui.horizontal(|ui| {
+            // side by side when they fit, else one under the other
+            ui.horizontal_wrapped(|ui| {
                 let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
                 for (key, icon, sign) in [
                     ("turntable-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
@@ -1509,7 +1514,7 @@ impl ScanUi {
             }
         });
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // Stop works whenever the turntable is connected and no other
             // command holds the scanner (a running command has its own Stop)
             if Button::secondary(t("turntable-stop"))

@@ -10,6 +10,8 @@
     windows_subsystem = "windows"
 )]
 
+use std::io::Write;
+
 use dc_app::config::{Dirs, Store};
 use dc_app::control::{ControlServer, ControlledApp};
 use dc_app::{AppDeps, DentalCraftApp, Updates};
@@ -43,7 +45,8 @@ fn main() -> eframe::Result {
     }) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e}");
+            // a closed or missing stderr must not turn this into a panic
+            let _ = writeln!(std::io::stderr(), "error: {e}");
             std::process::exit(2);
         }
     };
@@ -90,8 +93,11 @@ fn main() -> eframe::Result {
     };
     tracing::info!("sign-in server: {issuer}");
     if let Some(c) = &control {
-        // scripts read the port from this line
-        println!("control: listening on {}", c.local_addr());
+        // scripts read the port from this line; a closed or missing reader
+        // (a wrapper that went away, no console) must not stop the app
+        let mut out = std::io::stdout().lock();
+        let _ =
+            writeln!(out, "control: listening on {}", c.local_addr()).and_then(|()| out.flush());
         tracing::info!("control bridge listening on {}", c.local_addr());
     }
 

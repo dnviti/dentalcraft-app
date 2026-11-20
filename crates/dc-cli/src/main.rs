@@ -323,8 +323,10 @@ fn main() -> ExitCode {
     let sub = matches.subcommand().map(|(_, m)| m);
     let result = match cli.command {
         None => {
-            // no subcommand: show what the tool is
-            Cli::command().print_help().map_err(|e| e.to_string())
+            // no subcommand: show what the tool is (a closed reader is not
+            // an error, as for every other output)
+            let _ = Cli::command().print_help();
+            Ok(())
         }
         Some(Cmd::Info { inputs }) => info(&inputs),
         Some(Cmd::Commands { json }) => commands(json),
@@ -342,7 +344,8 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            // a closed or missing stderr must not turn the failure into a panic
+            let _ = writeln!(std::io::stderr(), "error: {e}");
             ExitCode::FAILURE
         }
     }
@@ -720,7 +723,11 @@ fn update(check_only: bool) -> Result<()> {
         let pct = done * 100 / total.max(1);
         if shown.get() != Some(pct / 5) {
             shown.set(Some(pct / 5));
-            eprintln!("download: {pct}% of {:.1} MB", total as f64 / 1_000_000.0);
+            let _ = writeln!(
+                std::io::stderr(),
+                "download: {pct}% of {:.1} MB",
+                total as f64 / 1_000_000.0
+            );
         }
     };
     let out = dc_update::commands::run_apply(&source, &dc_update::work_dir(), &progress)
