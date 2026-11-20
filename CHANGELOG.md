@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0-alpha.12](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.11...v0.2.0-alpha.12) (2026-11-20)
+
+
+### Features
+
+* **diagnostics:** report the macOS version and memory ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **packaging:** build DentalCraft.app for macOS ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **scan-ui:** messages for the macOS Bluetooth permission errors ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **scan-ui:** say when the turntable calibration no longer fits the rig ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **scan-ui:** show what the scanner's vendor layer did, and the macOS capture-denied message ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **ui:** show Cmd and Option in shortcut texts on macOS ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **update:** update the macOS DentalCraft.app in place ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.7 and aligners v0.2.0-alpha.11 ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+* **scan-ui:** never panic on closed stdout/stderr, own sentences for camera access and program location, scan window fits 1280x800 ([181b871](https://github.com/dnviti-personal-org/dentalcraft-app/commit/181b8716beea2872079c77856f7e58efee432a21))
+
 ## [0.2.0-alpha.11](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.10...v0.2.0-alpha.11) (2026-11-19)
 
 
