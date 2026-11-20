@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template of Contents/Info.plist: packaging/macos/bundle.sh fills in the two placeholders. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleIdentifier</key><string>com.dentalcraft.DentalCraft</string>
+  <key>CFBundleName</key><string>DentalCraft</string>
+  <key>CFBundleDisplayName</key><string>DentalCraft</string>
+  <key>CFBundleExecutable</key><string>dentalcraft</string>
+  <key>CFBundleIconFile</key><string>DentalCraft</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@BUNDLE_VERSION@</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>it</string>
+  </array>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright 2026 Daniele Viti. All rights reserved.</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <!-- macOS stops a program that uses the camera or Bluetooth without these texts.
+       The Italian texts are in Resources/it.lproj/InfoPlist.strings. -->
+  <key>NSCameraUsageDescription</key>
+  <string>DentalCraft reads the connected 3D scanner (a USB camera) to scan dental models.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>DentalCraft connects to the turntable over Bluetooth to turn the model during a scan.</string>
+</dict>
+</plist>

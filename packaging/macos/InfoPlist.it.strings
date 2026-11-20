@@ -1,0 +1,3 @@
+/* Testi della richiesta di permesso, in italiano (Resources/it.lproj/InfoPlist.strings). */
+"NSCameraUsageDescription" = "DentalCraft legge lo scanner 3D collegato (una telecamera USB) per scansionare i modelli dentali.";
+"NSBluetoothAlwaysUsageDescription" = "DentalCraft si collega al piatto girevole via Bluetooth per ruotare il modello durante la scansione.";
