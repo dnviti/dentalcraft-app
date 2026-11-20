@@ -23,6 +23,7 @@
 
 mod framing;
 mod turntable;
+mod vendor;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -688,6 +689,10 @@ impl ScanUi {
         self.top_bar(ui, busy, out);
         ui.add_space(8.0);
         self.status_row(ui);
+        if let Some(v) = self.snap.as_ref().and_then(|s| s.status.vendor.as_ref()) {
+            ui.add_space(4.0);
+            vendor::row(ui, v);
+        }
         ui.add_space(10.0);
         // the steps at the right, as wide as the user dragged their edge
         // (double-click: back to the default); the 3D view keeps the rest
@@ -1920,5 +1925,84 @@ impl ScanPopup {
             None if resp.should_close() => self.ui.confirm_close = false,
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dc_scanner::{VendorStatus, control::ScanController};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The popup drawn with the status of a simulated session, whose vendor
+    /// layer is `vendor` (the simulated device has none: a fake one stands
+    /// in for a scanner that reports it).
+    fn drawn(vendor: Option<VendorStatus>) -> Harness<'static> {
+        let controller = ScanController::new();
+        let mut snap = Snapshot::read(&controller);
+        assert!(snap.status.vendor.is_none(), "no device, no vendor layer");
+        snap.status.vendor = vendor;
+        let mut popup = ScanUi::new(None);
+        popup.open = true;
+        popup.snap = Some(snap);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            // the device boxes of the popup have no accessible name (not
+            // what is tested here)
+            .with_accessibility_check(false)
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui(move |ui| popup.contents(ui, false, &mut Vec::new()));
+        h.run();
+        h
+    }
+
+    fn fake(calibration: &'static str, fast: &'static str) -> VendorStatus {
+        VendorStatus {
+            fill_light: "on".into(),
+            fill_light_note: None,
+            fast_exposure: fast.into(),
+            fast_exposure_note: Some("note of the device".into()),
+            calibration,
+            calibration_note: None,
+            fx: 1142.37,
+            fy: 1142.37,
+            cx: 163.19,
+            cy: 329.85,
+        }
+    }
+
+    #[test]
+    fn the_device_line_of_the_popup_shows_what_the_vendor_layer_did() {
+        let h = drawn(Some(fake("factory", "applied")));
+        assert!(
+            h.query_by_label(
+                "Light on · Fast exposure applied · Calibration: factory (fx 1142.4, cx 163.2, cy 329.9)"
+            )
+            .is_some()
+        );
+        assert!(
+            h.query_by_label_contains("Approximate calibration")
+                .is_none()
+        );
+        assert!(h.query_by_label_contains("did not apply").is_none());
+    }
+
+    #[test]
+    fn the_popup_warns_of_an_estimate_and_of_an_error() {
+        let h = drawn(Some(fake("estimate", "applied")));
+        assert!(
+            h.query_by_label_contains("Approximate calibration")
+                .is_some()
+        );
+        let h = drawn(Some(fake("factory", "error:device")));
+        assert!(h.query_by_label_contains("did not apply").is_some());
+    }
+
+    #[test]
+    fn a_device_without_a_vendor_layer_shows_no_line() {
+        let h = drawn(None);
+        assert!(h.query_by_label_contains("Calibration:").is_none());
+        assert!(h.query_by_label_contains("Light").is_none());
     }
 }

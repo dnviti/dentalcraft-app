@@ -148,6 +148,7 @@ const KNOWN_CODES: &[&str] = &[
     "sdk-missing",
     "sdk-unauthorized",
     "platform-unsupported",
+    "platform-capture-denied",
     "device-lost",
     "turntable-not-connected",
     "turntable-out-of-range",
@@ -647,7 +648,7 @@ impl ScanPopup {
 /// anonymous diagnostics: a fault as an error, a missing or switched-off
 /// device as a flagged warning; a cancel or a busy device is no failure.
 fn log_failure(command: &str, f: &ScanFailure) {
-    const SETUP: [&str; 12] = [
+    const SETUP: [&str; 13] = [
         "device-not-found",
         "not-connected",
         "turntable-not-connected",
@@ -656,6 +657,7 @@ fn log_failure(command: &str, f: &ScanFailure) {
         "ble-not-found",
         "sdk-missing",
         "platform-unsupported",
+        "platform-capture-denied",
         "rig-uncalibrated",
         "calibration-no-object",
         "invalid-params",
