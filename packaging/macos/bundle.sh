@@ -43,7 +43,8 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 if [[ "${NO_BUILD:-0}" != 1 ]]; then
   for t in "${TARGETS[@]}"; do
     rustup target add "$t"
-    cargo build --release --locked -p dc-app -p dc-cli --target "$t"
+    # no --locked: release-please bumps the workspace versions but not Cargo.lock (see binaries.yml)
+    cargo build --release -p dc-app -p dc-cli --target "$t"
   done
 fi
 
