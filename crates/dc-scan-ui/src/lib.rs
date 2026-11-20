@@ -172,6 +172,7 @@ const KNOWN_CODES: &[&str] = &[
     "calibration-tilt",
     "calibration-inaccurate",
     "calibration-implausible",
+    "calibration-outdated",
     "scan-quality-low",
     "scan-no-stops",
 ];
