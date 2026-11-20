@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | standalone (`.tar.gz`, `.zip`) | unpacks the archive into `<folder>/.update/staged/` | moves each unpacked entry into the folder, the one it replaces into `<folder>/.update/previous/` (renames only, undone on failure); a running program may be renamed on Linux and Windows |
 //! | AppImage | downloads next to `$APPIMAGE` (`.<name>.new`) | renames it over `$APPIMAGE` (atomic) |
+//! | macOS `DentalCraft.app` (`.zip`) | unpacks the archive into `<folder of the app>/.<name>.app.update/staged/` (same volume as the app) | renames the app into `previous/` of that folder and the unpacked one to its place (two renames, undone on failure); a running app may be renamed on macOS; restart opens the new one with `open -n` |
 //! | Windows setup `.exe` / `.msi` | downloads into the work folder | starts a hidden PowerShell that waits for this process to end, then runs `setup.exe /S /D=<folder>` or `msiexec /i <file> /passive`, then (restart) the installed `dentalcraft.exe` |
 //!
 //! [`cleanup`] removes, at the next start, what the update left behind.
@@ -39,6 +40,13 @@ pub struct Prepared {
 enum Step {
     /// Standalone: move the entries of `staged` into `dir`.
     Swap { dir: PathBuf, staged: PathBuf },
+    /// macOS: rename the `staged` bundle (unpacked in `update`, a folder
+    /// next to the installed one) to the place of `bundle`.
+    Bundle {
+        bundle: PathBuf,
+        staged: PathBuf,
+        update: PathBuf,
+    },
     /// AppImage: rename `new` over `target`.
     Replace { new: PathBuf, target: PathBuf },
     /// Windows installer to run once this process has ended.
@@ -62,6 +70,24 @@ impl Prepared {
         }
     }
 
+    /// A macOS bundle update already unpacked as `staged` in `update`, for
+    /// the installed `bundle` (tests, tools).
+    pub fn bundle(
+        version: &str,
+        bundle: impl Into<PathBuf>,
+        staged: impl Into<PathBuf>,
+        update: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            version: version.to_owned(),
+            step: Step::Bundle {
+                bundle: bundle.into(),
+                staged: staged.into(),
+                update: update.into(),
+            },
+        }
+    }
+
     /// `true` when it is installed by a separate installer once this
     /// process has ended (Windows setup and `.msi`).
     pub fn runs_installer(&self) -> bool {
@@ -80,6 +106,19 @@ impl Prepared {
                 tracing::info!("updated {} to {}", dir.display(), self.version);
                 if restart {
                     launch(&dir.join(APP_BIN))?;
+                }
+            }
+            Step::Bundle {
+                bundle,
+                staged,
+                update,
+            } => {
+                swap_bundle(&bundle, &staged, &update)
+                    .map_err(|e| UpdateError::Install(format!("{}: {e}", bundle.display())))?;
+                let _ = fs::remove_dir(update.join(STAGED));
+                tracing::info!("updated {} to {}", bundle.display(), self.version);
+                if restart {
+                    open_bundle(&bundle)?;
                 }
             }
             Step::Replace { new, target } => {
@@ -109,6 +148,7 @@ impl Prepared {
     pub fn discard(self) {
         let _ = match self.step {
             Step::Swap { staged, .. } => fs::remove_dir_all(staged),
+            Step::Bundle { update, .. } => fs::remove_dir_all(update.join(STAGED)),
             Step::Replace { new, .. } => fs::remove_file(new),
             Step::Installer { file, .. } => fs::remove_file(file),
         };
@@ -134,6 +174,7 @@ pub fn prepare(
         InstallKind::Standalone => {
             prepare_standalone(inst, *key, asset, work_dir, progress, cancel)?
         }
+        InstallKind::MacApp => prepare_bundle(inst, asset, work_dir, progress, cancel)?,
         InstallKind::AppImage => {
             let target = inst.appimage.as_deref().ok_or(UpdateError::NoDownload)?;
             prepare_appimage(target, asset, progress, cancel)?
@@ -160,14 +201,12 @@ pub fn prepare(
 /// and the downloads in `work_dir`.
 pub fn cleanup(installation: &Installation, work_dir: &Path) {
     if installation.kind == InstallKind::Standalone {
-        let update = installation.dir.join(UPDATE_DIR);
-        for entry in fs::read_dir(&update).into_iter().flatten().flatten() {
-            if entry.file_name().to_string_lossy().starts_with(PREVIOUS) {
-                let _ = fs::remove_dir_all(entry.path());
-            }
-        }
-        // only when nothing else is in it
-        let _ = fs::remove_dir(&update);
+        clear_previous(&installation.dir.join(UPDATE_DIR));
+    }
+    if installation.kind == InstallKind::MacApp
+        && let Some(update) = installation.bundle().and_then(|b| bundle_update_dir(&b))
+    {
+        clear_previous(&update);
     }
     if let Some(target) = &installation.appimage {
         let new = appimage_download(target);
@@ -175,6 +214,17 @@ pub fn cleanup(installation: &Installation, work_dir: &Path) {
         let _ = fs::remove_file(new);
     }
     let _ = fs::remove_dir_all(work_dir);
+}
+
+/// Removes the `previous*` folders of an update folder, then the folder
+/// itself when nothing else is in it.
+fn clear_previous(update: &Path) {
+    for entry in fs::read_dir(update).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(PREVIOUS) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    let _ = fs::remove_dir(update);
 }
 
 /// `dir` exists and a file can be created in it; `shown` is the folder the
@@ -245,6 +295,152 @@ fn prepare_standalone(
         dir: dir.clone(),
         staged,
     })
+}
+
+/// The folder that holds the unpacked update and the replaced version of
+/// the installed macOS `bundle`: `.<name>.update` next to it (the same
+/// volume, so the renames are atomic).
+fn bundle_update_dir(bundle: &Path) -> Option<PathBuf> {
+    let mut name = OsString::from(".");
+    name.push(bundle.file_name()?);
+    name.push(".update");
+    Some(bundle.with_file_name(name))
+}
+
+fn prepare_bundle(
+    inst: &Installation,
+    asset: &Asset,
+    work_dir: &Path,
+    progress: &dyn Fn(u64, u64),
+    cancel: &AtomicBool,
+) -> Result<Step, UpdateError> {
+    let bundle = inst.bundle().ok_or(UpdateError::NoDownload)?;
+    let update = bundle_update_dir(&bundle).ok_or(UpdateError::NoDownload)?;
+    let parent = bundle.parent().ok_or(UpdateError::NoDownload)?;
+    // the folder of the app must take the new bundle: known before
+    // downloading (a translocated or read-only app fails here, with the
+    // advice to move it to /Applications)
+    writable(&update, parent)?;
+    let archive = download_into(work_dir, asset, progress, cancel)?;
+    let root = update.join(STAGED);
+    let _ = fs::remove_dir_all(&root);
+    let unpacked = fs::create_dir_all(&root)
+        .map_err(|e| UpdateError::Install(format!("{}: {e}", root.display())))
+        .and_then(|()| extract_app_zip(&archive, &root));
+    let _ = fs::remove_file(&archive);
+    let staged = match unpacked {
+        Ok(staged) => staged,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&root);
+            return Err(e);
+        }
+    };
+    if !staged
+        .join("Contents")
+        .join("MacOS")
+        .join(APP_BIN)
+        .is_file()
+    {
+        let _ = fs::remove_dir_all(&root);
+        return Err(UpdateError::Install(format!(
+            "{} has no {APP_BIN}",
+            asset.file_name()
+        )));
+    }
+    // Only now, on the bundle whose size and SHA-256 matched the signed
+    // announcement: nothing a browser or the system marked is in it, but
+    // a quarantine flag would make Gatekeeper refuse the ad-hoc signature.
+    if cfg!(target_os = "macos") {
+        strip_quarantine(&staged);
+        // the unpacked bundle must be whole (every file and permission the
+        // seal covers) or macOS would refuse to start it after the swap
+        if let Err(e) = verify_signature(&staged) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(e);
+        }
+    }
+    Ok(Step::Bundle {
+        bundle,
+        staged,
+        update,
+    })
+}
+
+/// Removes the `com.apple.quarantine` attribute from a bundle that was
+/// verified (errors only logged: it is absent on our own downloads).
+fn strip_quarantine(bundle: &Path) {
+    let out = std::process::Command::new("/usr/bin/xattr")
+        .args(["-dr", "com.apple.quarantine"])
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::debug!(
+            "xattr on {}: {}",
+            bundle.display(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::debug!("xattr on {}: {e}", bundle.display()),
+    }
+}
+
+/// `codesign --verify --deep --strict` on the unpacked `bundle`: the seal
+/// (ad-hoc today) covers the programs, `Info.plist` and the resources.
+fn verify_signature(bundle: &Path) -> Result<(), UpdateError> {
+    let out = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| UpdateError::Install(format!("codesign: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(UpdateError::Install(format!(
+        "the unpacked app is damaged: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    )))
+}
+
+/// Puts `staged` in the place of `bundle`: the installed bundle goes into a
+/// new `previous` folder of `update`, then `staged` is renamed to `bundle`.
+/// On failure the installed bundle is back where it was.
+pub(crate) fn swap_bundle(bundle: &Path, staged: &Path, update: &Path) -> io::Result<()> {
+    let name = bundle
+        .file_name()
+        .ok_or_else(|| io::Error::other("the bundle has no name"))?;
+    if bundle.symlink_metadata().is_err() {
+        // the app was deleted by hand: the new one is still put in place
+        return fs::rename(staged, bundle);
+    }
+    let previous = new_dir(update, PREVIOUS)?;
+    let aside = previous.join(name);
+    fs::rename(bundle, &aside).inspect_err(|_| {
+        let _ = fs::remove_dir(&previous);
+    })?;
+    fs::rename(staged, bundle).inspect_err(|_| {
+        let _ = fs::rename(&aside, bundle);
+        let _ = fs::remove_dir(&previous);
+    })
+}
+
+/// Opens a new instance of the app `bundle` through Launch Services (which
+/// gives it its own privacy permissions and a normal app environment).
+fn open_bundle(bundle: &Path) -> Result<(), UpdateError> {
+    let fail =
+        |e: &dyn std::fmt::Display| UpdateError::Install(format!("open {}: {e}", bundle.display()));
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg("-n")
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| fail(&e))?;
+    if !status.success() {
+        return Err(fail(&status));
+    }
+    tracing::info!("opened {}", bundle.display());
+    Ok(())
 }
 
 /// Where the new AppImage is downloaded: next to the old one (same file
@@ -430,6 +626,68 @@ fn extract_tar_gz(archive: &Path, into: &Path) -> Result<(), UpdateError> {
 }
 
 fn extract_zip(archive: &Path, into: &Path) -> Result<(), UpdateError> {
+    extract_zip_with(archive, into, inside_top)
+}
+
+/// Unpacks the `.zip` of a macOS bundle (`ditto -c -k --keepParent`) into
+/// `into`, which then holds the one `<name>.app` folder; returns its path.
+/// The `__MACOSX` folder and `._` files that Finder and ditto may add for
+/// extended attributes are skipped.
+fn extract_app_zip(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
+    let mut app = None;
+    extract_zip_with(archive, into, |path, top| {
+        let r = inside_app(path, top);
+        if let Ok(Some(_)) = &r {
+            app = top.clone();
+        }
+        r
+    })?;
+    app.map(|name| into.join(name))
+        .ok_or_else(|| UpdateError::Install(format!("{} has no .app folder", archive.display())))
+}
+
+/// The path of an archive entry of a bundle archive: `None` for what is
+/// skipped (see [`extract_app_zip`]). Refuses absolute paths, `..`, and a
+/// top folder that is not one `<name>.app`.
+fn inside_app(path: &Path, top: &mut Option<OsString>) -> Result<Option<PathBuf>, UpdateError> {
+    let unsafe_path = || {
+        UpdateError::Install(format!(
+            "unexpected path in the archive: {}",
+            path.display()
+        ))
+    };
+    let mut parts = path.components().filter(|c| *c != Component::CurDir);
+    let Some(Component::Normal(first)) = parts.next() else {
+        return Err(unsafe_path());
+    };
+    if first == "__MACOSX" {
+        return Ok(None);
+    }
+    let named_app = Path::new(first).extension().is_some_and(|e| e == "app");
+    match top {
+        Some(t) if t.as_os_str() != first => return Err(unsafe_path()),
+        Some(_) => {}
+        None if named_app => *top = Some(first.to_os_string()),
+        None => return Err(unsafe_path()),
+    }
+    let mut rel = PathBuf::from(first);
+    for part in parts {
+        match part {
+            Component::Normal(p) => rel.push(p),
+            _ => return Err(unsafe_path()),
+        }
+    }
+    let apple_double = rel
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("._"));
+    Ok((!apple_double).then_some(rel))
+}
+
+fn extract_zip_with(
+    archive: &Path,
+    into: &Path,
+    mut inside: impl FnMut(&Path, &mut Option<OsString>) -> Result<Option<PathBuf>, UpdateError>,
+) -> Result<(), UpdateError> {
     let fail =
         |e: &dyn std::fmt::Display| UpdateError::Install(format!("{}: {e}", archive.display()));
     let file = File::open(archive).map_err(|e| fail(&e))?;
@@ -440,7 +698,7 @@ fn extract_zip(archive: &Path, into: &Path) -> Result<(), UpdateError> {
         let name = f.enclosed_name().ok_or_else(|| {
             UpdateError::Install(format!("unexpected path in the archive: {:?}", f.name()))
         })?;
-        let Some(rel) = inside_top(&name, &mut top)? else {
+        let Some(rel) = inside(&name, &mut top)? else {
             continue;
         };
         let dest = into.join(&rel);
@@ -703,6 +961,234 @@ mod tests {
         extract_zip(&archive, &into).unwrap();
         assert_eq!(read(&into.join(APP_BIN)), "new app");
         assert_eq!(read(&into.join("LICENSES/OFL.txt")), "new licence");
+    }
+
+    const APP: &str = "DentalCraft.app";
+    const NEW_BUNDLE: [(&str, &str); 4] = [
+        ("Contents/MacOS/dentalcraft", "new app"),
+        ("Contents/MacOS/dentalcraft-cli", "new cli"),
+        ("Contents/Resources/install-kind", "macos-app\n"),
+        ("Contents/Info.plist", "new plist"),
+    ];
+
+    /// The `.zip` that `ditto -c -k --keepParent` makes, with the
+    /// `__MACOSX` folder and `._` files that extended attributes may add.
+    fn app_zip(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let plain = zip::write::SimpleFileOptions::default();
+        let exec = plain.unix_permissions(0o755);
+        zip.add_directory(format!("{APP}/"), plain).unwrap();
+        zip.add_directory(format!("{APP}/Contents/"), plain)
+            .unwrap();
+        for (name, body) in files {
+            let opts = if name.contains("/MacOS/") {
+                exec
+            } else {
+                plain
+            };
+            zip.start_file(format!("{APP}/{name}"), opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.start_file("__MACOSX/._DentalCraft.app", plain).unwrap();
+        zip.write_all(b"apple double").unwrap();
+        zip.start_file(format!("{APP}/Contents/._Info.plist"), plain)
+            .unwrap();
+        zip.write_all(b"apple double").unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// An installed bundle `root/Applications/DentalCraft.app` with a file
+    /// of the user's next to it.
+    fn installed_bundle(root: &Path) -> PathBuf {
+        let apps = root.join("Applications");
+        let app = apps.join(APP);
+        write(&app.join("Contents/MacOS/dentalcraft"), "old app");
+        write(&app.join("Contents/MacOS/dentalcraft-cli"), "old cli");
+        write(&app.join("Contents/Resources/install-kind"), "macos-app\n");
+        write(&app.join("Contents/Info.plist"), "old plist");
+        write(&apps.join("Other.app/Contents/Info.plist"), "other");
+        app
+    }
+
+    fn assert_bundle_updated(app: &Path) {
+        assert_eq!(read(&app.join("Contents/MacOS/dentalcraft")), "new app");
+        assert_eq!(read(&app.join("Contents/MacOS/dentalcraft-cli")), "new cli");
+        assert_eq!(read(&app.join("Contents/Info.plist")), "new plist");
+        assert!(!app.join("Contents/._Info.plist").exists());
+        assert_eq!(
+            read(&app.parent().unwrap().join("Other.app/Contents/Info.plist")),
+            "other"
+        );
+    }
+
+    #[test]
+    fn a_macos_bundle_is_unpacked_aside_then_swapped_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        let app = installed_bundle(root.path());
+        let archive = app_zip(&NEW_BUNDLE);
+        let name = "dentalcraft_999.0.0_macos_universal.zip";
+        let base = serve(HashMap::from([(name.to_owned(), archive.clone())]));
+        let check = check_for(
+            InstallKind::MacApp,
+            &app.join("Contents/MacOS"),
+            AssetKey::MacosUniversal,
+            asset_for(&base, name, &archive),
+        );
+        let work = root.path().join("work");
+        let prepared = prepare(&check, &work, &|_, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(prepared.version, "999.0.0");
+        assert!(!prepared.runs_installer());
+        // nothing changed yet; the archive is gone; the new bundle waits next to the app
+        assert_eq!(read(&app.join("Contents/MacOS/dentalcraft")), "old app");
+        assert!(!work.join(name).exists());
+        let update = app.with_file_name(".DentalCraft.app.update");
+        let staged = update.join(STAGED).join(APP);
+        assert_eq!(read(&staged.join("Contents/MacOS/dentalcraft")), "new app");
+        assert!(!update.join(STAGED).join("__MACOSX").exists());
+        assert!(!staged.join("Contents/._Info.plist").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(staged.join("Contents/MacOS/dentalcraft"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "the program stays executable");
+        }
+        prepared.finish(false).unwrap();
+        assert_bundle_updated(&app);
+        assert!(!staged.exists());
+        assert_eq!(
+            read(
+                &update
+                    .join(PREVIOUS)
+                    .join(APP)
+                    .join("Contents/MacOS/dentalcraft")
+            ),
+            "old app"
+        );
+        // the next start removes the previous version and the work folder
+        fs::create_dir_all(&work).unwrap();
+        cleanup(
+            &Installation::new(InstallKind::MacApp, app.join("Contents/MacOS")),
+            &work,
+        );
+        assert!(!update.exists() && !work.exists());
+        assert_bundle_updated(&app);
+    }
+
+    #[test]
+    fn a_macos_archive_that_is_not_the_app_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let app = installed_bundle(root.path());
+        let name = "dentalcraft_999.0.0_macos_universal.zip";
+        let installed = || app.join("Contents/MacOS");
+        for archive in [
+            // no program in the bundle
+            app_zip(&[("Contents/Info.plist", "x")]),
+            // a folder that is not an .app
+            zip_file("dentalcraft_999.0.0", &NEW_FILES),
+        ] {
+            let base = serve(HashMap::from([(name.to_owned(), archive.clone())]));
+            let check = check_for(
+                InstallKind::MacApp,
+                &installed(),
+                AssetKey::MacosUniversal,
+                asset_for(&base, name, &archive),
+            );
+            let r = prepare(
+                &check,
+                &root.path().join("work"),
+                &|_, _| {},
+                &AtomicBool::new(false),
+            );
+            assert!(matches!(r, Err(UpdateError::Install(_))), "{r:?}");
+            assert!(
+                !app.with_file_name(".DentalCraft.app.update")
+                    .join(STAGED)
+                    .exists()
+            );
+            assert_eq!(read(&app.join("Contents/MacOS/dentalcraft")), "old app");
+        }
+        // a damaged download changes nothing either
+        let archive = app_zip(&NEW_BUNDLE);
+        let base = serve(HashMap::from([(name.to_owned(), archive.clone())]));
+        let mut asset = asset_for(&base, name, &archive);
+        asset.sha256 = crate::download::hex(&Sha256::digest(b"something else"));
+        let check = check_for(
+            InstallKind::MacApp,
+            &installed(),
+            AssetKey::MacosUniversal,
+            asset,
+        );
+        let r = prepare(
+            &check,
+            &root.path().join("work"),
+            &|_, _| {},
+            &AtomicBool::new(false),
+        );
+        assert_eq!(r.unwrap_err(), UpdateError::Damaged);
+        assert_eq!(read(&app.join("Contents/MacOS/dentalcraft")), "old app");
+    }
+
+    #[test]
+    fn archive_paths_of_a_bundle_stay_inside_it() {
+        let mut top = None;
+        let ok = |p: &str, top: &mut Option<OsString>| inside_app(Path::new(p), top);
+        assert_eq!(ok("__MACOSX/._DentalCraft.app", &mut top).unwrap(), None);
+        assert_eq!(
+            ok("DentalCraft.app/", &mut top).unwrap(),
+            Some(PathBuf::from(APP))
+        );
+        assert_eq!(ok("DentalCraft.app/Contents/._x", &mut top).unwrap(), None);
+        assert_eq!(
+            ok("DentalCraft.app/Contents/Info.plist", &mut top).unwrap(),
+            Some(PathBuf::from("DentalCraft.app/Contents/Info.plist"))
+        );
+        for bad in ["/etc/passwd", "DentalCraft.app/../x", "Other.app/x", "x/y"] {
+            assert!(ok(bad, &mut top).is_err(), "{bad}");
+        }
+        assert!(inside_app(Path::new("notes/x"), &mut None).is_err());
+    }
+
+    #[test]
+    fn a_failed_bundle_swap_puts_the_installed_one_back() {
+        let root = tempfile::tempdir().unwrap();
+        let app = installed_bundle(root.path());
+        let update = app.with_file_name(".DentalCraft.app.update");
+        // the staged bundle is missing: the second rename fails
+        let e = swap_bundle(&app, &update.join(STAGED).join(APP), &update);
+        assert!(e.is_err());
+        assert_eq!(read(&app.join("Contents/MacOS/dentalcraft")), "old app");
+        assert_eq!(read(&app.join("Contents/Info.plist")), "old plist");
+        // a staged bundle goes in; a second update gets its own previous folder
+        for (n, body) in [(1, "second"), (2, "third")] {
+            let staged = update.join(STAGED).join(APP);
+            write(&staged.join("Contents/Info.plist"), body);
+            swap_bundle(&app, &staged, &update).unwrap();
+            assert_eq!(read(&app.join("Contents/Info.plist")), body);
+            assert_eq!(n == 2, update.join("previous-1").exists());
+        }
+        // the app was deleted by hand: the new one is still put in place
+        fs::remove_dir_all(&app).unwrap();
+        let staged = update.join(STAGED).join(APP);
+        write(&staged.join("Contents/Info.plist"), "fresh");
+        swap_bundle(&app, &staged, &update).unwrap();
+        assert_eq!(read(&app.join("Contents/Info.plist")), "fresh");
+    }
+
+    #[test]
+    fn a_discarded_bundle_update_leaves_the_app_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let app = installed_bundle(root.path());
+        let update = app.with_file_name(".DentalCraft.app.update");
+        write(
+            &update.join(STAGED).join(APP).join("Contents/Info.plist"),
+            "new",
+        );
+        Prepared::bundle("1.0.0", &app, update.join(STAGED).join(APP), &update).discard();
+        assert!(!update.join(STAGED).exists());
+        assert_eq!(read(&app.join("Contents/Info.plist")), "old plist");
     }
 
     #[test]

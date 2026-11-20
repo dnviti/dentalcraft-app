@@ -185,6 +185,15 @@ def asset_names(v):
     }
 
 
+# Built only when the macOS job runs (it is disabled while GitHub-hosted runners are
+# unavailable): listed in update.json when the file is there, not an error when it is not.
+OPTIONAL_ASSETS = {"macos-universal"}
+
+
+def optional_asset_names(v):
+    return {"macos-universal": f"dentalcraft_{v}_macos_universal.zip"}
+
+
 def sha256_of(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -219,10 +228,11 @@ def main():
     base = args.base_url if args.base_url.endswith("/") else args.base_url + "/"
     assets = {}
     missing = []
-    for kind, name in asset_names(version).items():
+    for kind, name in {**asset_names(version), **optional_asset_names(version)}.items():
         path = args.assets / name
         if not path.is_file():
-            missing.append(name)
+            if kind not in OPTIONAL_ASSETS:
+                missing.append(name)
             continue
         assets[kind] = {"url": base + name, "sha256": sha256_of(path), "size": path.stat().st_size}
     if missing:

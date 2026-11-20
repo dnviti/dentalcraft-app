@@ -1,15 +1,18 @@
 //! How this copy of DentalCraft was installed.
 //!
 //! Every package writes a marker file, [`MARKER`], holding one word and a
-//! newline (`standalone`, `appimage`, `deb`, `rpm`, `flatpak`, `exe` or
-//! `msi`):
+//! newline (`standalone`, `appimage`, `deb`, `rpm`, `flatpak`, `exe`, `msi`
+//! or `macos-app`):
 //!
 //! - next to the program: the standalone archives (`.tar.gz`, `.zip`) and
 //!   the Windows installers (setup `.exe`, `.msi`);
 //! - in `../share/dentalcraft/` from the program's folder: the `.deb` and
 //!   `.rpm` packages (`/usr/share/dentalcraft/`), the AppImage
 //!   (`$APPDIR/usr/share/dentalcraft/`) and the Flatpak
-//!   (`/app/share/dentalcraft/`).
+//!   (`/app/share/dentalcraft/`);
+//! - in `../Resources/` from the program's folder: the macOS `.app` bundle
+//!   (`DentalCraft.app/Contents/Resources/`; the program is in
+//!   `Contents/MacOS/`, where only code may live under a code signature).
 //!
 //! The environment wins over the marker: `$APPIMAGE` (set by the AppImage
 //! runtime to the AppImage file) means an AppImage, `/.flatpak-info` (present
@@ -47,13 +50,15 @@ pub enum InstallKind {
     Exe,
     /// The Windows `.msi` package (per machine).
     Msi,
+    /// The macOS `DentalCraft.app` bundle from the universal `.zip`.
+    MacApp,
     /// No marker: a development build or a copied program.
     Unknown,
 }
 
 impl InstallKind {
     /// Every kind.
-    pub const ALL: [InstallKind; 8] = [
+    pub const ALL: [InstallKind; 9] = [
         InstallKind::Standalone,
         InstallKind::AppImage,
         InstallKind::Deb,
@@ -61,6 +66,7 @@ impl InstallKind {
         InstallKind::Flatpak,
         InstallKind::Exe,
         InstallKind::Msi,
+        InstallKind::MacApp,
         InstallKind::Unknown,
     ];
 
@@ -74,6 +80,7 @@ impl InstallKind {
             InstallKind::Flatpak => "flatpak",
             InstallKind::Exe => "exe",
             InstallKind::Msi => "msi",
+            InstallKind::MacApp => "macos-app",
             InstallKind::Unknown => "unknown",
         }
     }
@@ -104,7 +111,8 @@ pub struct Installation {
     /// How it was installed.
     pub kind: InstallKind,
     /// Folder of the running program; for a standalone installation, the
-    /// folder that is updated.
+    /// folder that is updated (for a macOS bundle, `Contents/MacOS`: see
+    /// [`Installation::bundle`]).
     pub dir: PathBuf,
     /// The AppImage file (`$APPIMAGE`) of an [`InstallKind::AppImage`].
     pub appimage: Option<PathBuf>,
@@ -143,6 +151,12 @@ impl Installation {
         }
     }
 
+    /// The `.app` bundle that holds the program: `dir` is its
+    /// `Contents/MacOS` folder. `None` outside a bundle.
+    pub fn bundle(&self) -> Option<PathBuf> {
+        bundle_of(&self.dir)
+    }
+
     /// An installation of `kind` in `dir` (tests, tools).
     pub fn new(kind: InstallKind, dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -153,15 +167,27 @@ impl Installation {
     }
 }
 
-/// The marker next to the program, else in `../share/dentalcraft/`.
+/// The `X.app` folder of a program in `X.app/Contents/MacOS`.
+fn bundle_of(exe_dir: &Path) -> Option<PathBuf> {
+    let contents = exe_dir.parent()?;
+    let app = contents.parent()?;
+    let is_bundle = exe_dir.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && app.extension()? == "app";
+    is_bundle.then(|| app.to_path_buf())
+}
+
+/// The marker next to the program, else in `../share/dentalcraft/`, else in
+/// `../Resources/` (a macOS bundle).
 fn read_marker(exe_dir: &Path) -> Option<InstallKind> {
     let beside = exe_dir.join(MARKER);
+    let resources = exe_dir.join("..").join("Resources").join(MARKER);
     let shared = exe_dir
         .join("..")
         .join("share")
         .join("dentalcraft")
         .join(MARKER);
-    [beside, shared].into_iter().find_map(|p| {
+    [beside, shared, resources].into_iter().find_map(|p| {
         let text = std::fs::read_to_string(&p).ok()?;
         let kind = InstallKind::from_name(&text);
         if kind.is_none() {
@@ -239,6 +265,38 @@ mod tests {
             std::fs::write(share.join(MARKER), format!("{word}\n")).unwrap();
             assert_eq!(Installation::detect_with(&bin, None, false).kind, kind);
         }
+    }
+
+    #[test]
+    fn a_macos_bundle_keeps_the_marker_in_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("DentalCraft.app");
+        let bin = app.join("Contents").join("MacOS");
+        let resources = app.join("Contents").join("Resources");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        assert_eq!(
+            Installation::detect_with(&bin, None, false).kind,
+            InstallKind::Unknown
+        );
+        std::fs::write(resources.join(MARKER), "macos-app\n").unwrap();
+        let i = Installation::detect_with(&bin, None, false);
+        assert_eq!(i.kind, InstallKind::MacApp);
+        assert_eq!(i.bundle(), Some(app));
+        // outside a bundle there is none
+        assert_eq!(
+            Installation::new(InstallKind::MacApp, bin.join("x")).bundle(),
+            None
+        );
+        assert_eq!(
+            Installation::new(InstallKind::Standalone, root.path()).bundle(),
+            None
+        );
+        assert_eq!(
+            Installation::new(InstallKind::MacApp, root.path().join("a.app").join("MacOS"))
+                .bundle(),
+            None
+        );
     }
 
     #[test]

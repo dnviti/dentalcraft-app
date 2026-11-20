@@ -3,6 +3,10 @@
 //! can do for each kind of installation, and "Update now" downloads and
 //! checks the update, then "Restart now" saves the project and puts the new
 //! version in place when the window closes.
+//!
+//! The two tests that install a standalone folder and close the window run on
+//! Linux only, so off Linux their helpers and imports are unused.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

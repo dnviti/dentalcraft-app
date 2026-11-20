@@ -779,3 +779,37 @@ fn diagnostics_from_the_command_line_follow_the_app_settings() {
         (json!(false), Value::Null)
     );
 }
+
+/// A pipe whose reader is gone: every write to it fails (`EPIPE`;
+/// `ERROR_NO_DATA`, os error 232, on Windows).
+fn closed_pipe() -> std::io::PipeWriter {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    writer
+}
+
+#[test]
+fn closed_output_pipes_are_not_a_crash() {
+    let bin = env!("CARGO_BIN_EXE_dentalcraft-cli");
+    // the answer goes nowhere: the work is still done, without a panic
+    for args in [&["info"][..], &[][..]] {
+        let out = Command::new(bin)
+            .args(args)
+            .stdout(closed_pipe())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{args:?}: {:?} {stderr}", out.status);
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+    }
+    // a failure whose message goes nowhere is still a plain failure (a
+    // panic exits with 101)
+    let status = Command::new(bin)
+        .args(["describe", "no.such.command"])
+        .stdout(closed_pipe())
+        .stderr(closed_pipe())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+}

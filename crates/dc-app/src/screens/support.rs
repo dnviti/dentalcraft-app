@@ -276,9 +276,11 @@ impl DentalCraftApp {
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
                                                     ui.label(
-                                                        RichText::new("Ctrl K")
-                                                            .font(fonts::mono(11.0))
-                                                            .color(c.text_secondary),
+                                                        RichText::new(dc_ui::keys::platform_keys(
+                                                            "Ctrl K",
+                                                        ))
+                                                        .font(fonts::mono(11.0))
+                                                        .color(c.text_secondary),
                                                     );
                                                     ui.add(
                                                         egui::TextEdit::singleline(

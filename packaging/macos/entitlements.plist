@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Entitlements of dentalcraft and dentalcraft-cli. With the ad-hoc signature of today they
+     are recorded but macOS enforces the privacy questions through Info.plist alone; they
+     become necessary with the hardened runtime (Developer ID signing and notarization). -->
+<plist version="1.0">
+<dict>
+  <!-- the 3D scanner, a USB video camera -->
+  <key>com.apple.security.device.camera</key><true/>
+  <!-- the turntable, Bluetooth Low Energy -->
+  <key>com.apple.security.device.bluetooth</key><true/>
+  <!-- the scanner's vendor controls (fill light, factory calibration) over USB -->
+  <key>com.apple.security.device.usb</key><true/>
+</dict>
+</plist>

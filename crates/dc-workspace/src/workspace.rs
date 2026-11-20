@@ -381,7 +381,7 @@ impl Workspace {
                 && let Some(sc) = keys::parse(text)
             {
                 shortcuts.push((c.id, sc));
-                shortcut_text.insert(c.id, text.to_owned());
+                shortcut_text.insert(c.id, dc_ui::keys::platform_keys(text).into_owned());
             }
         }
         // the module's own import when it has one, the core's otherwise

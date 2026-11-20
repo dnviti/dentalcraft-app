@@ -68,6 +68,9 @@ pub(super) struct TableSnap {
     pub tilt_deg: Option<f32>,
     /// Moving.
     pub busy: bool,
+    /// The latest automatic scan found that the stored calibration no
+    /// longer fits the rig (`calibration-outdated`): calibrate again.
+    pub calibration_outdated: bool,
 }
 
 fn num(v: &Value) -> Option<f32> {
@@ -91,6 +94,7 @@ impl TableSnap {
             rotate_deg: num(&v["rotate_deg"]),
             tilt_deg: num(&v["tilt_deg"]),
             busy: v["busy"].as_bool().unwrap_or(false),
+            calibration_outdated: v["calibration_outdated"].as_bool().unwrap_or(false),
         }
     }
 
@@ -939,10 +943,13 @@ fn progress(ui: &mut Ui, text: &str, job: &JobSnap) {
         } else {
             widgets::spinner(ui, 14.0);
         }
-        ui.label(
-            RichText::new(text)
-                .font(fonts::medium(13.0))
-                .color(c.text_primary),
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .font(fonts::medium(13.0))
+                    .color(c.text_primary),
+            )
+            .wrap(),
         );
     });
     ui.add_space(4.0);
@@ -1343,7 +1350,8 @@ impl ScanUi {
             });
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        // the column may be narrow: the state goes under the button then
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             if table.connected {
                 if Button::secondary(t("turntable-disconnect"))
@@ -1402,7 +1410,7 @@ impl ScanUi {
 
         // where it is
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             let text = |ui: &mut Ui, s: String| {
                 ui.label(
@@ -1444,7 +1452,8 @@ impl ScanUi {
                 "°",
                 45.0,
             );
-            ui.horizontal(|ui| {
+            // side by side when they fit, else one under the other
+            ui.horizontal_wrapped(|ui| {
                 let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
                 for (key, icon, sign) in [
                     ("turntable-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
@@ -1509,7 +1518,7 @@ impl ScanUi {
             }
         });
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // Stop works whenever the turntable is connected and no other
             // command holds the scanner (a running command has its own Stop)
             if Button::secondary(t("turntable-stop"))
@@ -1559,12 +1568,29 @@ impl ScanUi {
                         |at| calibrated_ago(now.saturating_sub(at)),
                     );
                     let fit = cal.fit();
+                    // a calibration the last automatic scan found outdated
+                    // never shows as a good fit
+                    let outdated = snap.table.calibration_outdated;
                     ui.horizontal_wrapped(|ui| {
                         widgets::badge(ui, BadgeKind::Success, text);
-                        if let Some((quality, _, _)) = fit {
+                        if outdated {
+                            widgets::badge(ui, BadgeKind::Danger, t("turntable-cal-outdated"));
+                        } else if let Some((quality, _, _)) = fit {
                             widgets::badge(ui, quality.badge(), t(quality.key()));
                         }
                     });
+                    if outdated {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {}",
+                                ic::WARNING,
+                                t("turntable-cal-outdated-hint")
+                            ))
+                            .font(fonts::ui(12.0))
+                            .color(c.status_warning),
+                        );
+                    }
                     if let Some((quality, deg, mm)) = fit {
                         if report.is_none() {
                             ui.add_space(4.0);
@@ -1902,12 +1928,14 @@ mod tests {
             ],
             "rotate_deg": -134.9,
             "busy": true,
+            "calibration_outdated": true,
         }));
-        assert!(s.connected && s.busy);
+        assert!(s.connected && s.busy && s.calibration_outdated);
         assert_eq!(s.tilt, Some((-30.0, 30.0)));
         assert_eq!(s.info.unwrap().id, "sim-turntable");
         assert_eq!(s.tilt_deg, None);
         assert_eq!(TableSnap::from_json(&Value::Null), TableSnap::default());
+        assert!(!TableSnap::from_json(&json!({ "connected": true })).calibration_outdated);
         let a = JobSnap::from_json(
             &json!({ "kind": "auto", "state": "running", "step": 2, "steps": 3, "tilt_deg": 0.0 }),
         )

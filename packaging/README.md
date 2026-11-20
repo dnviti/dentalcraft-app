@@ -12,6 +12,7 @@ This folder turns the two standalone release archives into the DentalCraft insta
 | `DentalCraft-<V>.flatpak` | Flatpak bundle | `flatpak install` | the DentalCraft Flatpak remote the bundle sets up |
 | `DentalCraft-<V>-setup.exe` | NSIS setup | for the current user, no administrator rights | the in-app updater |
 | `DentalCraft-<V>-x86_64.msi` | MSI | for all users (administrator rights) | the in-app updater |
+| `dentalcraft_<V>_macos_universal.zip` | macOS app bundle (`DentalCraft.app`, Apple Silicon and Intel) | drag `DentalCraft.app` to `/Applications` | the in-app updater (**not built while the macOS job is disabled**, see macOS) |
 | `update.json`, `update.json.minisig` | update manifest | — | read by the in-app updater, served at `https://dentalcraft.app/update/stable.json` |
 | `dentalcraft_<V>_SHA256SUMS.txt` | checksums of every asset above | — | — |
 
@@ -70,8 +71,9 @@ A UTF-8 text file with one word and a newline, which tells the in-app updater ho
 | `appimage` | `usr/share/dentalcraft/install-kind` inside the AppImage |
 | `deb`, `rpm` | `/usr/share/dentalcraft/install-kind` |
 | `flatpak` | `/app/share/dentalcraft/install-kind` |
+| `macos-app` | `Contents/Resources/install-kind` inside `DentalCraft.app` (files in `Contents/MacOS/` must be code) |
 
-The app reads `<exe dir>/install-kind`, then `<exe dir>/../share/dentalcraft/install-kind`. A set `$APPIMAGE` means `appimage`, and the file to replace is the one it names. An existing `/.flatpak-info` means `flatpak`. These two checks win over the file.
+The app reads `<exe dir>/install-kind`, then `<exe dir>/../share/dentalcraft/install-kind`, then `<exe dir>/../Resources/install-kind` (the macOS bundle). A set `$APPIMAGE` means `appimage`, and the file to replace is the one it names. An existing `/.flatpak-info` means `flatpak`. These two checks win over the file.
 
 ## Linux
 
@@ -174,6 +176,40 @@ Untested on Windows: the steps follow Microsoft's documentation of `certutil` an
 - **Versions:**
   - `AllowSameVersionUpgrades` covers pre-releases, which differ only in the fourth version number, which MSI ignores.
   - A newer X.Y.Z already installed blocks the downgrade.
+
+## macOS
+
+Written and checked on Linux only (`cargo check` and `clippy` for `aarch64-apple-darwin` and `x86_64-apple-darwin`, the unit tests of the updater with a bundle on disk). Nobody has built or run the bundle on a Mac yet. The release job is disabled (below), so the asset is not published and `update.json` omits `macos-universal` (`update-manifest.py` lists it only when the file is in `--assets`).
+
+- **Files:** `packaging/macos/`:
+  - `Info.plist.in`: template with `@VERSION@` (the release version, with the pre-release) and `@BUNDLE_VERSION@` (`X.Y.Z`: `CFBundleVersion` takes at most three numbers). `LSMinimumSystemVersion` is 11.0. `NSCameraUsageDescription` and `NSBluetoothAlwaysUsageDescription` are the texts macOS shows when the app first uses the scanner (a USB camera) or the turntable (Bluetooth). Without them macOS ends the program at that moment. The Italian texts are in `InfoPlist.it.strings` (`Resources/it.lproj/`).
+  - `entitlements.plist`: camera, Bluetooth and USB. With the ad-hoc signature macOS asks through `Info.plist` alone; the entitlements start to count with the hardened runtime (Developer ID and notarization, not done).
+  - `bundle.sh <V>`: run on a Mac, from the root of a checkout of the tag outside the superproject. It builds `dentalcraft` and `dentalcraft-cli` for both targets (`MACOSX_DEPLOYMENT_TARGET=11.0`, no `--locked`: the lock of a release tag is stale for the workspace crates, as in `binaries.yml`), joins each with `lipo`, writes `DentalCraft.app` (`Contents/MacOS/{dentalcraft,dentalcraft-cli}`, `Info.plist`, the icon made with `iconutil` from the Linux PNGs, `Resources/{LICENSE.md,THIRD-PARTY-NOTICES.md,README.md,LICENSES/,install-kind}`), signs the two programs and then the bundle **ad hoc** (`codesign --sign -`), checks it with `codesign --verify --deep --strict` and writes `dist/dentalcraft_<V>_macos_universal.zip` with `ditto -c -k --keepParent`. `NO_BUILD=1` reuses the binaries already built.
+- **Signing:** ad hoc, no Developer ID, no notarization. Apple Silicon refuses unsigned code, so the ad-hoc signature is the minimum. Gatekeeper still asks once: System Settings > Privacy & Security > Open Anyway (a file downloaded by the in-app updater is not quarantined).
+- **In-app update (`dc-update`):** the manifest signature (minisign) and the SHA-256 and size of the `.zip` are checked as for every other asset. The `.zip` is unpacked next to the app (`.DentalCraft.app.update/staged/`, same volume), only one `<name>.app` folder is accepted (no `..`, no links, no `__MACOSX`), the quarantine flag is removed and `codesign --verify --deep --strict` must pass. When the app closes, the installed bundle is renamed into `previous/` and the new one to its place (undone if the second rename fails); with restart, `open -n` opens the new app. The old bundle is removed at the next start. If the folder of the app is not writable (a read-only disk image, or an app translocated by Gatekeeper), the update fails before downloading, and the message tells the user to download the new version or move the app to a folder they can change.
+- **What a Mac must still confirm:**
+  - `bundle.sh` runs to the end, and `lipo -info` reports `x86_64 arm64` for both programs;
+  - Gatekeeper opens the ad-hoc signed app after Open Anyway, on Apple Silicon and on Intel;
+  - the camera and Bluetooth questions appear, and macOS remembers the answers for `DentalCraft.app`;
+  - an update from a published `.zip` replaces the running app and `open -n` starts the new one.
+
+### Enabling the macOS job (not applied)
+
+`binaries.yml` is not touched here (Actions are suspended; the macOS job stays `if: false`). To publish the macOS asset with this script, the job and the release job would change like this:
+
+1. `build-macos`: remove `if: false`; delete the two `Build aarch64` / `Build x86_64` steps and the inline `Bundle DentalCraft.app` step, and replace them with one step (the script builds both targets, with `rustup target add` and `MACOSX_DEPLOYMENT_TARGET=11.0`; the `Install Rust` step with `targets:` stays):
+
+   ```yaml
+         - name: Bundle DentalCraft.app (universal, ad-hoc signed, not notarized)
+           env:
+             TAG: ${{ inputs.tag }}
+           run: bash packaging/macos/bundle.sh "${TAG#v}"
+   ```
+
+   `bundle.sh` writes `DentalCraft.app` to `target/macos/` and only the `.zip` to `dist/`, so the existing `upload-artifact` step (`path: dist/*`) uploads just the `.zip`.
+2. `release`: add `build-macos` to `needs`; add `dentalcraft_${VERSION}_macos_universal.zip` to `assets` in "Checksums" (the check for unexpected files would otherwise fail); `update-manifest.py` needs no change, it lists `macos-universal` when the file is present.
+3. "Release notes": append to the standalone line `; macOS universal (Apple Silicon and Intel): \`.zip\` with \`DentalCraft.app\`` as the comment there says, and add the line about the ad-hoc signature and Open Anyway.
+4. The runner is `macos-latest` (billed); `scripts/release-local.sh` has no macOS step: a Mac is needed to produce the `.zip`.
 
 ## Keys and secrets
 

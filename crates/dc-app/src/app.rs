@@ -1221,7 +1221,10 @@ impl DentalCraftApp {
                                 ("F1", t!("shortcut-help")),
                                 ("Esc", t!("shortcut-back")),
                             ] {
-                                ui.label(RichText::new(keys).font(fonts::mono(12.0)));
+                                ui.label(
+                                    RichText::new(dc_ui::keys::platform_keys(keys))
+                                        .font(fonts::mono(12.0)),
+                                );
                                 ui.label(RichText::new(what).font(fonts::ui(13.0)));
                                 ui.end_row();
                             }

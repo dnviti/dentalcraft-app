@@ -148,7 +148,10 @@ const KNOWN_CODES: &[&str] = &[
     "sdk-missing",
     "sdk-unauthorized",
     "platform-unsupported",
+    "platform-capture-denied",
     "device-lost",
+    "camera-access-denied",
+    "program-location",
     "turntable-not-connected",
     "turntable-out-of-range",
     "turntable-busy",
@@ -159,6 +162,8 @@ const KNOWN_CODES: &[&str] = &[
     "ble-not-found",
     "ble-timeout",
     "ble-disconnected",
+    "ble-unauthorized",
+    "ble-app-bundle-required",
     "ble-platform",
     "rig-uncalibrated",
     "calibration",
@@ -167,6 +172,7 @@ const KNOWN_CODES: &[&str] = &[
     "calibration-tilt",
     "calibration-inaccurate",
     "calibration-implausible",
+    "calibration-outdated",
     "scan-quality-low",
     "scan-no-stops",
 ];
@@ -315,8 +321,9 @@ struct Pending {
 }
 
 /// The popup's own step on its command thread, not a scan command: it
-/// finalises a rig job that ended ([`ScanController::finish_rig_job`]).
-const FINISH_RIG_JOB: &str = "popup.finish-rig-job";
+/// finalises a rig job that ended or a stream that failed
+/// ([`ScanController::finish_ended`]).
+const FINISH_ENDED: &str = "popup.finish-ended";
 
 /// What a command's job returns: its answer and, for `scan.import`, the
 /// folder of the file it wrote.
@@ -462,11 +469,12 @@ impl ScanPopup {
             };
             self.ended(a.ticket, &a.id, a.origin, r);
         }
-        // a rig job that ended leaves the acquisition held, as it ran, until
-        // a command finalises it: without one the window would go on showing
-        // a scan under way that fuses nothing
-        if !self.is_busy() && self.try_with(ScanController::rig_job_ended) == Some(true) {
-            self.enqueue(FINISH_RIG_JOB, Value::Null, Origin::Ui);
+        // a rig job that ended, or a stream that failed (the scanner was
+        // lost), leaves the acquisition as it was until a command finalises
+        // it: without one the window would go on showing a scan under way
+        // that fuses nothing
+        if !self.is_busy() && self.try_with(ScanController::needs_finish) == Some(true) {
+            self.enqueue(FINISH_ENDED, Value::Null, Origin::Ui);
         }
         self.pump();
     }
@@ -575,8 +583,8 @@ impl ScanPopup {
                     .map_err(ScanFailure::from);
             }
             let mut c = controller.lock().unwrap_or_else(PoisonError::into_inner);
-            if id == FINISH_RIG_JOB {
-                c.finish_rig_job();
+            if id == FINISH_ENDED {
+                c.finish_ended();
                 return Ok((Value::Null, None));
             }
             if id == SCAN_IMPORT {
@@ -607,8 +615,9 @@ impl ScanPopup {
     /// A command ended: the window follows it, the file of `scan.import`
     /// goes to the host, an agent gets its answer.
     fn ended(&mut self, ticket: u64, id: &str, origin: Origin, r: JobOut) {
-        if id == FINISH_RIG_JOB {
-            // the window reads what the job left from the controller
+        if id == FINISH_ENDED {
+            // the window reads what the job or the stream left from the
+            // controller
             return;
         }
         let r = match r {
@@ -645,7 +654,7 @@ impl ScanPopup {
 /// anonymous diagnostics: a fault as an error, a missing or switched-off
 /// device as a flagged warning; a cancel or a busy device is no failure.
 fn log_failure(command: &str, f: &ScanFailure) {
-    const SETUP: [&str; 12] = [
+    const SETUP: [&str; 13] = [
         "device-not-found",
         "not-connected",
         "turntable-not-connected",
@@ -654,6 +663,7 @@ fn log_failure(command: &str, f: &ScanFailure) {
         "ble-not-found",
         "sdk-missing",
         "platform-unsupported",
+        "platform-capture-denied",
         "rig-uncalibrated",
         "calibration-no-object",
         "invalid-params",
@@ -759,6 +769,20 @@ mod tests {
         }
         assert_eq!(ScanFailure::new("strange", "").key(), "scan-err-other");
         assert!(en.contains("scan-err-other = "));
+        // a camera blocked by the privacy settings, and a program started
+        // from a shared drive, have their own sentence (not the cable one)
+        for (e, key) in [
+            (
+                ScanError::CameraAccessDenied("x".into()),
+                "scan-err-camera-access-denied",
+            ),
+            (
+                ScanError::ProgramLocation("x".into()),
+                "scan-err-program-location",
+            ),
+        ] {
+            assert_eq!(ScanFailure::from(e).key(), key);
+        }
     }
 
     #[test]
@@ -864,6 +888,6 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(popup.try_with(ScanController::rig_job_ended) == Some(false));
+        assert!(popup.try_with(ScanController::needs_finish) == Some(false));
     }
 }

@@ -10,6 +10,7 @@
 //! - [`widgets`]: buttons, badges, toggles, sliders, tabs, inputs, cards.
 //! - [`panels`]: side panels the user resizes, contents that never move a
 //!   panel's edge.
+//! - [`keys`]: key names of the platform in shortcut texts (`Ctrl` is `Cmd` on macOS).
 //! - [`pacing`]: the frame rate cap (60 fps).
 //! - [`loader`] / [`tr`]: the Fluent bundle of shared widget strings.
 //!
@@ -28,6 +29,7 @@
 pub mod fonts;
 #[path = "phosphor_regular.rs"]
 pub mod icons;
+pub mod keys;
 pub mod pacing;
 pub mod panels;
 pub mod theme;

@@ -50,6 +50,8 @@ pub enum Os {
     Linux,
     /// Windows (x86_64).
     Windows,
+    /// macOS (Apple Silicon and Intel).
+    MacOs,
     /// Anything else: updated from the website.
     Other,
 }
@@ -60,6 +62,8 @@ impl Os {
         Os::Linux
     } else if cfg!(windows) {
         Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::MacOs
     } else {
         Os::Other
     };
@@ -110,6 +114,7 @@ pub fn plan(kind: InstallKind, os: Os, manifest: &Manifest) -> Action {
         (InstallKind::AppImage, Os::Linux) => AssetKey::AppImage,
         (InstallKind::Exe, Os::Windows) => AssetKey::WindowsExe,
         (InstallKind::Msi, Os::Windows) => AssetKey::WindowsMsi,
+        (InstallKind::MacApp, Os::MacOs) => AssetKey::MacosUniversal,
         _ => return Action::Manual,
     };
     match manifest.asset(key) {
@@ -235,6 +240,7 @@ mod tests {
         assert_eq!(install(I::AppImage, Os::Linux), Some(K::AppImage));
         assert_eq!(install(I::Exe, Os::Windows), Some(K::WindowsExe));
         assert_eq!(install(I::Msi, Os::Windows), Some(K::WindowsMsi));
+        assert_eq!(install(I::MacApp, Os::MacOs), Some(K::MacosUniversal));
         for (kind, command) in [
             (I::Deb, "sudo apt update && sudo apt upgrade dentalcraft"),
             (I::Rpm, "sudo dnf upgrade dentalcraft"),
@@ -252,6 +258,10 @@ mod tests {
             (I::Standalone, Os::Other),
             (I::AppImage, Os::Windows),
             (I::Exe, Os::Linux),
+            (I::MacApp, Os::Linux),
+            (I::MacApp, Os::Windows),
+            (I::Standalone, Os::MacOs),
+            (I::Unknown, Os::MacOs),
         ] {
             assert_eq!(plan(kind, os, &m), Action::Manual, "{kind:?} {os:?}");
         }
@@ -259,6 +269,8 @@ mod tests {
         let mut partial = m.clone();
         partial.assets.remove("appimage");
         assert_eq!(plan(I::AppImage, Os::Linux, &partial), Action::Manual);
+        partial.assets.remove("macos-universal");
+        assert_eq!(plan(I::MacApp, Os::MacOs, &partial), Action::Manual);
     }
 
     #[test]
