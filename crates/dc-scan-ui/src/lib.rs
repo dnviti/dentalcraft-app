@@ -159,6 +159,8 @@ const KNOWN_CODES: &[&str] = &[
     "ble-not-found",
     "ble-timeout",
     "ble-disconnected",
+    "ble-unauthorized",
+    "ble-app-bundle-required",
     "ble-platform",
     "rig-uncalibrated",
     "calibration",
