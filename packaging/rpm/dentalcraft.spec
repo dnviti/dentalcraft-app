@@ -15,7 +15,7 @@ Name:           dentalcraft
 Version:        %{pkg_version}
 Release:        1
 Summary:        Dental CAD for the practice and the lab
-License:        LicenseRef-DentalCraft-EULA
+License:        PolyForm-Noncommercial-1.0.0
 URL:            https://dentalcraft.app/
 Vendor:         Daniele Viti
 Packager:       DentalCraft Releases <releases@dentalcraft.app>
@@ -42,8 +42,8 @@ planning, from the intraoral scan to the print. It includes dentalcraft-cli, the
 command line and MCP server that drive it headless or through a running app.
 
 DentalCraft is not a medical device: do not use it on patients or for clinical
-decisions. Free of charge for non-clinical use under the DentalCraft end-user
-licence agreement.
+decisions. Source-available under the PolyForm Noncommercial License 1.0.0:
+noncommercial use only.
 
 The package also installs the DentalCraft dnf repository
 (/etc/yum.repos.d/dentalcraft.repo), so that dnf keeps it up to date.

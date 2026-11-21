@@ -1,12 +1,66 @@
 # dentalcraft-app
 
-The shipped DentalCraft desktop application: a Rust workspace with the eframe/wgpu shell, the 3D viewport, the authentication client and the packaging tooling. Depends on `dentalcraft-core` and `dentalcraft-aligners`.
+The desktop application of [DentalCraft](https://dentalcraft.app), a tool for digital dentistry, written in Rust. This repository holds the application shell (eframe and wgpu), the 3D viewport, the module workspace, the scan popup, the sign-in client, the updater, the anonymous diagnostics, `dentalcraft-cli` (command line and MCP server) and the packaging scripts.
 
-This repository is a submodule of the [`dentalcraft`](https://github.com/dnviti-personal-org/dentalcraft) superproject, which holds the plan, the architecture decisions and the pinned versions of all DentalCraft repositories. Clone the superproject with `--recurse-submodules` to work on the whole project.
+It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (engine) and [`dentalcraft-aligners`](https://github.com/dnviti/dentalcraft-aligners) (the first module).
 
-- Visibility: private.
-- Versioning: [release-please](https://github.com/googleapis/release-please) on `main` (Conventional Commits, tags `vX.Y.Z`).
-- CI: GitHub Actions on the `golgari-dev` runner scale set.
+> **Status: alpha.** Screens, commands and the project format can still change between releases. The scanner connector is in alpha too.
+>
+> **Not a medical device.** DentalCraft is not certified and must not be used on patients or for clinical decisions. See [Disclaimer](#disclaimer).
+
+## What it does
+
+| Area | What you get |
+|---|---|
+| Home and new project | Start from STL, OBJ or PLY scans, or scan with a connected 3D scanner. Projects open without an account. |
+| Workspace | Menu of functions grouped by what they are for, an inspector with the parameters and tools of the selected function, a 3D viewport with standard dental views and picking, and a timeline of the stages. |
+| Aligners module | Teeth, diagnosis, bite, final position, aligners, review, production and follow-up, from the scans to printable models. |
+| Scan popup (alpha) | Drives a 3D scanner (Revopoint MINI 2) and a turntable, cleans the point cloud, builds and repairs the mesh, and hands it to the screen that opened it. |
+| Projects | `.dcprj` files with undo, automatic saving and a step history. |
+| Languages | English and Italian, switchable at run time. |
+| Account | Sign-in with OpenID Connect against the DentalCraft account server (not part of the public sources). Local projects open without it. |
+| Agents | `dentalcraft-cli` runs every command headless and serves them over MCP. `dentalcraft --control <port>` lets the CLI drive a running window. |
+| Updates and diagnostics | Signed automatic updates, and anonymous diagnostics only after an explicit opt-in. |
+
+| Crate | What it does |
+|---|---|
+| `dc-app` | The application: Home, sign-in, support, new project, the module workspace, the "Licence and notices" dialog. |
+| `dc-workspace` | Workspace screen: menu tree, viewport, inspector, stage timeline, status bar, import and save. |
+| `dc-viewport` | 3D viewport: wgpu mesh rendering inside egui, orbit camera, standard dental views, CPU picking. |
+| `dc-scan-ui` | The scan popup, reusable by any screen or module. |
+| `dc-ui` | Design system: tokens, fonts, Phosphor icons, theme, shared widgets. |
+| `dc-auth-client` | Desktop sign-in (OIDC authorization code with PKCE, keyring storage of the refresh token). |
+| `dc-update` | Update check, signature check and installation. |
+| `dc-diagnostics` | Anonymous crash, error and session reports, queued on disk. |
+| `dc-cli` | `dentalcraft-cli`: command line and MCP server. |
+
+## Install
+
+Builds and installers for Linux (Flatpak, dnf, apt, AppImage, standalone archive) and Windows (setup `.exe`, `.msi`, standalone archive) are on the [download page](https://dentalcraft.app/download/). The installed application updates itself. The packaging scripts are in [`packaging/`](packaging/README.md). A macOS bundle exists in the scripts but is not built at the moment.
+
+## Build, run and test
+
+You need the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml). No C++ toolchain is needed. On Linux you also need the usual GUI development libraries (Wayland or X11, Vulkan or OpenGL). The dependencies on core and aligners are git dependencies pinned by tag in `Cargo.toml`.
+
+```sh
+cargo run -p dc-app --release          # the application
+cargo run -p dc-cli -- --help          # dentalcraft-cli
+cargo build --release --workspace --bins
+
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+A debug build signs in against a local server at `http://127.0.0.1:8787`; a release build uses the production server. `DC_AUTH_ISSUER` overrides the address. Tests run headless: only logic tests (`egui_kittest`) and no GPU are needed.
+
+To change core, aligners and the app together, work in the [`dentalcraft`](https://github.com/dnviti/dentalcraft) superproject, which redirects the dependencies to the working trees. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Architecture
+
+- [`dentalcraft`](https://github.com/dnviti/dentalcraft) (superproject): pins all repositories and holds the architecture decision records in `docs/adr`.
+- [`dentalcraft-docs`](https://github.com/dnviti/dentalcraft-docs): documentation.
+- Layering: core has no DentalCraft dependency; aligners depends on core; this application depends on both.
 
 ## Updates
 
@@ -39,11 +93,33 @@ With the user's consent, the app sends anonymous reports of crashes and errors t
 
 ## Licence
 
-DentalCraft is proprietary software: copyright (c) 2026 Daniele Viti, all rights reserved. The source code is private. The application is free of charge to download and use, for non-clinical purposes, under the DentalCraft end-user licence agreement in [`LICENSE.md`](LICENSE.md) (Italian and English); it is provided as is, without warranty.
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). You may read, use, change and share the code, and use the application, for any noncommercial purpose. Commercial use is not allowed. The applications are free to download for noncommercial use.
 
-DentalCraft is not a medical device: do not use it on patients or for clinical decisions.
-
-DentalCraft includes open source components, each under its own licence; their copyright and licence notices are in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Both texts are built into the programs, so a downloaded copy always carries them:
+This is not an open source licence in the OSI sense. The third-party components keep their own licences: see [`NOTICE.md`](NOTICE.md) and [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). All of these texts are built into the programs, so a downloaded copy always carries them:
 
 - in the app: account menu (top right) > **Licence and notices**, or **Terms of use** at the bottom of the sign-in screen;
-- on the command line: `dentalcraft-cli licence` prints the licence, `dentalcraft-cli licence --third-party` the third-party notices, and `dentalcraft-cli --version` the copyright line.
+- on the command line: `dentalcraft-cli licence` prints the licence and the notice, `dentalcraft-cli licence --third-party` the third-party notices, and `dentalcraft-cli --version` the copyright line.
+
+**Commercial licensing.** If you want to use DentalCraft commercially, contact the author at hello@dentalcraft.app.
+
+## Disclaimer
+
+DentalCraft is not a certified medical device and has no regulatory clearance. It is provided as is, without warranty. Do not use it on patients or for clinical decisions without independent professional validation. See [`SECURITY.md`](SECURITY.md).
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) (DCO sign-off, inbound licence grant, checks) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as described in [`SECURITY.md`](SECURITY.md).
+
+## Links
+
+| | |
+|---|---|
+| This repository | https://github.com/dnviti/dentalcraft-app |
+| Superproject | https://github.com/dnviti/dentalcraft |
+| Engine | https://github.com/dnviti/dentalcraft-core |
+| Aligners module | https://github.com/dnviti/dentalcraft-aligners |
+| Website | https://github.com/dnviti/dentalcraft-web |
+| Documentation | https://github.com/dnviti/dentalcraft-docs |
+| Product site | https://dentalcraft.app |
+
+Versions are cut by [release-please](https://github.com/googleapis/release-please) from Conventional Commits on `main` (tags `vX.Y.Z`).

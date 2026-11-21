@@ -19,8 +19,8 @@ pub struct ModuleInfo {
     pub desc_key: &'static str,
     /// Installed version, `None` for modules that are not available yet.
     pub version: Option<&'static str>,
-    /// i18n key (dc-app) of the expected release, for coming-soon modules.
-    pub eta_key: Option<&'static str>,
+    /// i18n key (dc-app) of the status label of a coming-soon module (no dates).
+    pub status_key: Option<&'static str>,
 }
 
 impl ModuleInfo {
@@ -39,7 +39,7 @@ pub const COMING_SOON: [ModuleInfo; 4] = [
         name_key: "module-model-builder",
         desc_key: "module-model-builder-desc",
         version: None,
-        eta_key: Some("module-eta-spring-2027"),
+        status_key: Some("module-status-planned"),
     },
     ModuleInfo {
         id: "splint",
@@ -48,7 +48,7 @@ pub const COMING_SOON: [ModuleInfo; 4] = [
         name_key: "module-splint",
         desc_key: "module-splint-desc",
         version: None,
-        eta_key: Some("module-eta-2027"),
+        status_key: Some("module-status-planned"),
     },
     ModuleInfo {
         id: "crown-bridge",
@@ -57,7 +57,7 @@ pub const COMING_SOON: [ModuleInfo; 4] = [
         name_key: "module-crown-bridge",
         desc_key: "module-crown-bridge-desc",
         version: None,
-        eta_key: Some("module-eta-2027"),
+        status_key: Some("module-status-planned"),
     },
     ModuleInfo {
         id: "implant",
@@ -66,7 +66,7 @@ pub const COMING_SOON: [ModuleInfo; 4] = [
         name_key: "module-implant",
         desc_key: "module-implant-desc",
         version: None,
-        eta_key: Some("module-eta-2028"),
+        status_key: Some("module-status-planned"),
     },
 ];
 
@@ -99,7 +99,7 @@ fn installed_info(m: &dyn Module) -> ModuleInfo {
         name_key: m.name_key(),
         desc_key,
         version: Some(m.version()),
-        eta_key: None,
+        status_key: None,
     }
 }
 
@@ -125,5 +125,12 @@ mod tests {
         assert!(cards[1..].iter().all(|c| !c.installed()));
         assert_eq!(instantiate("aligners").unwrap().id(), "aligners");
         assert!(instantiate("implant").is_none());
+    }
+
+    #[test]
+    fn coming_soon_modules_show_a_status_and_no_date() {
+        for m in &COMING_SOON {
+            assert_eq!(m.status_key, Some("module-status-planned"), "{}", m.id);
+        }
     }
 }

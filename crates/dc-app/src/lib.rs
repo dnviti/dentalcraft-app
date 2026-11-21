@@ -74,7 +74,7 @@ pub fn runtime_keys() -> Vec<&'static str> {
     for m in modules::COMING_SOON {
         keys.push(m.name_key);
         keys.push(m.desc_key);
-        keys.extend(m.eta_key);
+        keys.extend(m.status_key);
     }
     keys.extend(["module-aligners-desc", "module-generic-desc"]);
     keys.extend(

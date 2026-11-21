@@ -545,10 +545,11 @@ fn licence_and_third_party_notices() {
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.starts_with("Copyright (c) 2026 Daniele Viti. All rights reserved."),
+        text.starts_with("Required Notice: Copyright (c) Daniele Viti"),
         "{text}"
     );
-    assert!(text.contains("End-User Licence Agreement"));
+    assert!(text.contains("PolyForm Noncommercial License 1.0.0"));
+    assert!(text.contains("Commercial licensing"));
     let out = cli(&["licence", "--third-party"]);
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
@@ -556,7 +557,7 @@ fn licence_and_third_party_notices() {
     let out = cli(&["--version"]);
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.contains("Copyright (c) 2026 Daniele Viti."), "{text}");
+    assert!(text.contains("Copyright (c) Daniele Viti"), "{text}");
 }
 
 /// `dentalcraft-cli` with `DC_UPDATE_URL` pointing at a closed port.

@@ -63,9 +63,7 @@ module-crown-bridge = Crown & Bridge
 module-crown-bridge-desc = Anatomic crowns, copings and bridges with margin detection.
 module-implant = Implant
 module-implant-desc = Guided-surgery planning and drill guides on CBCT data.
-module-eta-spring-2027 = Spring 2027
-module-eta-2027 = 2027
-module-eta-2028 = 2028
+module-status-planned = Planned
 
 ## Account card
 account-title = DentalCraft account
@@ -152,8 +150,8 @@ footer-gdpr = Data stays on this workstation (GDPR art. 9)
 
 ## Licence and notices
 about-licence-title = Licence and notices
-about-licence-summary = Free of charge under the DentalCraft licence, as is and without warranty. Not a medical device: not for clinical use.
-about-copyright = Copyright (c) 2026 Daniele Viti. All rights reserved.
+about-licence-summary = Source-available under the PolyForm Noncommercial License 1.0.0: noncommercial use only, as is and without warranty. Not a medical device: not for clinical use.
+about-copyright = Copyright (c) Daniele Viti
 about-button-licence = Licence
 about-button-third-party = Third-party licences
 about-button-close = Close
