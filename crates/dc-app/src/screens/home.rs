@@ -530,7 +530,7 @@ fn module_card(ui: &mut Ui, c: &Palette, m: &ModuleInfo, width: f32) -> bool {
             c.text_secondary
         },
     );
-    let meta = match (m.version, m.eta_key) {
+    let meta = match (m.version, m.status_key) {
         (Some(v), _) => format!("v{v}"),
         (None, Some(k)) => dc_i18n::tr(k),
         _ => String::new(),

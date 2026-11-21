@@ -20,7 +20,7 @@
   </array>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
-  <key>NSHumanReadableCopyright</key><string>Copyright 2026 Daniele Viti. All rights reserved.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright Daniele Viti</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <!-- macOS stops a program that uses the camera or Bluetooth without these texts.

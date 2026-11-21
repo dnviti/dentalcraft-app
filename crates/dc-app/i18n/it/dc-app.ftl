@@ -63,9 +63,7 @@ module-crown-bridge = Corone e ponti
 module-crown-bridge-desc = Corone anatomiche, cappette e ponti con rilevamento del margine.
 module-implant = Implantologia
 module-implant-desc = Pianificazione della chirurgia guidata e dime di foratura su dati CBCT.
-module-eta-spring-2027 = Primavera 2027
-module-eta-2027 = 2027
-module-eta-2028 = 2028
+module-status-planned = In programma
 
 ## Scheda account
 account-title = Account DentalCraft
@@ -152,8 +150,8 @@ footer-gdpr = I dati restano su questa postazione (GDPR art. 9)
 
 ## Licenza e avvisi
 about-licence-title = Licenza e avvisi
-about-licence-summary = Gratuita con la licenza DentalCraft, così com'è e senza garanzia. Non è un dispositivo medico: non per uso clinico.
-about-copyright = Copyright (c) 2026 Daniele Viti. Tutti i diritti riservati.
+about-licence-summary = Codice sorgente disponibile con la PolyForm Noncommercial License 1.0.0: solo uso non commerciale, così com'è e senza garanzia. Non è un dispositivo medico: non per uso clinico.
+about-copyright = Copyright (c) Daniele Viti
 about-button-licence = Licenza
 about-button-third-party = Licenze di terze parti
 about-button-close = Chiudi

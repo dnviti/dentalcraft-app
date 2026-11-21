@@ -204,16 +204,13 @@ fn terms_of_use_opens_the_licence_and_notices() {
     h.get_by_label("Terms of use").click();
     h.run_steps(3);
     assert_eq!(h.state().about(), Some(AboutView::Summary));
-    assert!(
-        h.query_by_label("Copyright (c) 2026 Daniele Viti. All rights reserved.")
-            .is_some()
-    );
-    // the licence, English first
+    assert!(h.query_by_label("Copyright (c) Daniele Viti").is_some());
+    // the licence
     h.get_by_label("Licence").click();
     h.run_steps(3);
     assert_eq!(h.state().about(), Some(AboutView::Licence));
     assert!(
-        h.query_by_label("End-User Licence Agreement (English)")
+        h.query_by_label("PolyForm Noncommercial License 1.0.0")
             .is_some()
     );
     // the third-party notices
@@ -244,11 +241,11 @@ fn account_menu_opens_the_licence_and_notices() {
     h.get_by_label_contains("Licenza e avvisi").click();
     h.run_steps(3);
     assert_eq!(h.state().about(), Some(AboutView::Summary));
-    // the licence, Italian first
+    // the licence text is the PolyForm one, in English in every language
     h.get_by_label("Licenza").click();
     h.run_steps(3);
     assert!(
-        h.query_by_label("Contratto di licenza d'uso (italiano)")
+        h.query_by_label("PolyForm Noncommercial License 1.0.0")
             .is_some()
     );
     dc_i18n::set_language(Lang::En).unwrap();

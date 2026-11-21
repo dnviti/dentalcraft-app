@@ -29,7 +29,7 @@ const ABOUT: &str = "dentalcraft-cli works on DentalCraft projects (.dcprj) and 
 /// Copyright line of `--version` and `licence`.
 macro_rules! copyright {
     () => {
-        "Copyright (c) 2026 Daniele Viti. All rights reserved."
+        "Copyright (c) Daniele Viti"
     };
 }
 
@@ -37,11 +37,14 @@ const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\n",
     copyright!(),
-    "\nFree of charge under the DentalCraft licence, as is and without warranty. Not a medical device: not for clinical use.\n`dentalcraft-cli licence` prints the licence, `dentalcraft-cli licence --third-party` the third-party notices."
+    "\nSource-available under the PolyForm Noncommercial License 1.0.0: noncommercial use only, as is and without warranty. Not a medical device: not for clinical use.\n`dentalcraft-cli licence` prints the licence and the notice, `dentalcraft-cli licence --third-party` the third-party notices."
 );
 
-/// The DentalCraft licence (EULA), embedded from the repository root.
+/// The DentalCraft licence (PolyForm Noncommercial 1.0.0), embedded from the repository root.
 const LICENCE: &str = include_str!("../../../LICENSE.md");
+
+/// The project notice, embedded from the repository root.
+const NOTICE: &str = include_str!("../../../NOTICE.md");
 
 /// Notices of the bundled open source components.
 const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD-PARTY-NOTICES.md");
@@ -359,14 +362,14 @@ fn print_json(v: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `licence`: the copyright line and the licence, or the third-party notices.
+/// `licence`: the licence and the notice, or the third-party notices.
 fn licence(third_party: bool) {
     let mut out = std::io::stdout().lock();
     // a closed reader (`| head`) is not an error
     let _ = if third_party {
         out.write_all(THIRD_PARTY_NOTICES.as_bytes())
     } else {
-        writeln!(out, "{}\n\n{LICENCE}", copyright!())
+        writeln!(out, "{LICENCE}\n---\n\n{NOTICE}")
     };
 }
 

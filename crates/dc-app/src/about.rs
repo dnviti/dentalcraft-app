@@ -1,18 +1,23 @@
 //! "Licence and notices" dialog: copyright, the DentalCraft licence
-//! (`LICENSE.md`) and the third-party notices (`THIRD-PARTY-NOTICES.md`),
-//! both embedded in the binary from the repository root.
+//! (`LICENSE.md`, with `NOTICE.md`) and the third-party notices
+//! (`THIRD-PARTY-NOTICES.md`), all embedded in the binary from the
+//! repository root.
 
 use std::sync::LazyLock;
 
-use dc_i18n::Lang;
 use dc_ui::widgets::{self, Button};
 use dc_ui::{fonts, icons, theme, tokens};
 use egui::{Align, Layout, RichText, Ui};
 
 use crate::app::DentalCraftApp;
 
-/// The DentalCraft licence (EULA): Italian text, then the English one.
+/// The DentalCraft licence: the PolyForm Noncommercial License 1.0.0 with
+/// the required notice.
 pub const LICENCE: &str = include_str!("../../../LICENSE.md");
+
+/// The project notice: commercial licensing, medical disclaimer, origin of
+/// the code and the main third-party components.
+pub const NOTICE: &str = include_str!("../../../NOTICE.md");
 
 /// Copyright and licence notices of the bundled open source components.
 pub const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD-PARTY-NOTICES.md");
@@ -29,22 +34,9 @@ pub enum AboutView {
     ThirdParty,
 }
 
-/// Separator between the preamble and the Italian and English texts of
-/// `LICENSE.md`.
-const SECTION_RULE: &str = "\n---\n";
-
-/// The licence parts in reading order for `lang`: the bilingual preamble,
-/// then the text in `lang`, then the other one. The whole file when it does
-/// not have the expected three parts.
-pub fn licence_parts(lang: Lang) -> [&'static str; 3] {
-    let mut parts = LICENCE.splitn(3, SECTION_RULE);
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(pre), Some(it), Some(en)) => match lang {
-            Lang::It => [pre, it, en],
-            Lang::En => [pre, en, it],
-        },
-        _ => [LICENCE, "", ""],
-    }
+/// The licence texts in reading order: the licence, then the notice.
+pub fn licence_parts() -> [&'static str; 2] {
+    [LICENCE, NOTICE]
 }
 
 /// Lines of the third-party notices, split once (the list is long and is
@@ -145,10 +137,8 @@ impl DentalCraftApp {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
-                                for (i, part) in
-                                    licence_parts(dc_i18n::current()).into_iter().enumerate()
-                                {
-                                    if i > 0 && !part.is_empty() {
+                                for (i, part) in licence_parts().into_iter().enumerate() {
+                                    if i > 0 {
                                         ui.add_space(8.0);
                                         widgets::hairline(ui);
                                         ui.add_space(8.0);
@@ -240,15 +230,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn licence_parts_put_the_ui_language_first_and_keep_every_byte() {
-        for lang in [Lang::En, Lang::It] {
-            let parts = licence_parts(lang);
-            assert!(parts[0].contains("Daniele Viti"));
-            let total: usize = parts.iter().map(|p| p.len()).sum();
-            assert_eq!(total + 2 * SECTION_RULE.len(), LICENCE.len());
-        }
-        assert!(licence_parts(Lang::En)[1].contains("## End-User Licence Agreement (English)"));
-        assert!(licence_parts(Lang::It)[1].contains("## Contratto di licenza d'uso (italiano)"));
+    fn the_licence_is_polyform_noncommercial_with_the_required_notice() {
+        let [licence, notice] = licence_parts();
+        assert!(licence.starts_with("Required Notice: Copyright (c) Daniele Viti"));
+        assert!(licence.contains("# PolyForm Noncommercial License 1.0.0"));
+        assert!(notice.contains("Commercial licensing"));
     }
 
     #[test]

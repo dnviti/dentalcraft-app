@@ -17,9 +17,9 @@ Source: https://dentalcraft.app/
 
 Files: *
 Copyright: 2026 Daniele Viti
-License: LicenseRef-DentalCraft-EULA
- Proprietary software, free of charge for non-clinical use: see
- /usr/share/doc/dentalcraft/LICENSE.md (DentalCraft end-user licence agreement).
+License: PolyForm-Noncommercial-1.0.0
+ Source-available under the PolyForm Noncommercial License 1.0.0, for
+ noncommercial use only: see /usr/share/doc/dentalcraft/LICENSE.md.
  The open source components and their licences are listed in
  /usr/share/doc/dentalcraft/THIRD-PARTY-NOTICES.md and /usr/share/doc/dentalcraft/LICENSES.
 EOF
@@ -43,8 +43,8 @@ Description: Dental CAD for the practice and the lab
  through a running app.
  .
  DentalCraft is not a medical device: do not use it on patients or for
- clinical decisions. Free of charge for non-clinical use under the DentalCraft
- end-user licence agreement.
+ clinical decisions. Source-available under the PolyForm Noncommercial
+ License 1.0.0: noncommercial use only.
 EOF
 normalize_tree "$debroot"
 dpkg-deb --root-owner-group -Zxz --build "$debroot" "$OUT/dentalcraft_${VERSION}_amd64.deb"

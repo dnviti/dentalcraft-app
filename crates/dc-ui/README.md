@@ -71,4 +71,4 @@ Keys are prefixed `ui-`.
 | `assets/fonts/b612-mono/*.ttf` (Regular, Bold) | github.com/google/fonts `ofl/b612mono` | SIL OFL 1.1 (`OFL.txt`) |
 | `assets/fonts/phosphor/Phosphor.ttf` | Phosphor Icons Regular (identical to the egui-phosphor 0.14 copy) | MIT (`LICENSE-Phosphor-MIT.txt`) |
 | `src/phosphor_regular.rs` | codepoint list vendored from egui-phosphor 0.14.0 (no release supports egui 0.37) | MIT OR Apache-2.0 (`LICENSE-egui-phosphor-MIT.txt`) |
-| `assets/tokens.json` | FigCraft export of `dentalcraft.figcraft` v0.8 | proprietary |
+| `assets/tokens.json` | FigCraft export of `dentalcraft.figcraft` v0.8 (own work) | PolyForm Noncommercial 1.0.0 |
