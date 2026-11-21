@@ -273,6 +273,7 @@ ws-btn-run-again = Run again
 ws-btn-choose-scans = Choose the scan files…
 ws-btn-export = Choose the folder and export…
 ws-btn-visit = Choose the scan of the visit…
+ws-btn-print = Prepare print…
 ws-btn-choose-folder = Choose a folder…
 ws-btn-choose-scan = Choose a scan…
 ws-ca-not-run = The case analysis has not been run on this case yet.
@@ -806,3 +807,12 @@ ws-prod-ramps-depth = Ramp depth
 ws-prod-ramps-height = Ramp height
 ws-prod-ramps-overbite = Overbite for the ramps
 ws-prod-params-rerun = The changes go into the next export: run it again for the print files.
+
+## settings
+ws-settings = Settings
+
+## simple mode
+ws-menu-next = Next
+ws-next-step = Next step
+ws-bite-simple-summary = From { $n } bite scan(s): { $sides }.
+ws-setup-scope-hint-simple = The chosen teeth go with their cusps on the patient's arch line, straightened; the space they need is made first.

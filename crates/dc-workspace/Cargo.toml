@@ -25,6 +25,7 @@ dca-model.workspace = true
 dca-algo.workspace = true
 # app crates
 dc-scan-ui.workspace = true
+dc-print-ui.workspace = true
 dc-ui.workspace = true
 dc-viewport.workspace = true
 egui.workspace = true

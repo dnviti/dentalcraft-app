@@ -1,6 +1,6 @@
 //! Anonymous diagnostics in the app: the question at the first start (an
 //! unticked box; Continue stores the answer and it is not asked again),
-//! the checkbox of the account menu, and the `app.diagnostics.*` commands
+//! the switch of the Settings dialog, and the `app.diagnostics.*` commands
 //! of the bridge, up to a report the server takes.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -152,7 +152,7 @@ fn without_diagnostics_in_the_app_nothing_is_asked() {
 }
 
 #[test]
-fn the_account_menu_checkbox_toggles_diagnostics() {
+fn the_settings_switch_toggles_diagnostics() {
     let _g = lock();
     let dir = tempfile::tempdir().unwrap();
     save_settings(dir.path(), |s| s.diagnostics = Some(false));
@@ -160,8 +160,11 @@ fn the_account_menu_checkbox_toggles_diagnostics() {
     let mut h = harness(deps);
     h.run_steps(3);
     assert!(!h.state().consent_dialog_open());
-    h.get_by_label("Account and settings").click();
+    // the gear of the top bar opens the Settings dialog
+    assert!(h.query_by_label(SETTING).is_none());
+    h.get_by_label("Settings").click();
     h.run_steps(3);
+    assert!(h.state().settings_dialog_open());
     assert_eq!(
         h.get_by_label(SETTING).accesskit_node().toggled(),
         Some(Toggled::False)
@@ -172,11 +175,7 @@ fn the_account_menu_checkbox_toggles_diagnostics() {
     let id = settings(dir.path()).install_id.unwrap();
     assert_eq!(d.install_id().as_deref(), Some(id.as_str()));
     assert!(d.pending() > 0);
-    // the menu closed with the click: open it again
-    if h.query_by_label(SETTING).is_none() {
-        h.get_by_label("Account and settings").click();
-        h.run_steps(3);
-    }
+    // the dialog stays open
     assert_eq!(
         h.get_by_label(SETTING).accesskit_node().toggled(),
         Some(Toggled::True)
@@ -188,6 +187,11 @@ fn the_account_menu_checkbox_toggles_diagnostics() {
     assert_eq!((s.diagnostics, s.install_id), (Some(false), None));
     // turning off deletes what waited
     assert_eq!(d.pending(), 0);
+    // Esc closes it
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().settings_dialog_open());
+    assert_eq!(h.state().screen(), dc_app::Screen::Home);
 }
 
 /// The requests a test server received: head and body.

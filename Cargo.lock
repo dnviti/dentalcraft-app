@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "dc-app"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "base64",
  "chrono",
@@ -1061,6 +1061,7 @@ dependencies = [
  "dc-i18n",
  "dc-mesh",
  "dc-module-api",
+ "dc-print",
  "dc-project",
  "dc-raster",
  "dc-scan-ui",
@@ -1098,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "dc-auth-client"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1114,8 +1115,8 @@ dependencies = [
 
 [[package]]
 name = "dc-ble"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dispatch2",
  "objc2 0.6.5",
@@ -1130,8 +1131,8 @@ dependencies = [
 
 [[package]]
 name = "dc-case"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "blake3",
  "dc-i18n",
@@ -1146,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "dc-cli"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "base64",
  "clap",
@@ -1172,8 +1173,8 @@ dependencies = [
 
 [[package]]
 name = "dc-command"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-case",
  "dc-jobs",
@@ -1184,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "dc-diagnostics"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "chrono",
  "dc-case",
@@ -1204,8 +1205,8 @@ dependencies = [
 
 [[package]]
 name = "dc-geom"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-mesh",
  "glam 0.34.1",
@@ -1218,8 +1219,8 @@ dependencies = [
 
 [[package]]
 name = "dc-i18n"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "fluent-syntax",
  "i18n-embed",
@@ -1231,8 +1232,8 @@ dependencies = [
 
 [[package]]
 name = "dc-jobs"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "rayon",
  "thiserror 2.0.21",
@@ -1240,8 +1241,8 @@ dependencies = [
 
 [[package]]
 name = "dc-mcp"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-module-api",
  "dc-session",
@@ -1252,8 +1253,8 @@ dependencies = [
 
 [[package]]
 name = "dc-mesh"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "glam 0.34.1",
  "serde",
@@ -1262,8 +1263,8 @@ dependencies = [
 
 [[package]]
 name = "dc-module-api"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-case",
  "dc-command",
@@ -1276,9 +1277,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "dc-print"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
+dependencies = [
+ "dc-mesh",
+ "glam 0.34.1",
+ "rayon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dc-print-ui"
+version = "0.2.0-alpha.12"
+dependencies = [
+ "dc-i18n",
+ "dc-mesh",
+ "dc-module-api",
+ "dc-print",
+ "dc-ui",
+ "directories",
+ "egui",
+ "egui_kittest",
+ "glam 0.34.1",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dc-project"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "blake3",
  "dc-case",
@@ -1292,8 +1327,8 @@ dependencies = [
 
 [[package]]
 name = "dc-raster"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-case",
  "dc-mesh",
@@ -1306,12 +1341,13 @@ dependencies = [
 
 [[package]]
 name = "dc-scan-ui"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "dc-case",
  "dc-i18n",
  "dc-jobs",
  "dc-mesh",
+ "dc-module-api",
  "dc-scanner",
  "dc-scene",
  "dc-ui",
@@ -1327,8 +1363,8 @@ dependencies = [
 
 [[package]]
 name = "dc-scanner"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-geom",
  "dc-mesh",
@@ -1349,8 +1385,8 @@ dependencies = [
 
 [[package]]
 name = "dc-scene"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-case",
  "dc-mesh",
@@ -1360,8 +1396,8 @@ dependencies = [
 
 [[package]]
 name = "dc-session"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-case",
  "dc-command",
@@ -1369,6 +1405,7 @@ dependencies = [
  "dc-jobs",
  "dc-mesh",
  "dc-module-api",
+ "dc-print",
  "dc-project",
  "dc-scanner",
  "schemars",
@@ -1380,8 +1417,8 @@ dependencies = [
 
 [[package]]
 name = "dc-turntable"
-version = "0.3.0-alpha.7"
-source = "git+https://github.com/dnviti-personal-org/dentalcraft-core.git?tag=v0.3.0-alpha.7#60893020cba6da43e19fa843d1ac2922e1b6564d"
+version = "0.3.0-alpha.8"
+source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
 dependencies = [
  "dc-ble",
  "schemars",
@@ -1391,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "dc-ui"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "dc-i18n",
  "egui",
@@ -1402,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "dc-update"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "base64",
  "dc-case",
@@ -1425,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "dc-viewport"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "bytemuck",
  "dc-case",
@@ -1439,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "dc-workspace"
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 dependencies = [
  "dc-case",
  "dc-command",
@@ -1447,6 +1484,7 @@ dependencies = [
  "dc-jobs",
  "dc-mesh",
  "dc-module-api",
+ "dc-print-ui",
  "dc-project",
  "dc-scan-ui",
  "dc-scanner",
@@ -1470,8 +1508,8 @@ dependencies = [
 
 [[package]]
 name = "dca-algo"
-version = "0.2.0-alpha.11"
-source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.11#514fea714249d523628bb1b67369857a79ba25e1"
+version = "0.2.0-alpha.12"
+source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.12#2e2e712b93d12c7dc4b9d03fd60c7dd1d1431960"
 dependencies = [
  "dc-case",
  "dc-geom",
@@ -1490,8 +1528,8 @@ dependencies = [
 
 [[package]]
 name = "dca-model"
-version = "0.2.0-alpha.11"
-source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.11#514fea714249d523628bb1b67369857a79ba25e1"
+version = "0.2.0-alpha.12"
+source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.12#2e2e712b93d12c7dc4b9d03fd60c7dd1d1431960"
 dependencies = [
  "dc-case",
  "glam 0.34.1",
@@ -1503,8 +1541,8 @@ dependencies = [
 
 [[package]]
 name = "dca-module"
-version = "0.2.0-alpha.11"
-source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.11#514fea714249d523628bb1b67369857a79ba25e1"
+version = "0.2.0-alpha.12"
+source = "git+https://github.com/dnviti/dentalcraft-aligners.git?tag=v0.2.0-alpha.12#2e2e712b93d12c7dc4b9d03fd60c7dd1d1431960"
 dependencies = [
  "dc-case",
  "dc-command",

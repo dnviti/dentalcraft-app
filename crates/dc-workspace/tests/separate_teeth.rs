@@ -56,7 +56,11 @@ fn harness(project: Project) -> Harness<'static, Workspace> {
 fn harness_of(ws: Workspace) -> Harness<'static, Workspace> {
     let mut h = Harness::builder()
         .with_size(vec2(1600.0, 1000.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // the numbers of the separation are advanced options
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 let _ = ws.show(ui);

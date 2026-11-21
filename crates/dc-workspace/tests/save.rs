@@ -297,6 +297,11 @@ enum Plan {
 /// the case back as it got it: nothing of the case to save.
 const FILES: &str = "writes files only; the case it returns is the one it got";
 
+/// It lists what the case holds (the aligners to print and their print
+/// status) and gives the case back as it got it: nothing of the case to save.
+const LISTS: &str =
+    "lists the aligners and their print status; the case it returns is the one it got";
+
 /// A command of the scan window that acts on the scanner or on the scan
 /// being edited, outside the case: nothing of the case to save.
 const SCANNER: &str = "acts on the scanner and the scan being edited, not on the case";
@@ -470,6 +475,16 @@ fn plan() -> Vec<(&'static str, Plan)> {
         (
             "aligners.planning.tooth-speed",
             Run(|ws, _| json!({ "fdi": lower_crown(ws, 1), "speed": 0.5 })),
+        ),
+        // the print tracking: an aligner of the slowed arch printed, then to
+        // print again (with its reason); the records stay with the case
+        (
+            "aligners.print.mark",
+            Run(|_, _| json!({ "ids": ["INF-01"], "status": "printed" })),
+        ),
+        (
+            "aligners.print.mark",
+            Run(|_, _| json!({ "ids": ["INF-01"], "status": "reprint", "reason": "broken" })),
         ),
         // the clinical review: classified, one item decided, one value
         // chosen, the rest confirmed together
@@ -716,12 +731,21 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.output.print-check", Skip(FILES)),
         ("aligners.output.manifest", Skip(FILES)),
         ("aligners.output.report", Skip(FILES)),
-        ("aligners.output.export-all", Skip(FILES)),
+        (
+            "aligners.output.export-all",
+            Skip(
+                "writes the files of every stage (minutes) and records their folder in the case (`export_dir`), a field of the module state; dca-model print.rs `the_tracking_and_the_export_folder_survive_the_case_file` checks that it is saved",
+            ),
+        ),
         ("aligners.production.shell.automatic", Skip(FILES)),
         ("aligners.production.base-labels", Skip(FILES)),
         ("aligners.production.blockout", Skip(FILES)),
         ("aligners.production.trim-line", Skip(FILES)),
         ("aligners.production.stamp", Skip(FILES)),
+        // what only lists the aligners to print and their print status
+        ("aligners.print.parts", Skip(LISTS)),
+        ("aligners.print.status", Skip(LISTS)),
+        ("aligners.production.print", Skip(LISTS)),
         // the scanner (the scan window, `scan.*`): its session and the scan
         // being edited live outside the case until `scan.import`
         ("scan.devices", Skip(SCANNER)),

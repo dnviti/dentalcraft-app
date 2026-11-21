@@ -273,6 +273,7 @@ ws-btn-run-again = Esegui di nuovo
 ws-btn-choose-scans = Scegli i file delle scansioni…
 ws-btn-export = Scegli la cartella ed esporta…
 ws-btn-visit = Scegli la scansione della visita…
+ws-btn-print = Prepara la stampa…
 ws-btn-choose-folder = Scegli una cartella…
 ws-btn-choose-scan = Scegli una scansione…
 ws-ca-not-run = L'analisi del caso non è ancora stata eseguita su questo caso.
@@ -806,3 +807,12 @@ ws-prod-ramps-depth = Profondità della rampa
 ws-prod-ramps-height = Altezza della rampa
 ws-prod-ramps-overbite = Overbite per le rampe
 ws-prod-params-rerun = Le modifiche valgono per la prossima esportazione: rifalla per avere i file di stampa.
+
+## settings
+ws-settings = Impostazioni
+
+## simple mode
+ws-menu-next = Avanti
+ws-next-step = Prossimo passo
+ws-bite-simple-summary = Da { $n } scansione/i del morso: { $sides }.
+ws-setup-scope-hint-simple = I denti scelti vanno con le cuspidi sulla linea d'arcata del paziente, raddrizzati; lo spazio che serve viene creato prima.

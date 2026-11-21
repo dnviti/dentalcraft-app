@@ -12,28 +12,29 @@ authors = ["Daniele Viti"]
 publish = false
 
 [workspace.dependencies]
-# dentalcraft-core crates. They keep the old organisation URL (GitHub redirects it)
-# until a dentalcraft-aligners release pins core at github.com/dnviti: the same
-# crates from two git URLs would be two different packages.
-dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-project = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-theme = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-session = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-mcp = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
-dc-scanner = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
+# dentalcraft-core crates
+dc-mesh = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-geom = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-case = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-command = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-jobs = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-scene = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-project = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-module-api = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-i18n = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-theme = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-session = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-mcp = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-raster = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-scanner = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-print = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }
 # the scan popup, opened by the workspace and the new-project screen
 dc-scan-ui = { path = "crates/dc-scan-ui" }
+# the print popup, opened by the workspace for a module leaf
+dc-print-ui = { path = "crates/dc-print-ui" }
 
 # GUI: egui, eframe and egui-wgpu must always share the same version (same as core)
 egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
@@ -66,9 +67,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
-dca-algo = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
-dca-module = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
+dca-model = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
+dca-algo = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
+dca-module = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"

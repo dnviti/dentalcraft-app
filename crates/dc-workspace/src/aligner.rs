@@ -231,22 +231,29 @@ impl Workspace {
             && arches
                 .iter()
                 .any(|(_, a)| !matches!(a, ArchAligner::Drawn { .. }));
+        // the exact aligner and what each drawn arch shows are advanced
+        // options; showing or hiding it, and building again an aligner out
+        // of date (with the line that says so), are not
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let (mut toggle, mut exact) = (false, false);
-        ui.columns(2, |cols| {
-            toggle = Button::secondary(t(if shown { "ws-aln-hide" } else { "ws-aln-show" }))
-                .icon(ic::CUBE_TRANSPARENT)
-                .selected(shown)
-                .enabled(!busy && (shown || has))
-                .full_width(true)
-                .show(&mut cols[0])
-                .clicked();
-            exact = Button::secondary(t("ws-aln-exact"))
-                .icon(ic::TARGET)
-                .enabled(!busy && has)
-                .full_width(true)
-                .show(&mut cols[1])
-                .clicked();
-        });
+        let toggle_button = Button::secondary(t(if shown { "ws-aln-hide" } else { "ws-aln-show" }))
+            .icon(ic::CUBE_TRANSPARENT)
+            .selected(shown)
+            .enabled(!busy && (shown || has))
+            .full_width(true);
+        if advanced {
+            ui.columns(2, |cols| {
+                toggle = toggle_button.show(&mut cols[0]).clicked();
+                exact = Button::secondary(t("ws-aln-exact"))
+                    .icon(ic::TARGET)
+                    .enabled(!busy && has)
+                    .full_width(true)
+                    .show(&mut cols[1])
+                    .clicked();
+            });
+        } else {
+            toggle = toggle_button.show(ui).clicked();
+        }
         let rebuild = stale
             && Button::secondary(t("ws-aln-rebuild"))
                 .icon(ic::ARROW_CLOCKWISE)
@@ -261,7 +268,9 @@ impl Workspace {
             caption(ui, t("ws-aln-hidden"));
         } else {
             for (role, a) in arches {
-                caption(ui, arch_line(role, a));
+                if advanced || !matches!(a, ArchAligner::Drawn { .. }) {
+                    caption(ui, arch_line(role, a));
+                }
             }
         }
         if toggle {

@@ -828,20 +828,25 @@ impl Workspace {
         }
         ui.add_space(6.0);
         let now = self.readout(c);
+        // the caption and the exact values are advanced options; the gizmo
+        // and Reset are not
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         // what the move does, or why the tooth does not move here
-        let what = match c {
-            Component::Tooth(f) => match tooth_move_at(&state, f, self.timeline.current) {
-                ToothMove::At(k) => {
-                    dc_i18n::tr_args("ws-sel-what-tooth", &[("stage", &k.to_string())])
-                }
-                ToothMove::Initial => t("ws-sel-no-move-initial"),
-                ToothMove::NoPlan => t("ws-sel-no-move-plan"),
-                ToothMove::NotMeasured => t("ws-sel-no-move-measured"),
-            },
-            _ if c.arch(&state).is_some() => t("ws-sel-what-arch"),
-            _ => t("ws-sel-what-bite"),
-        };
-        caption(ui, what);
+        if advanced {
+            let what = match c {
+                Component::Tooth(f) => match tooth_move_at(&state, f, self.timeline.current) {
+                    ToothMove::At(k) => {
+                        dc_i18n::tr_args("ws-sel-what-tooth", &[("stage", &k.to_string())])
+                    }
+                    ToothMove::Initial => t("ws-sel-no-move-initial"),
+                    ToothMove::NoPlan => t("ws-sel-no-move-plan"),
+                    ToothMove::NotMeasured => t("ws-sel-no-move-measured"),
+                },
+                _ if c.arch(&state).is_some() => t("ws-sel-what-arch"),
+                _ => t("ws-sel-what-bite"),
+            };
+            caption(ui, what);
+        }
         if self.selection.mode == GizmoMode::Scale && now.scale.is_none() {
             caption(ui, t("ws-sel-no-scale"));
         }
@@ -849,7 +854,7 @@ impl Workspace {
         let mut commit: Option<Value> = None;
         let mut preview: Option<Option<GizmoDelta>> = None;
         ui.add_enabled_ui(!busy, |ui| {
-            if let Some((pose, centre)) = now.pose {
+            if advanced && let Some((pose, centre)) = now.pose {
                 let (pos, rot) = readout(&pose, centre);
                 let mut values = [pos, rot];
                 for (row, (key, unit, speed)) in [
@@ -918,7 +923,7 @@ impl Workspace {
                     });
                 }
             }
-            if let Some(s) = now.scale {
+            if advanced && let Some(s) = now.scale {
                 ui.label(
                     RichText::new(t("ws-sel-scale"))
                         .font(fonts::medium(12.0))

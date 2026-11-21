@@ -1,6 +1,6 @@
 # dentalcraft-app
 
-The desktop application of [DentalCraft](https://dentalcraft.app), a tool for digital dentistry, written in Rust. This repository holds the application shell (eframe and wgpu), the 3D viewport, the module workspace, the scan popup, the sign-in client, the updater, the anonymous diagnostics, `dentalcraft-cli` (command line and MCP server) and the packaging scripts.
+The desktop application of [DentalCraft](https://dentalcraft.app), a tool for digital dentistry, written in Rust. This repository holds the application shell (eframe and wgpu), the 3D viewport, the module workspace, the scan and print popups, the sign-in client, the updater, the anonymous diagnostics, `dentalcraft-cli` (command line and MCP server) and the packaging scripts.
 
 It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (engine) and [`dentalcraft-aligners`](https://github.com/dnviti/dentalcraft-aligners) (the first module).
 
@@ -16,6 +16,7 @@ It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (
 | Workspace | Menu of functions grouped by what they are for, an inspector with the parameters and tools of the selected function, a 3D viewport with standard dental views and picking, and a timeline of the stages. |
 | Aligners module | Teeth, diagnosis, bite, final position, aligners, review, production and follow-up, from the scans to printable models. |
 | Scan popup (alpha) | Drives a 3D scanner (Revopoint MINI 2) and a turntable, cleans the point cloud, builds and repairs the mesh, and hands it to the screen that opened it. |
+| Print window (alpha) | Prepares the aligners for direct printing on an Elegoo Saturn 4 Ultra 16K: orientation, supports on the outer side only, plates, time and resin, and the print files saved to a folder or a USB stick. |
 | Projects | `.dcprj` files with undo, automatic saving and a step history. |
 | Languages | English and Italian, switchable at run time. |
 | Account | Sign-in with OpenID Connect against the DentalCraft account server (not part of the public sources). Local projects open without it. |
@@ -28,6 +29,7 @@ It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (
 | `dc-workspace` | Workspace screen: menu tree, viewport, inspector, stage timeline, status bar, import and save. |
 | `dc-viewport` | 3D viewport: wgpu mesh rendering inside egui, orbit camera, standard dental views, CPU picking. |
 | `dc-scan-ui` | The scan popup, reusable by any screen or module. |
+| `dc-print-ui` | The print popup, reusable by any screen or module. |
 | `dc-ui` | Design system: tokens, fonts, Phosphor icons, theme, shared widgets. |
 | `dc-auth-client` | Desktop sign-in (OIDC authorization code with PKCE, keyring storage of the refresh token). |
 | `dc-update` | Update check, signature check and installation. |
@@ -62,11 +64,32 @@ To change core, aligners and the app together, work in the [`dentalcraft`](https
 - [`dentalcraft-docs`](https://github.com/dnviti/dentalcraft-docs): documentation.
 - Layering: core has no DentalCraft dependency; aligners depends on core; this application depends on both.
 
+## Settings
+
+The gear at the top right (Home and the workspace) opens **Settings**; the account menu has **Settings…** too. Every change is saved at once in `settings.json`.
+
+- **General.** Interface language (EN / IT) and theme (Dark, Light, System).
+- **Workspace.** **Advanced options and parameters**, off by default (`advanced`). Off, the inspectors and the scan window show only the automatic runs and the most useful manual corrections, and the status bars hide the technical readouts (memory, frame rate, numbering, units, renderer). On, everything is shown. The shell hands it to every screen each frame (`dc_module_api::advanced_ui`); the agent commands keep all their parameters either way.
+- **Updates.** Check at startup, and **Check now**.
+- **Privacy.** **Send anonymous diagnostic data** (see below).
+- **Agents.** `app.settings.get` (`advanced`, `language`, `theme`, `check_updates`, `diagnostics`) and `app.settings.set {advanced}` in the app bridge (the window changes at once) and in `dentalcraft-cli` and its MCP server (on the app's settings file, keeping its other keys; the app reads it at its next start).
+
+## Printing (alpha)
+
+**Production → Print** shows how many aligners are printed and how many are still to print, with marks the user may give (printed, failed, to print again); its button **Prepare print…** opens the print window with the aligners of the last **Export for printing**, the missing ones preselected.
+
+- **Printer.** The Elegoo Saturn 4 Ultra 16K, with its DENTAL 45 machine parameters (crate `dc-print` of core).
+- **Resin.** The user enters the maker's values once (layer height, exposures, bottom layers, rest, density); they are kept in `print-resin.json` next to `settings.json`. Without them nothing is prepared.
+- **Prepare.** Each aligner is turned with its fitting side away from the plate, gets supports on its outer side only and a raft, and the aligners are placed on as few plates as needed. Two checks run before any file is written: no support near the fitting side, and no part of a layer starting in mid-air. The window shows each plate from above, the layers, the time and the resin.
+- **Save.** **Save print files…** writes one `plate_NN.goo` per plate to the folder chosen (a USB stick for the printer); the aligners on them are recorded as sent. Nothing is sent over the network yet.
+- **Advanced options.** The layer values, the supports, the spacing on the plate, and the plate saved as STL.
+- **Agents.** `print.profiles`, `print.machine-params` and `print.prepare` (session commands, also in `dentalcraft-cli` and its MCP server), `aligners.print.parts`, `aligners.print.status` and `aligners.print.mark`.
+
 ## Updates
 
 The app and `dentalcraft-cli` update themselves from the DentalCraft website (crate [`dc-update`](crates/dc-update/src/lib.rs)).
 
-- **When.** At startup (account menu > **Check for updates at startup**, on by default), from the account menu > **Check for updates…**, and from **Support** > Your workstation. A check at startup that fails (offline) says nothing; one the user asked for says why.
+- **When.** At startup (Settings > **Check for updates at startup**, on by default), from Settings > **Check now**, and from **Support** > Your workstation. A check at startup that fails (offline) says nothing; one the user asked for says why.
 - **What is trusted.** The website publishes `https://dentalcraft.app/update/stable.json` and its minisign signature `stable.json.minisig`, made by the release job with `packaging/update-manifest.py`. The app checks the signature with the release key built into it (`dc_update::PUBLIC_KEY`, key id `B155D07CF2A36DB0`, `keys/dentalcraft.minisign.pub` on the website) before it uses anything in the file, compares the versions by SemVer (a pre-release comes before its release), and checks every download against the size and SHA-256 the signed file gives. When a check fails nothing is installed. `DC_UPDATE_URL` points the check at another address (a test site); the key never changes.
 - **How.** Each package writes a marker file `install-kind` (one word: `standalone`, `appimage`, `deb`, `rpm`, `flatpak`, `exe`, `msi`) next to the program, or in `../share/dentalcraft/` from its folder; `$APPIMAGE` and `/.flatpak-info` win over it.
 
@@ -85,7 +108,7 @@ The app and `dentalcraft-cli` update themselves from the DentalCraft website (cr
 
 With the user's consent, the app sends anonymous reports of crashes and errors to the DentalCraft server (crate [`dc-diagnostics`](crates/dc-diagnostics/src/lib.rs)), so bugs can be found and fixed.
 
-- **Consent.** At the first start (and at each start while unanswered) a dialog explains what is sent and what never is, with an unticked box and **Continue**; account menu > **Send anonymous diagnostic data** changes it at any time. It is stored in `settings.json` as `diagnostics` (`null` until answered) and `install_id`, a random UUID not linked to the account, made when diagnostics are turned on and deleted, with the reports not sent yet, when they are turned off. Nothing is collected or sent before the box is ticked.
+- **Consent.** At the first start (and at each start while unanswered) a dialog explains what is sent and what never is, with an unticked box and **Continue**; Settings > **Send anonymous diagnostic data** changes it at any time. It is stored in `settings.json` as `diagnostics` (`null` until answered) and `install_id`, a random UUID not linked to the account, made when diagnostics are turned on and deleted, with the reports not sent yet, when they are turned off. Nothing is collected or sent before the box is ticked.
 - **What.** One `session` event per start (`startup_ms`); `crash` events from the panic hook (message, backtrace, last log lines; crash files `crash-<time>.log` of earlier runs are picked up at start and renamed `crash-<time>.reported.log`); `error` events for every `ERROR` log line and `warning` events for `WARN` lines flagged `diag = true`, with the structured fields `code`, `command`, `module`, `source`. Version, commit, installation kind, OS, architecture, language, GPU, memory and processors go with each report. Never scans, projects, patient data or account data: home folder, user name, project and scan file names and their folders, registered patient codes and case references, e-mail addresses and access codes are removed from every text first, and texts are cut to the contract's limits.
 - **Where.** `POST {issuer}/api/v1/diagnostics/reports` (the sign-in server: `DC_AUTH_ISSUER`, the saved setting, else the build default), without any `Authorization`. Events wait in `<data>/diagnostics/queue` (at most 500 events and 5 MiB, oldest dropped) and are sent at start, a few seconds after new ones and every ten minutes; after a `429`, a server error or no connection they wait (`Retry-After`, else 60 s doubling to an hour); a `400` or `413` drops them.
 - **Seeing it.** Support > Your workstation says whether diagnostics are on and shows the next report (**Show what is sent**).

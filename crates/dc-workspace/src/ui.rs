@@ -50,11 +50,16 @@ impl Workspace {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        let scanning = self.scan.is_open();
-        if !dropped.is_empty() && self.confirm_exit.is_none() && !self.show_help && !scanning {
+        // the scan and print windows, its own dialogs and the shell's take them
+        let covered = self.confirm_exit.is_some()
+            || self.show_help
+            || self.shell_dialog
+            || self.scan.is_open()
+            || self.print.is_open();
+        if !dropped.is_empty() && !covered {
             self.import_dropped(dropped);
         }
-        if self.confirm_exit.is_none() && !self.show_help && !scanning {
+        if !covered {
             self.keyboard(ui);
         }
         let c = *colors(ui);
@@ -113,8 +118,9 @@ impl Workspace {
             });
         CentralPanel::no_frame().show(ui, |ui| self.center_ui(ui));
 
-        // the scan popup (under the dialogs of the workspace)
+        // the scan and print popups (under the dialogs of the workspace)
         self.scan.show(ui);
+        self.print.show(ui);
         self.dialogs(ui);
         if !self.running.is_empty() {
             ui.ctx()
@@ -270,6 +276,9 @@ impl Workspace {
                     fonts::icon(16.0),
                     c.text_primary,
                 );
+                if widgets::icon_button(ui, ic::GEAR_SIX, t("ws-settings")).clicked() {
+                    self.open_settings();
+                }
                 if Button::ghost(t("ws-help"))
                     .icon(ic::QUESTION)
                     .show(ui)
@@ -481,6 +490,9 @@ impl Workspace {
         }
         let busy = self.is_busy();
         let can_flip = self.module_spec(leaf::SET_ARCH).is_some();
+        // how a role was decided, turning a scan over and closing it with a
+        // base are advanced options; the roles and "Confirm role" are not
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let mut change = None;
         let mut flip = None;
         for (id, name, role, source) in scans {
@@ -513,46 +525,52 @@ impl Workspace {
                             );
                         });
                     });
-                    ui.horizontal(|ui| {
-                        let (kind, icon, key) = match source {
-                            RoleSource::Explicit => (
-                                widgets::BadgeKind::Neutral,
-                                ic::CHECK,
-                                "ws-role-source-explicit",
-                            ),
-                            RoleSource::FileName => (
-                                widgets::BadgeKind::Neutral,
-                                ic::FILE,
-                                "ws-role-source-file-name",
-                            ),
-                            RoleSource::Detected => (
-                                widgets::BadgeKind::Info,
-                                ic::SPARKLE,
-                                "ws-role-source-detected",
-                            ),
-                            RoleSource::DetectedUnsure => (
-                                widgets::BadgeKind::Warning,
-                                ic::WARNING,
-                                "ws-role-source-detected-unsure",
-                            ),
-                            RoleSource::Provisional => (
-                                widgets::BadgeKind::Warning,
-                                ic::WARNING,
-                                "ws-role-source-provisional",
-                            ),
-                        };
-                        widgets::badge_icon(ui, kind, Some(icon), t(key));
-                        // a guess, or a recognition worth a look: the same set-role
-                        // with the role it has confirms it
-                        if matches!(source, RoleSource::Provisional | RoleSource::DetectedUnsure)
-                            && Button::ghost(t("ws-import-confirm-role"))
-                                .enabled(!busy)
-                                .show(ui)
-                                .clicked()
-                        {
-                            change = Some((id, role, role));
-                        }
-                    });
+                    // a guess, or a recognition worth a look: its badge says
+                    // why to confirm it, whatever the options; the badge of a
+                    // sure role is an advanced detail
+                    let guess =
+                        matches!(source, RoleSource::Provisional | RoleSource::DetectedUnsure);
+                    if advanced || guess {
+                        ui.horizontal(|ui| {
+                            let (kind, icon, key) = match source {
+                                RoleSource::Explicit => (
+                                    widgets::BadgeKind::Neutral,
+                                    ic::CHECK,
+                                    "ws-role-source-explicit",
+                                ),
+                                RoleSource::FileName => (
+                                    widgets::BadgeKind::Neutral,
+                                    ic::FILE,
+                                    "ws-role-source-file-name",
+                                ),
+                                RoleSource::Detected => (
+                                    widgets::BadgeKind::Info,
+                                    ic::SPARKLE,
+                                    "ws-role-source-detected",
+                                ),
+                                RoleSource::DetectedUnsure => (
+                                    widgets::BadgeKind::Warning,
+                                    ic::WARNING,
+                                    "ws-role-source-detected-unsure",
+                                ),
+                                RoleSource::Provisional => (
+                                    widgets::BadgeKind::Warning,
+                                    ic::WARNING,
+                                    "ws-role-source-provisional",
+                                ),
+                            };
+                            widgets::badge_icon(ui, kind, Some(icon), t(key));
+                            // the same set-role with the role it has confirms it
+                            if guess
+                                && Button::ghost(t("ws-import-confirm-role"))
+                                    .enabled(!busy)
+                                    .show(ui)
+                                    .clicked()
+                            {
+                                change = Some((id, role, role));
+                            }
+                        });
+                    }
                     match source {
                         RoleSource::Provisional => caption(ui, t("ws-import-provisional-hint")),
                         RoleSource::DetectedUnsure => caption(ui, t("ws-import-unsure-hint")),
@@ -567,7 +585,7 @@ impl Workspace {
                         }
                     });
                     // the side of the teeth recognised the wrong way round
-                    if can_flip && role != ScanRole::Bite {
+                    if advanced && can_flip && role != ScanRole::Bite {
                         ui.horizontal(|ui| {
                             if Button::ghost(t("ws-import-flip"))
                                 .enabled(!busy)
@@ -594,7 +612,9 @@ impl Workspace {
         } else if let Some(role) = flip {
             self.flip_occlusal(role);
         }
-        self.import_base(ui, &state);
+        if advanced {
+            self.import_base(ui, &state);
+        }
     }
 
     /// "Close with a base" (the plugin's fold "Scansione aperta: chiudi con
@@ -689,11 +709,14 @@ impl Workspace {
                         .font(fonts::mono(11.0))
                         .color(c.text_secondary)
                 };
-                ui.label(mono(format_bytes(self.undo.memory_bytes())));
-                let dt = ui.input(|i| i.stable_dt).max(1e-3);
-                ui.label(mono(format!("{:.0} fps", 1.0 / dt)));
-                ui.label(mono(t("ws-numbering")));
-                ui.label(mono(t("ws-units")));
+                // the technical readouts: with the advanced options only
+                if dc_module_api::advanced_ui(ui.ctx()) {
+                    ui.label(mono(format_bytes(self.undo.memory_bytes())));
+                    let dt = ui.input(|i| i.stable_dt).max(1e-3);
+                    ui.label(mono(format!("{:.0} fps", 1.0 / dt)));
+                    ui.label(mono(t("ws-numbering")));
+                    ui.label(mono(t("ws-units")));
+                }
                 let mut cancel = None;
                 if let Some((k, job)) = self.running.iter().enumerate().next() {
                     widgets::divider_v(ui, 16.0);

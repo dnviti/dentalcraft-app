@@ -28,6 +28,7 @@ pub mod modules;
 pub mod pacing;
 mod paint;
 mod screens;
+mod settings_dialog;
 pub mod support_client;
 mod update;
 

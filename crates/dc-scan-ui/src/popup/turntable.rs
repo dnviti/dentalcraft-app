@@ -817,7 +817,7 @@ impl TableUi {
         }
         let labels = [t("scan-auto-mode-stop"), t("scan-auto-mode-continuous")];
         widgets::segmented_fill(ui, &mut self.capture, &labels, 32.0);
-        if self.capture == CAPTURE_STOP {
+        if self.capture == CAPTURE_STOP && dc_module_api::advanced_ui(ui.ctx()) {
             ui.add_space(6.0);
             widgets::labeled_slider(
                 ui,
@@ -1288,6 +1288,9 @@ impl ScanUi {
         out: &mut Vec<Act>,
     ) {
         let c = *colors(ui);
+        // speed, steps, tilt, positions and the quality of the calibration
+        // are for the advanced view
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         heading(ui, &mut self.table.expanded);
         let table = &snap.table;
         let job = JobSnap::running(snap.auto.as_ref())
@@ -1409,25 +1412,27 @@ impl ScanUi {
         }
 
         // where it is
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            let text = |ui: &mut Ui, s: String| {
-                ui.label(
-                    RichText::new(s)
-                        .font(fonts::ui(13.0))
-                        .color(c.text_secondary),
-                );
-            };
-            if let Some(r) = table.rotate_deg {
-                text(ui, tr_n("turntable-rotation", deg(wrapped(r))));
-            }
-            if table.tilt.is_some()
-                && let Some(v) = table.tilt_deg
-            {
-                text(ui, tr_n("turntable-tilt-now", deg(v)));
-            }
-        });
+        if advanced {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                let text = |ui: &mut Ui, s: String| {
+                    ui.label(
+                        RichText::new(s)
+                            .font(fonts::ui(13.0))
+                            .color(c.text_secondary),
+                    );
+                };
+                if let Some(r) = table.rotate_deg {
+                    text(ui, tr_n("turntable-rotation", deg(wrapped(r))));
+                }
+                if table.tilt.is_some()
+                    && let Some(v) = table.tilt_deg
+                {
+                    text(ui, tr_n("turntable-tilt-now", deg(v)));
+                }
+            });
+        }
         // while the automatic scan runs the manual controls (unusable then)
         // fold, so its progress in Acquisition stays in view
         if !self.table.expanded || JobSnap::running(snap.auto.as_ref()).is_some() {
@@ -1440,83 +1445,85 @@ impl ScanUi {
 
         // moves by hand
         let manual = !busy && !job;
-        ui.add_space(8.0);
-        ui.add_enabled_ui(manual, |ui| {
-            widgets::labeled_slider(
-                ui,
-                &t("turntable-step"),
-                &mut self.table.step_deg,
-                1.0..=360.0,
-                1.0,
-                0,
-                "°",
-                45.0,
-            );
-            // side by side when they fit, else one under the other
-            ui.horizontal_wrapped(|ui| {
-                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-                for (key, icon, sign) in [
-                    ("turntable-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
-                    ("turntable-turn-on", ic::ARROW_CLOCKWISE, 1.0),
-                ] {
-                    if Button::secondary(t(key))
-                        .icon(icon)
+        if advanced {
+            ui.add_space(8.0);
+            ui.add_enabled_ui(manual, |ui| {
+                widgets::labeled_slider(
+                    ui,
+                    &t("turntable-step"),
+                    &mut self.table.step_deg,
+                    1.0..=360.0,
+                    1.0,
+                    0,
+                    "°",
+                    45.0,
+                );
+                // side by side when they fit, else one under the other
+                ui.horizontal_wrapped(|ui| {
+                    let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                    for (key, icon, sign) in [
+                        ("turntable-turn-back", ic::ARROW_COUNTER_CLOCKWISE, -1.0),
+                        ("turntable-turn-on", ic::ARROW_CLOCKWISE, 1.0),
+                    ] {
+                        if Button::secondary(t(key))
+                            .icon(icon)
+                            .enabled(manual)
+                            .min_width(half)
+                            .show(ui)
+                            .clicked()
+                        {
+                            out.push(Act::Run(
+                                TURNTABLE_MOVE,
+                                json!({ "axis": "rotate", "by_deg": sign * self.table.step_deg }),
+                            ));
+                        }
+                    }
+                });
+                if let Some((lo, hi)) = table.tilt {
+                    ui.add_space(6.0);
+                    self.table.tilt_deg = self.table.tilt_deg.clamp(lo, hi);
+                    widgets::labeled_slider_deg(
+                        ui,
+                        &t("turntable-tilt"),
+                        &mut self.table.tilt_deg,
+                        lo..=hi,
+                        0.0,
+                    );
+                    if Button::secondary(t("turntable-tilt-apply"))
+                        .icon(ic::ANGLE)
                         .enabled(manual)
-                        .min_width(half)
+                        .full_width(true)
                         .show(ui)
                         .clicked()
                     {
                         out.push(Act::Run(
                             TURNTABLE_MOVE,
-                            json!({ "axis": "rotate", "by_deg": sign * self.table.step_deg }),
+                            json!({ "axis": "tilt", "to_deg": self.table.tilt_deg }),
                         ));
                     }
                 }
-            });
-            if let Some((lo, hi)) = table.tilt {
                 ui.add_space(6.0);
-                self.table.tilt_deg = self.table.tilt_deg.clamp(lo, hi);
-                widgets::labeled_slider_deg(
+                let r = widgets::labeled_slider(
                     ui,
-                    &t("turntable-tilt"),
-                    &mut self.table.tilt_deg,
-                    lo..=hi,
-                    0.0,
+                    &t("turntable-speed"),
+                    &mut self.table.speed,
+                    2.0..=60.0,
+                    1.0,
+                    0,
+                    &t("turntable-speed-unit"),
+                    DEFAULT_SPEED_DEG_S,
                 );
-                if Button::secondary(t("turntable-tilt-apply"))
-                    .icon(ic::ANGLE)
-                    .enabled(manual)
-                    .full_width(true)
-                    .show(ui)
-                    .clicked()
-                {
+                if released(&r) {
                     out.push(Act::Run(
-                        TURNTABLE_MOVE,
-                        json!({ "axis": "tilt", "to_deg": self.table.tilt_deg }),
+                        TURNTABLE_SPEED,
+                        json!({ "axis": "rotate", "deg_per_s": self.table.speed }),
                     ));
                 }
-            }
-            ui.add_space(6.0);
-            let r = widgets::labeled_slider(
-                ui,
-                &t("turntable-speed"),
-                &mut self.table.speed,
-                2.0..=60.0,
-                1.0,
-                0,
-                &t("turntable-speed-unit"),
-                DEFAULT_SPEED_DEG_S,
-            );
-            if released(&r) {
-                out.push(Act::Run(
-                    TURNTABLE_SPEED,
-                    json!({ "axis": "rotate", "deg_per_s": self.table.speed }),
-                ));
-            }
-            if let Some(hint) = speed_hint(self.table.speed, snap.status.fps) {
-                caption(ui, hint);
-            }
-        });
+                if let Some(hint) = speed_hint(self.table.speed, snap.status.fps) {
+                    caption(ui, hint);
+                }
+            });
+        }
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             // Stop works whenever the turntable is connected and no other
@@ -1575,7 +1582,7 @@ impl ScanUi {
                         widgets::badge(ui, BadgeKind::Success, text);
                         if outdated {
                             widgets::badge(ui, BadgeKind::Danger, t("turntable-cal-outdated"));
-                        } else if let Some((quality, _, _)) = fit {
+                        } else if advanced && let Some((quality, _, _)) = fit {
                             widgets::badge(ui, quality.badge(), t(quality.key()));
                         }
                     });
@@ -1592,7 +1599,7 @@ impl ScanUi {
                         );
                     }
                     if let Some((quality, deg, mm)) = fit {
-                        if report.is_none() {
+                        if advanced && report.is_none() {
                             ui.add_space(4.0);
                             caption(
                                 ui,
@@ -1621,7 +1628,7 @@ impl ScanUi {
                 widgets::badge(ui, BadgeKind::Neutral, t("turntable-cal-none"));
             }
         }
-        if let Some(r) = report {
+        if advanced && let Some(r) = report {
             ui.add_space(4.0);
             calibration_report(ui, r);
         }

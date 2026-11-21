@@ -176,7 +176,7 @@ fn the_startup_check_offers_a_newer_version() {
 #[test]
 fn a_skipped_version_or_a_failure_stays_quiet_at_startup() {
     let _g = lock();
-    // skipped: no dialog, the menu still shows it
+    // skipped: no dialog, "Check now" of the Settings dialog still shows it
     let dir = tempfile::tempdir().unwrap();
     save_settings(dir.path(), |s| s.skipped_update = Some("999.0.0".into()));
     let (base, _) = update_site();
@@ -187,9 +187,9 @@ fn a_skipped_version_or_a_failure_stays_quiet_at_startup() {
     step_until(&mut h, "the check", |a| a.update_available().is_some());
     settle(&mut h);
     assert!(!h.state().update_dialog_open());
-    h.get_by_label("Account and settings").click();
+    h.get_by_label("Settings").click();
     h.run_steps(2);
-    h.get_by_label_contains("Check for updates…").click();
+    h.get_by_label("Check now").click();
     step_until(&mut h, "the dialog", DentalCraftApp::update_dialog_open);
     h.run_steps(2);
     assert!(
@@ -234,8 +234,8 @@ fn the_setting_turns_the_startup_check_off() {
     settle(&mut h);
     assert_eq!(hits.load(Ordering::Relaxed), 0, "no request at startup");
     assert_eq!(h.state().update_available(), None);
-    // the account menu turns it back on (saved at once)
-    h.get_by_label("Account and settings").click();
+    // the Settings dialog turns it back on (saved at once)
+    h.get_by_label("Settings").click();
     h.run_steps(2);
     h.get_by_label("Check for updates at startup").click();
     h.run_steps(2);

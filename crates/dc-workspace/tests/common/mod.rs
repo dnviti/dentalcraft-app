@@ -47,7 +47,11 @@ pub fn assert_layout(labels: &Labels) {
         let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
         let mut h = Harness::builder()
             .with_size(vec2(w, hgt))
-            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            // every button of the toolbar: the advanced options on
+            .with_context_setup(|ctx| {
+                dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+                dc_module_api::set_advanced_ui(ctx, true);
+            })
             .build_ui(move |ui| {
                 let _ = ws.show(ui);
             });

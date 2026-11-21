@@ -1,6 +1,6 @@
 //! The consent to anonymous diagnostics (`dc-diagnostics`) in the app: the
 //! question at the first start (and at every start while unanswered), the
-//! checkbox of the account menu, the line of the support page, and the
+//! switch of the Settings dialog, the line of the support page, and the
 //! `app.diagnostics.*` commands of the bridge.
 //!
 //! Nothing is collected or sent before the user ticks the box. Turning it

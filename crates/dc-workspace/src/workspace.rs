@@ -40,6 +40,9 @@ pub enum WorkspaceAction {
     /// The window may close (after [`Workspace::request_quit`]): the case is
     /// saved, or the user chose not to save it.
     Quit,
+    /// The user clicked the gear of the top bar: the shell opens its
+    /// Settings dialog (and tells it with [`Workspace::set_shell_dialog`]).
+    OpenSettings,
 }
 
 /// Where the user wants to go once the unsaved changes are dealt with.
@@ -319,11 +322,20 @@ pub struct Workspace {
     pub(crate) toasts: Vec<ShownToast>,
     pub(crate) confirm_exit: Option<Exit>,
     pub(crate) show_help: bool,
+    /// A dialog of the shell (Settings) is over the workspace: it takes the
+    /// keys and the dropped files.
+    pub(crate) shell_dialog: bool,
     /// The 3D scanner and its popup (`scan`).
     pub(crate) scan: dc_scan_ui::ScanPopup,
     /// The surface of the popup being imported: its file lives until the
     /// import job has read it.
     pub(crate) scan_output: Option<dc_scan_ui::ScanOutput>,
+    /// The print popup (`print`), opened by a leaf whose output lists parts
+    /// to print.
+    pub(crate) print: dc_print_ui::PrintPopup,
+    /// Records of saved print files waiting for their turn
+    /// (`aligners.print.mark` parameters).
+    pub(crate) print_marks: VecDeque<Value>,
     /// The command of a menu leaf an agent runs
     /// ([`Workspace::run_leaf_command`]) and its answer once it ended.
     agent_leaf: Option<(&'static str, Option<Result<Value, String>>)>,
@@ -343,6 +355,8 @@ impl Workspace {
         let mut ws = Self::build(module, project, path);
         ws.view = ViewState::with_viewport(render_state);
         ws.scan = dc_scan_ui::ScanPopup::new(Some(render_state.clone()));
+        ws.print = dc_print_ui::PrintPopup::new(dc_print_ui::ResinStore::standard())
+            .with_native_dialogs(true);
         ws.native_dialogs = true;
         ws
     }
@@ -444,8 +458,11 @@ impl Workspace {
             toasts: Vec::new(),
             confirm_exit: None,
             show_help: false,
+            shell_dialog: false,
             scan: dc_scan_ui::ScanPopup::default(),
             scan_output: None,
+            print: dc_print_ui::PrintPopup::default(),
+            print_marks: VecDeque::new(),
             agent_leaf: None,
             actions: VecDeque::new(),
         }
@@ -505,6 +522,18 @@ impl Workspace {
     /// file): saving then always asks for a new path.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+    }
+
+    /// Tells the workspace whether a dialog of the shell (Settings) is on
+    /// screen: while it is, the keyboard shortcuts and the files dropped on
+    /// the window are not the workspace's.
+    pub fn set_shell_dialog(&mut self, open: bool) {
+        self.shell_dialog = open;
+    }
+
+    /// The gear of the top bar: asks the shell for its Settings dialog.
+    pub(crate) fn open_settings(&mut self) {
+        self.actions.push_back(WorkspaceAction::OpenSettings);
     }
 
     /// `true` while an import or a command runs in the background.
@@ -610,7 +639,7 @@ impl Workspace {
     /// `true` while an import or a command changes the case in the
     /// background: undo, redo, commands and imports wait for it (a save only
     /// reads the state).
-    fn command_running(&self) -> bool {
+    pub(crate) fn command_running(&self) -> bool {
         self.running
             .iter()
             .any(|r| !matches!(r.task, Task::Save(_)))
@@ -1510,6 +1539,7 @@ impl Workspace {
             self.finish(r.task);
         }
         self.poll_scan();
+        self.poll_print();
     }
 
     fn finish(&mut self, task: Task) {
@@ -1677,6 +1707,8 @@ impl Workspace {
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        // a leaf that lists parts to print opens the print popup with them
+        self.open_print_from(out);
         // an arch chosen by hand: what it cleared, as a role change says it
         if id == leaf::SET_ARCH {
             self.show_role_report(out);
@@ -1720,12 +1752,10 @@ impl Workspace {
         }
     }
 
-    /// The first step of the workflow the case has no result for.
+    /// The first step of the workflow the case has no result for (the one
+    /// the menu marks "Next").
     pub(crate) fn next_step(&self) -> Option<&'static str> {
-        self.menu
-            .step_ids()
-            .into_iter()
-            .find(|id| !self.is_done(id))
+        crate::menu::next_step(&self.menu, &|id| self.is_done(id))
     }
 
     /// The pipeline ended well: refresh the viewport, say how many steps ran

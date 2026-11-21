@@ -145,6 +145,8 @@ pub struct DentalCraftApp {
     pub(crate) show_shortcuts: bool,
     /// The "Licence and notices" dialog, when open.
     pub(crate) about: Option<AboutView>,
+    /// The Settings dialog is open.
+    pub(crate) settings_open: bool,
     pub(crate) toasts: Vec<Toast>,
     pub(crate) dialog: Option<PendingDialog>,
     /// The newer version: check, dialog, download, install at close.
@@ -157,7 +159,7 @@ pub struct DentalCraftApp {
     workspace: Option<Workspace>,
     open_job: Option<OpenJob>,
     thumbs: HashMap<PathBuf, Option<TextureHandle>>,
-    ctx: Option<egui::Context>,
+    pub(crate) ctx: Option<egui::Context>,
     /// The open project is saved (or its user chose): the window may close.
     closing: bool,
     /// Holds the frames of the window to the frame rate cap.
@@ -218,6 +220,7 @@ impl DentalCraftApp {
             show_all_recent: false,
             show_shortcuts: false,
             about: None,
+            settings_open: false,
             toasts: Vec::new(),
             dialog: None,
             updater: Updater::new(deps.updates),
@@ -312,6 +315,9 @@ impl DentalCraftApp {
     /// Draws one frame into the root `ui`.
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // what the inspectors and the scan window show, before anything is
+        // drawn (the scan window of New project too)
+        dc_module_api::set_advanced_ui(&ctx, self.settings.advanced);
         if self.ctx.is_none() {
             theme::install(&ctx, theme::Mode::Dark);
             ctx.set_theme(self.settings.theme.egui());
@@ -342,6 +348,8 @@ impl DentalCraftApp {
 
         if self.screen == Screen::Workspace {
             if let Some(ws) = &mut self.workspace {
+                // the shell's dialogs take the keys and the dropped files
+                ws.set_shell_dialog(self.settings_open);
                 let action = ws.show(ui);
                 if let Some(widths) = ws.take_resized_panels() {
                     self.remember_panel_widths(widths);
@@ -355,6 +363,7 @@ impl DentalCraftApp {
                     WorkspaceAction::Saved(path) => {
                         self.remember(&path, "aligners");
                     }
+                    WorkspaceAction::OpenSettings => self.open_settings(),
                     WorkspaceAction::Quit => {
                         self.closing = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -380,6 +389,7 @@ impl DentalCraftApp {
                 });
         }
         self.about_dialog(&ctx);
+        self.settings_dialog(&ctx);
         self.update_dialog(&ctx);
         self.consent_dialog(&ctx);
         self.overlays(&ctx);
@@ -832,6 +842,8 @@ impl DentalCraftApp {
                 // the update dialog closes itself on Esc
             } else if self.about.is_some() {
                 self.about = None;
+            } else if self.settings_open {
+                // the Settings dialog closes itself on Esc
             } else if self.show_shortcuts {
                 self.show_shortcuts = false;
             } else if self.screen == Screen::SignIn {
@@ -891,6 +903,10 @@ impl DentalCraftApp {
                         ui.spacing_mut().item_spacing.x = 12.0;
                         self.account_chip(ui);
                         widgets::divider_v(ui, 24.0);
+                        if widgets::icon_button(ui, icons::GEAR_SIX, t!("settings-title")).clicked()
+                        {
+                            self.open_settings();
+                        }
                         if Button::ghost(t!("nav-support"))
                             .icon(icons::LIFEBUOY)
                             .show(ui)
@@ -925,25 +941,13 @@ impl DentalCraftApp {
             );
             ui.separator();
         }
-        ui.label(
-            RichText::new(t!("settings-theme"))
-                .font(fonts::medium(12.0))
-                .color(dc_ui::colors(ui).text_secondary),
-        );
-        let ctx = ui.ctx().clone();
-        for (pref, key) in [
-            (ThemePref::Dark, "ui-theme-dark"),
-            (ThemePref::Light, "ui-theme-light"),
-            (ThemePref::System, "ui-theme-system"),
-        ] {
-            if ui
-                .radio(self.settings.theme == pref, dc_ui::tr(key))
-                .clicked()
-            {
-                self.set_theme(&ctx, pref);
-            }
+        if ui
+            .button(format!("{}  {}", icons::GEAR_SIX, t!("settings-menu")))
+            .clicked()
+        {
+            self.open_settings();
+            ui.close();
         }
-        ui.separator();
         if ui
             .button(format!("{}  {}", icons::SEAL, t!("about-licence-title")))
             .clicked()
@@ -951,31 +955,7 @@ impl DentalCraftApp {
             self.open_about();
             ui.close();
         }
-        if ui
-            .button(format!(
-                "{}  {}",
-                icons::ARROWS_CLOCKWISE,
-                t!("update-menu-check")
-            ))
-            .clicked()
-        {
-            self.check_for_updates();
-            ui.close();
-        }
-        let mut at_startup = self.settings.check_updates;
-        if ui
-            .checkbox(&mut at_startup, t!("update-setting-startup"))
-            .changed()
-        {
-            self.set_check_updates(at_startup);
-        }
-        let mut diagnostics = self.settings.diagnostics == Some(true);
-        if ui
-            .checkbox(&mut diagnostics, t!("diagnostics-setting"))
-            .changed()
-        {
-            self.set_diagnostics(diagnostics);
-        }
+        let ctx = ui.ctx().clone();
         ui.separator();
         if signed_in {
             if ui
@@ -1130,17 +1110,20 @@ impl DentalCraftApp {
                             .font(fonts::ui(11.0))
                             .color(c.text_secondary),
                     );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let gpu = self
-                            .gpu
-                            .as_ref()
-                            .map_or_else(|| t!("status-no-gpu"), GpuInfo::short);
-                        ui.label(
-                            RichText::new(gpu)
-                                .font(fonts::mono(11.0))
-                                .color(c.text_secondary),
-                        );
-                    });
+                    // the renderer is a technical readout
+                    if self.settings.advanced {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let gpu = self
+                                .gpu
+                                .as_ref()
+                                .map_or_else(|| t!("status-no-gpu"), GpuInfo::short);
+                            ui.label(
+                                RichText::new(gpu)
+                                    .font(fonts::mono(11.0))
+                                    .color(c.text_secondary),
+                            );
+                        });
+                    }
                 });
             });
     }

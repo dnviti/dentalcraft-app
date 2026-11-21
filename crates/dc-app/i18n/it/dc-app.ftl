@@ -307,7 +307,6 @@ open-read-only = Questo progetto è stato scritto da una versione più recente d
 error-module-missing = Il modulo { $module } non è installato.
 
 ## Aggiornamenti
-update-menu-check = Cerca aggiornamenti…
 update-setting-startup = Cerca aggiornamenti all'avvio
 update-support-check = Cerca aggiornamenti
 update-checking-title = Ricerca di aggiornamenti
@@ -371,3 +370,15 @@ app-cmd-window-view = Vista della finestra
 app-cmd-window-view-doc = Imposta cosa mostra la vista 3D della finestra, come fanno la sua barra degli strumenti e la sua linea del tempo; il caso non cambia. Parametri, ciascuno facoltativo (quello che non viene dato resta com'è): view (occlusal, front, left, right o back), stage (lo stadio mostrato sulla linea del tempo, al massimo l'ultimo; 0 è la posizione iniziale), study (il livello Modelli da studio), target (il livello Posizione finale, l'ombra dei denti nella loro posizione finale). Risponde con view, stage, last_stage, study, target, study_shown e teeth_shown.
 app-cmd-window-layout = Disposizione della finestra
 app-cmd-window-layout-doc = Dimensiona la finestra e i suoi pannelli laterali come fa l'utente, poi risponde con la posizione delle parti della finestra; il caso non cambia. Parametri, ciascuno facoltativo: width e height (l'interno della finestra, in punti, dati insieme), menu e inspector (le larghezze del menu a sinistra e dell'ispettore, in punti, come le imposta il trascinamento dei loro bordi: restano entro i loro limiti e vengono salvate per il prossimo avvio). Risponde con window, menu, inspector e view (x, y, width, height di ciascuno), chosen (le larghezze scelte dei pannelli) e overflow (di quanto il contenuto di ciascun pannello supera la sua larghezza).
+
+## settings
+settings-title = Impostazioni
+settings-menu = Impostazioni…
+settings-general = Generale
+settings-workspace = Area di lavoro
+settings-advanced = Opzioni e parametri avanzati
+settings-advanced-desc = Disattivato: i pannelli laterali mostrano solo i passaggi automatici e le correzioni più utili. Attivato: anche tutti i parametri e i valori tecnici.
+settings-updates = Aggiornamenti
+settings-check-now = Controlla ora
+settings-privacy = Privacy
+settings-close = Chiudi

@@ -121,6 +121,11 @@ pub struct Settings {
     /// Width (points) of the steps panel of the scan window the user
     /// dragged it to; the design's width when absent.
     pub scan_steps_width: Option<u32>,
+    /// The inspectors and the scan window show every option, parameter and
+    /// technical readout ("Advanced options and parameters" of the Settings
+    /// dialog); off by default: only the automatic runs and the most useful
+    /// manual corrections.
+    pub advanced: bool,
 }
 
 impl Default for Settings {
@@ -136,6 +141,7 @@ impl Default for Settings {
             menu_width: None,
             inspector_width: None,
             scan_steps_width: None,
+            advanced: false,
         }
     }
 }
@@ -305,6 +311,7 @@ mod tests {
             skipped_update: Some("0.3.0".into()),
             menu_width: Some(320),
             inspector_width: Some(420),
+            advanced: true,
             ..Settings::default()
         };
         store.save_settings(&s);
@@ -332,6 +339,37 @@ mod tests {
         assert_eq!(old.skipped_update, None);
         let off: Settings = serde_json::from_str(r#"{"check_updates": false}"#).unwrap();
         assert!(!off.check_updates);
+    }
+
+    #[test]
+    fn the_advanced_options_are_hidden_unless_turned_on() {
+        assert!(!Settings::default().advanced);
+        // settings saved before the setting existed
+        let old: Settings = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
+        assert!(!old.advanced);
+        // the CLI's `app.settings.*` read and write the same key and defaults
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(Dirs::under(dir.path()));
+        let file = store.dirs().config.join("settings.json");
+        let defaults = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            dc_diagnostics::settings::summary(defaults.as_object().unwrap()),
+            dc_diagnostics::settings::summary(&serde_json::Map::new())
+        );
+        store.save_settings(&Settings {
+            menu_width: Some(300),
+            ..Settings::default()
+        });
+        dc_diagnostics::settings::write_change(
+            &file,
+            dc_diagnostics::settings::Change {
+                advanced: Some(true),
+            },
+        )
+        .unwrap();
+        let back = store.load_settings();
+        assert!(back.advanced);
+        assert_eq!(back.menu_width, Some(300));
     }
 
     #[test]

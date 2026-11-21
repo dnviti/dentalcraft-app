@@ -1363,6 +1363,8 @@ impl Workspace {
         let mut seq_start = false;
         let mut clear = false;
         let c = *colors(ui);
+        // the sizes of a tool are advanced options: hidden, they keep their value
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let m = &mut self.manual;
         let hint = if m.sequence.is_some() {
             "ws-manual-hint-seq"
@@ -1376,16 +1378,22 @@ impl Workspace {
         }
         match tool {
             Tool::Brush => {
-                number(
-                    ui,
-                    t("ws-manual-radius"),
-                    &mut m.radius_mm,
-                    0.1..=8.0,
-                    0.05,
-                    " mm",
-                );
+                if advanced {
+                    number(
+                        ui,
+                        t("ws-manual-radius"),
+                        &mut m.radius_mm,
+                        0.1..=8.0,
+                        0.05,
+                        " mm",
+                    );
+                }
             }
-            Tool::Clean => number(ui, t("ws-manual-rings"), &mut m.rings, 0..=3, 1.0, ""),
+            Tool::Clean => {
+                if advanced {
+                    number(ui, t("ws-manual-rings"), &mut m.rings, 0..=3, 1.0, "");
+                }
+            }
             Tool::Seeds => {
                 if let Some(seq) = &m.sequence {
                     let line = match (seq.next(), seq.arch) {
@@ -1440,7 +1448,9 @@ impl Workspace {
                 ui.checkbox(&mut m.missing, t("ws-manual-is-missing"));
             }
             Tool::Rebuild => {
-                ui.checkbox(&mut m.resegment, t("ws-manual-resegment"));
+                if advanced {
+                    ui.checkbox(&mut m.resegment, t("ws-manual-resegment"));
+                }
             }
             Tool::Adjust => {}
         }
@@ -1500,6 +1510,9 @@ impl Workspace {
         let mut run: Option<Value> = None;
         let mut write = false;
         let mut close = false;
+        // the steps, the lock, the exact values and the options of a move
+        // are advanced options: hidden, they keep their value
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
 
         let m = &mut self.manual;
         ui.label(
@@ -1560,18 +1573,21 @@ impl Workspace {
                 });
             });
         }
-        self.adjust_steps(ui);
+        if advanced {
+            self.adjust_steps(ui);
+        }
 
         let m = &mut self.manual;
         ui.horizontal_wrapped(|ui| {
             // the lock of the setup (`OA_Tooth.locked`): not at a stage
             let mut locked = d.setup.locked.contains(&f);
-            if ui
-                .add_enabled(
-                    at.is_none(),
-                    egui::Checkbox::new(&mut locked, t("ws-manual-lock")),
-                )
-                .changed()
+            if advanced
+                && ui
+                    .add_enabled(
+                        at.is_none(),
+                        egui::Checkbox::new(&mut locked, t("ws-manual-lock")),
+                    )
+                    .changed()
             {
                 run = Some(json!({ "fdi": f.get(), "lock": locked }));
             }
@@ -1594,27 +1610,29 @@ impl Workspace {
                     .color(kind.color(&c)),
             );
         }
-        ui.add_space(6.0);
-        crate::function::caption(ui, t("ws-manual-exact-hint"));
-        let before = m.fields;
-        for (v, (_, key, unit, max)) in m.fields.0.iter_mut().zip(COMPONENTS) {
-            number(ui, t(key), v, -max..=max, 0.05, unit);
+        if advanced {
+            ui.add_space(6.0);
+            crate::function::caption(ui, t("ws-manual-exact-hint"));
+            let before = m.fields;
+            for (v, (_, key, unit, max)) in m.fields.0.iter_mut().zip(COMPONENTS) {
+                number(ui, t(key), v, -max..=max, 0.05, unit);
+            }
+            if m.fields != before {
+                m.fields_edited = true;
+            }
+            if Button::secondary(t("ws-manual-write-exact"))
+                .show(ui)
+                .clicked()
+            {
+                write = true;
+            }
+            ui.add_space(4.0);
+            ui.add_enabled(
+                has_stages,
+                egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
+            );
+            ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
         }
-        if m.fields != before {
-            m.fields_edited = true;
-        }
-        if Button::secondary(t("ws-manual-write-exact"))
-            .show(ui)
-            .clicked()
-        {
-            write = true;
-        }
-        ui.add_space(4.0);
-        ui.add_enabled(
-            has_stages,
-            egui::Checkbox::new(&mut m.at_stage, t("ws-manual-at-stage")),
-        );
-        ui.checkbox(&mut m.refuse_on_collision, t("ws-manual-refuse"));
         ui.add_space(6.0);
         if Button::ghost(t("ws-manual-close")).show(ui).clicked() {
             close = true;
@@ -2484,7 +2502,11 @@ mod tests {
         let state = exec("aligners.teeth.frames", &lower_demo(), Value::Null);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1600.0, 900.0))
-            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            // the exact values and the refusal of a collision are advanced
+            .with_context_setup(|ctx| {
+                dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+                dc_module_api::set_advanced_ui(ctx, true);
+            })
             .build_ui_state(
                 |ui, app: &mut App| {
                     app.ws.show(ui);

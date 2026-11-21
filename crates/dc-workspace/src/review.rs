@@ -379,8 +379,10 @@ impl Workspace {
     }
 
     /// The records, the one chosen with its decision controls, and the
-    /// actions on every record.
+    /// actions on every record. With the advanced options off only
+    /// "Confirm all unflagged".
     pub(crate) fn review_corrections(&mut self, ui: &mut Ui) {
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let state = self.undo.current().clone();
         let data = crate::overlay::aligners(&state)
             .cloned()
@@ -396,172 +398,177 @@ impl Workspace {
         let c = *colors(ui);
         let mut send: Option<(&'static str, Value)> = None;
 
-        // the filter
-        let labels: Vec<String> = Filter::ALL.iter().map(|f| t(f.key())).collect();
-        let mut i = Filter::ALL
-            .iter()
-            .position(|f| *f == self.review_ui.filter)
-            .unwrap_or(0);
-        if widgets::segmented_fill(ui, &mut i, &labels, 24.0).changed() {
-            self.review_ui.filter = Filter::ALL[i];
-        }
-        ui.add_space(6.0);
-        let tooth = match self.selection.component {
-            Some(Component::Tooth(n)) => Fdi::new(n).ok(),
-            _ => None,
-        };
-        let shown = filtered(records, self.review_ui.filter, tooth);
-        if shown.is_empty() {
-            caption(
-                ui,
-                t(
-                    if self.review_ui.filter == Filter::Tooth && tooth.is_none() {
-                        "ws-rev-pick-tooth"
-                    } else {
-                        "ws-rev-none-shown"
-                    },
-                ),
-            );
-        }
+        if advanced {
+            // the filter
+            let labels: Vec<String> = Filter::ALL.iter().map(|f| t(f.key())).collect();
+            let mut i = Filter::ALL
+                .iter()
+                .position(|f| *f == self.review_ui.filter)
+                .unwrap_or(0);
+            if widgets::segmented_fill(ui, &mut i, &labels, 24.0).changed() {
+                self.review_ui.filter = Filter::ALL[i];
+            }
+            ui.add_space(6.0);
+            let tooth = match self.selection.component {
+                Some(Component::Tooth(n)) => Fdi::new(n).ok(),
+                _ => None,
+            };
+            let shown = filtered(records, self.review_ui.filter, tooth);
+            if shown.is_empty() {
+                caption(
+                    ui,
+                    t(
+                        if self.review_ui.filter == Filter::Tooth && tooth.is_none() {
+                            "ws-rev-pick-tooth"
+                        } else {
+                            "ws-rev-none-shown"
+                        },
+                    ),
+                );
+            }
 
-        // the list
-        let chosen_key = self.review_ui.chosen.clone();
-        let mut choose: Option<(String, Option<Fdi>)> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("ws-rev-list")
-            .max_height(240.0)
-            .show(ui, |ui| {
-                for &k in &shown {
-                    let r = &records[k];
-                    let key = r.key();
-                    // the status as the menu shows a step: done, to do, a warning
-                    let (icon, color) = if r.needs_check() && r.status == ReviewStatus::Pending {
-                        (ic::WARNING, c.status_warning)
-                    } else if r.status == ReviewStatus::Pending {
-                        (ic::CIRCLE, c.text_secondary)
-                    } else {
-                        (ic::CHECK_CIRCLE, c.status_success)
-                    };
-                    let selected = chosen_key.as_deref() == Some(key.as_str());
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            ui.label(RichText::new(icon).font(fonts::icon(13.0)).color(color));
-                            Button::secondary(row_text(r, both))
-                                .selected(selected)
-                                .full_width(true)
-                                .show(ui)
-                                .clicked()
-                        })
-                        .inner;
-                    if clicked {
-                        choose = Some((key, r.fdi));
+            // the list
+            let chosen_key = self.review_ui.chosen.clone();
+            let mut choose: Option<(String, Option<Fdi>)> = None;
+            egui::ScrollArea::vertical()
+                .id_salt("ws-rev-list")
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for &k in &shown {
+                        let r = &records[k];
+                        let key = r.key();
+                        // the status as the menu shows a step: done, to do, a warning
+                        let (icon, color) = if r.needs_check() && r.status == ReviewStatus::Pending
+                        {
+                            (ic::WARNING, c.status_warning)
+                        } else if r.status == ReviewStatus::Pending {
+                            (ic::CIRCLE, c.text_secondary)
+                        } else {
+                            (ic::CHECK_CIRCLE, c.status_success)
+                        };
+                        let selected = chosen_key.as_deref() == Some(key.as_str());
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                ui.label(RichText::new(icon).font(fonts::icon(13.0)).color(color));
+                                Button::secondary(row_text(r, both))
+                                    .selected(selected)
+                                    .full_width(true)
+                                    .show(ui)
+                                    .clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            choose = Some((key, r.fdi));
+                        }
+                        ui.add_space(2.0);
                     }
-                    ui.add_space(2.0);
+                });
+            if let Some((key, fdi)) = choose {
+                self.review_ui.chosen = Some(key);
+                if let Some(f) = fdi {
+                    self.select_component(Some(Component::Tooth(f.get())));
                 }
-            });
-        if let Some((key, fdi)) = choose {
-            self.review_ui.chosen = Some(key);
-            if let Some(f) = fdi {
-                self.select_component(Some(Component::Tooth(f.get())));
             }
-        }
 
-        // the record chosen
-        let chosen = self
-            .review_ui
-            .chosen
-            .as_deref()
-            .and_then(|k| records.iter().find(|r| r.key() == k));
-        if let Some(r) = chosen {
-            ui.add_space(8.0);
-            widgets::hairline(ui);
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(title(r, both))
-                    .font(fonts::semibold(13.0))
-                    .color(c.text_primary),
-            );
-            caption(
-                ui,
-                tr("ws-rev-computed", &[("value", &value_words(&r.computed))]),
-            );
-            for line in method_lines(r) {
-                caption(ui, line);
-            }
-            caption(
-                ui,
-                tr("ws-rev-proposed", &[("value", &value_words(&r.proposed))]),
-            );
-            if let Some(note) = note_words(r) {
-                widgets::badge(ui, BadgeKind::Warning, note);
-            }
-            ui.label(
-                RichText::new(decision_words(r))
-                    .font(fonts::medium(12.0))
-                    .color(c.text_primary),
-            );
-            ui.add_space(6.0);
-            let key = r.key();
-            if Button::primary(t("ws-rev-confirm"))
-                .enabled(!busy)
-                .full_width(true)
-                .show(ui)
-                .clicked()
-            {
-                send = Some((DECIDE, decide_params(&key, "confirm")));
-            }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(t("ws-rev-choose"))
-                    .font(fonts::medium(12.0))
-                    .color(c.text_secondary),
-            );
-            ui.add_enabled_ui(!busy, |ui| {
-                for option in &r.options {
-                    let on = option == r.in_force();
-                    let clicked = ui
-                        .horizontal(|ui| {
-                            let dot = widgets::radio_indicator(ui, on, ui.is_enabled());
-                            let text = ui.add(
-                                egui::Label::new(
-                                    RichText::new(value_words(option))
-                                        .font(fonts::ui(12.0))
-                                        .color(c.text_primary),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-                            dot.interact(egui::Sense::click()).clicked() || text.clicked()
-                        })
-                        .inner;
-                    if clicked && !(on && r.status != ReviewStatus::Pending) {
-                        send = Some((SET_VALUE, value_params(&key, option)));
-                    }
+            // the record chosen
+            let chosen = self
+                .review_ui
+                .chosen
+                .as_deref()
+                .and_then(|k| records.iter().find(|r| r.key() == k));
+            if let Some(r) = chosen {
+                ui.add_space(8.0);
+                widgets::hairline(ui);
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(title(r, both))
+                        .font(fonts::semibold(13.0))
+                        .color(c.text_primary),
+                );
+                caption(
+                    ui,
+                    tr("ws-rev-computed", &[("value", &value_words(&r.computed))]),
+                );
+                for line in method_lines(r) {
+                    caption(ui, line);
                 }
-            });
-            if r.status != ReviewStatus::Pending {
-                ui.add_space(4.0);
-                if Button::secondary(t("ws-rev-reset"))
+                caption(
+                    ui,
+                    tr("ws-rev-proposed", &[("value", &value_words(&r.proposed))]),
+                );
+                if let Some(note) = note_words(r) {
+                    widgets::badge(ui, BadgeKind::Warning, note);
+                }
+                ui.label(
+                    RichText::new(decision_words(r))
+                        .font(fonts::medium(12.0))
+                        .color(c.text_primary),
+                );
+                ui.add_space(6.0);
+                let key = r.key();
+                if Button::primary(t("ws-rev-confirm"))
                     .enabled(!busy)
                     .full_width(true)
                     .show(ui)
                     .clicked()
                 {
-                    send = Some((DECIDE, decide_params(&key, "reset")));
+                    send = Some((DECIDE, decide_params(&key, "confirm")));
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(t("ws-rev-choose"))
+                        .font(fonts::medium(12.0))
+                        .color(c.text_secondary),
+                );
+                ui.add_enabled_ui(!busy, |ui| {
+                    for option in &r.options {
+                        let on = option == r.in_force();
+                        let clicked = ui
+                            .horizontal(|ui| {
+                                let dot = widgets::radio_indicator(ui, on, ui.is_enabled());
+                                let text = ui.add(
+                                    egui::Label::new(
+                                        RichText::new(value_words(option))
+                                            .font(fonts::ui(12.0))
+                                            .color(c.text_primary),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                );
+                                dot.interact(egui::Sense::click()).clicked() || text.clicked()
+                            })
+                            .inner;
+                        if clicked && !(on && r.status != ReviewStatus::Pending) {
+                            send = Some((SET_VALUE, value_params(&key, option)));
+                        }
+                    }
+                });
+                if r.status != ReviewStatus::Pending {
+                    ui.add_space(4.0);
+                    if Button::secondary(t("ws-rev-reset"))
+                        .enabled(!busy)
+                        .full_width(true)
+                        .show(ui)
+                        .clicked()
+                    {
+                        send = Some((DECIDE, decide_params(&key, "reset")));
+                    }
                 }
             }
         }
 
         // every record at once
-        ui.add_space(10.0);
-        widgets::hairline(ui);
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(t("ws-rev-all"))
-                .font(fonts::semibold(13.0))
-                .color(c.text_primary),
-        );
-        caption(ui, t("ws-rev-all-hint"));
-        ui.add_space(4.0);
+        if advanced {
+            ui.add_space(10.0);
+            widgets::hairline(ui);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(t("ws-rev-all"))
+                    .font(fonts::semibold(13.0))
+                    .color(c.text_primary),
+            );
+            caption(ui, t("ws-rev-all-hint"));
+            ui.add_space(4.0);
+        }
         if Button::secondary(t("ws-rev-confirm-unflagged"))
             .enabled(!busy)
             .full_width(true)
@@ -570,14 +577,16 @@ impl Workspace {
         {
             send = Some((BULK, json!({ "mode": "confirm_unflagged" })));
         }
-        ui.add_space(4.0);
-        if Button::ghost(t("ws-rev-reset-all"))
-            .enabled(!busy)
-            .full_width(true)
-            .show(ui)
-            .clicked()
-        {
-            send = Some((BULK, json!({ "mode": "reset" })));
+        if advanced {
+            ui.add_space(4.0);
+            if Button::ghost(t("ws-rev-reset-all"))
+                .enabled(!busy)
+                .full_width(true)
+                .show(ui)
+                .clicked()
+            {
+                send = Some((BULK, json!({ "mode": "reset" })));
+            }
         }
 
         if let Some((id, params)) = send {

@@ -1036,7 +1036,10 @@ impl Workspace {
         let inset = OVERLAY_INSET;
         let inner = rect.shrink(inset);
         // the toolbar wraps into rows that stop short of the view cube
-        let toolbar_rows = toolbar_rows(ui, toolbar_max_width(inner.width()));
+        // the measuring tools (not available yet), the layers of the marks
+        // and the attachments, the legend and the scale bar are advanced
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
+        let toolbar_rows = toolbar_rows(ui, toolbar_max_width(inner.width()), advanced);
         let mut px_per_mm = None;
         let mut manual_events = Vec::new();
         let mut alt_action = Action::None;
@@ -1168,15 +1171,16 @@ impl Workspace {
             self.empty_state(ui, rect);
         }
 
-        // legend (bottom left): the contact ramp when the map is shown
+        // legend (bottom left): the contact ramp when the map is shown (it
+        // stays while the map does, whatever the options)
         if self.view.layers.contacts {
             contact_legend(ui, inner);
-        } else {
+        } else if advanced {
             legend(ui, inner);
         }
 
         // scale bar (bottom right)
-        if let Some(px) = px_per_mm {
+        if let Some(px) = px_per_mm.filter(|_| advanced) {
             scale_bar(ui, inner, px);
         }
 
@@ -1326,7 +1330,9 @@ impl Workspace {
             }
             ToolbarGroup::Marks => {
                 // the attachment shapes are not modelled yet (ANO-001)
-                if icon_toggle(ui, ic::SQUARE, &t("ws-layer-attachments"), false).clicked() {
+                if dc_module_api::advanced_ui(ui.ctx())
+                    && icon_toggle(ui, ic::SQUARE, &t("ws-layer-attachments"), false).clicked()
+                {
                     self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 }
                 let on = self.view.layers.ipr;
@@ -1836,8 +1842,10 @@ pub(crate) enum ToolbarItem {
 }
 
 impl ToolbarItem {
-    /// Every item, in the order of the toolbar.
-    fn all() -> Vec<ToolbarItem> {
+    /// Every item, in the order of the toolbar; without `advanced` (the
+    /// advanced options off) not the measuring tools nor the layers of the
+    /// marks.
+    fn all(advanced: bool) -> Vec<ToolbarItem> {
         let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
         let groups = [
             ToolbarGroup::Arch,
@@ -1850,13 +1858,14 @@ impl ToolbarItem {
             ToolbarGroup::Fit,
         ]
         .into_iter()
+        .filter(|g| advanced || !matches!(g, ToolbarGroup::Tools | ToolbarGroup::Layers))
         .map(ToolbarItem::Group);
         views.chain(groups).collect()
     }
 
     /// Width of the item at most (a selected view segment is a little
     /// wider than the others).
-    fn width(self, ui: &Ui) -> f32 {
+    fn width(self, ui: &Ui, advanced: bool) -> f32 {
         let buttons =
             |n: usize| n as f32 * TOOLBAR_BUTTON + n.saturating_sub(1) as f32 * TOOLBAR_SPACING;
         match self {
@@ -1874,8 +1883,8 @@ impl ToolbarItem {
             ToolbarItem::Group(ToolbarGroup::Fit) => buttons(1),
             // labels, seeds, numbers, contacts
             ToolbarItem::Group(ToolbarGroup::Layers) => buttons(4),
-            // attachments, IPR
-            ToolbarItem::Group(ToolbarGroup::Marks) => buttons(2),
+            // attachments (advanced), IPR
+            ToolbarItem::Group(ToolbarGroup::Marks) => buttons(if advanced { 2 } else { 1 }),
             // display: solid, transparent, wireframe; tools: measure, angle,
             // section plane; solids: study models, final ghost, aligner
             ToolbarItem::Group(_) => buttons(3),
@@ -1901,10 +1910,10 @@ pub(crate) fn toolbar_max_width(inner_width: f32) -> f32 {
 
 /// The toolbar items packed into rows that fit in `max_width` (frame
 /// included). An item wider than the room stays alone on its row.
-fn toolbar_rows(ui: &Ui, max_width: f32) -> Vec<Vec<ToolbarItem>> {
-    let widths: Vec<(ToolbarItem, f32)> = ToolbarItem::all()
+fn toolbar_rows(ui: &Ui, max_width: f32, advanced: bool) -> Vec<Vec<ToolbarItem>> {
+    let widths: Vec<(ToolbarItem, f32)> = ToolbarItem::all(advanced)
         .into_iter()
-        .map(|i| (i, i.width(ui)))
+        .map(|i| (i, i.width(ui, advanced)))
         .collect();
     pack_toolbar_rows(&widths, max_width)
 }
@@ -2302,7 +2311,7 @@ mod tests {
     use super::*;
 
     fn widths(view: f32) -> Vec<(ToolbarItem, f32)> {
-        ToolbarItem::all()
+        ToolbarItem::all(true)
             .into_iter()
             .map(|i| match i {
                 ToolbarItem::View(_) => (i, view),
@@ -2326,11 +2335,15 @@ mod tests {
         // room for everything: one row, every item once, in order
         let rows = pack_toolbar_rows(&w, 2000.0);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], ToolbarItem::all());
+        assert_eq!(rows[0], ToolbarItem::all(true));
         for room in [900.0, 600.0, 420.0, 312.0, 200.0, 130.0] {
             let rows = pack_toolbar_rows(&w, room);
             let flat: Vec<ToolbarItem> = rows.iter().flatten().copied().collect();
-            assert_eq!(flat, ToolbarItem::all(), "nothing lost or moved at {room}");
+            assert_eq!(
+                flat,
+                ToolbarItem::all(true),
+                "nothing lost or moved at {room}"
+            );
             for row in &rows {
                 assert!(
                     row.len() == 1 || row_width(row, &w) <= room,
@@ -2344,6 +2357,21 @@ mod tests {
         let narrow = pack_toolbar_rows(&w, 312.0).len();
         assert!(narrow > pack_toolbar_rows(&w, 900.0).len());
         assert!(toolbar_height(narrow) > toolbar_height(1));
+    }
+
+    #[test]
+    fn the_advanced_options_off_leave_the_tools_and_the_marks_out_of_the_toolbar() {
+        let simple = ToolbarItem::all(false);
+        assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Tools)));
+        assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
+        // the rest, in the same order
+        let full: Vec<ToolbarItem> = ToolbarItem::all(true)
+            .into_iter()
+            .filter(|i| simple.contains(i))
+            .collect();
+        assert_eq!(full, simple);
+        assert!(simple.contains(&ToolbarItem::Group(ToolbarGroup::Solids)));
+        assert!(simple.contains(&ToolbarItem::Group(ToolbarGroup::Fit)));
     }
 
     #[test]

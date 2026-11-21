@@ -46,6 +46,12 @@ const BANNED: &[(&str, bool)] = &[
     ("comando non riuscito", false),
     ("case info", false),
     ("dati del caso", false),
+    // the print popup: the words of the slicer and of the printer's protocol
+    ("slice", true),
+    ("slicing", true),
+    ("goo", true),
+    ("sdcp", true),
+    ("rle", true),
 ];
 
 /// Keys that keep a word with another meaning: not the colours of the teeth
@@ -68,7 +74,13 @@ fn no_banned_word_in_the_text_of_the_shell() {
         .unwrap()
         .to_owned();
     let mut lines = 0;
-    for krate in ["dc-app", "dc-ui", "dc-workspace", "dc-scan-ui"] {
+    for krate in [
+        "dc-app",
+        "dc-ui",
+        "dc-workspace",
+        "dc-scan-ui",
+        "dc-print-ui",
+    ] {
         for lang in ["en", "it"] {
             let path = crates
                 .join(krate)

@@ -690,7 +690,6 @@ impl ScanUi {
         ui.add_space(8.0);
         self.status_row(ui);
         if let Some(v) = self.snap.as_ref().and_then(|s| s.status.vendor.as_ref()) {
-            ui.add_space(4.0);
             vendor::row(ui, v);
         }
         ui.add_space(10.0);
@@ -821,6 +820,9 @@ impl ScanUi {
     fn status_row(&self, ui: &mut Ui) {
         let c = *colors(ui);
         let state = self.state();
+        // the numbers of the scan are for the advanced view; the state, the
+        // tracking and the errors are always shown
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         // a narrow window puts what does not fit on a second line
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -840,10 +842,10 @@ impl ScanUi {
                 );
             };
             let Some(s) = &self.snap else { return };
-            if s.live() {
+            if advanced && s.live() {
                 text(ui, tr_n("scan-fps", format!("{:.0}", s.status.fps)));
             }
-            if s.status.frames > 0 {
+            if advanced && s.status.frames > 0 {
                 text(ui, tr_n("scan-fused", s.status.fused_frames.to_string()));
             }
             let points = if s.live() {
@@ -851,10 +853,10 @@ impl ScanUi {
             } else {
                 s.cloud.as_ref().map_or(s.status.points, |c| c.len())
             };
-            if points > 0 {
+            if advanced && points > 0 {
                 text(ui, tr_n("scan-points", points.to_string()));
             }
-            if let Some([tilt, yaw]) = s.status.scanner_deg {
+            if advanced && let Some([tilt, yaw]) = s.status.scanner_deg {
                 text(
                     ui,
                     dc_i18n::tr_args(
@@ -866,7 +868,7 @@ impl ScanUi {
                     ),
                 );
             }
-            if let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
+            if advanced && let Some(m) = s.mesh.as_ref().filter(|_| !s.live()) {
                 text(ui, tr_n("scan-triangles", m.face_count().to_string()));
             }
             if s.live() && !s.finishing() {
@@ -956,13 +958,15 @@ impl ScanUi {
                 StrokeKind::Inside,
             );
         }
-        if content == Content::Points {
+        if content == Content::Points && dc_module_api::advanced_ui(ui.ctx()) {
             if let Some(r) = &response {
                 self.rectangle_selection(ui, rect, r);
             }
             self.paint_cut(ui, rect);
         }
-        self.view_toolbar(ui, rect, content);
+        if dc_module_api::advanced_ui(ui.ctx()) {
+            self.view_toolbar(ui, rect, content);
+        }
     }
 
     /// The tools above the view: points or surface, edges, fit.
@@ -1083,6 +1087,9 @@ impl ScanUi {
         };
         let state = snap.status.state;
         let live = snap.live();
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
+        // the steps shown are numbered 1, 2, 3, ... without a gap
+        let mut number = 0u8;
         let has_cloud = snap.cloud.is_some() && !live;
         let has_mesh = snap.mesh.is_some() && !live;
         // the next thing to do is the one primary button
@@ -1138,7 +1145,8 @@ impl ScanUi {
         self.turntable_ui(ui, &snap, busy, out);
 
         // 1 acquisition
-        step(ui, 1, "scan-step-acquire");
+        number += 1;
+        step(ui, number, "scan-step-acquire");
         // with a turntable connected, the automatic scan is the next thing
         let table = snap.table.connected;
         ui.horizontal_wrapped(|ui| {
@@ -1192,18 +1200,28 @@ impl ScanUi {
             }
         });
         self.auto_ui(ui, &snap, busy, next == 1 && table, out);
-        ui.add_space(8.0);
-        self.settings_ui(ui, &snap, busy, out);
-
-        // 2 point cloud
-        step(ui, 2, "scan-step-cloud");
-        if !has_cloud {
-            caption(ui, t("scan-needs-stop"));
+        if advanced {
+            ui.add_space(8.0);
+            self.settings_ui(ui, &snap, busy, out);
         }
-        ui.add_enabled_ui(has_cloud && !busy, |ui| self.cloud_ui(ui, out));
 
-        // 3 surface
-        step(ui, 3, "scan-step-surface");
+        // 2 point cloud: the cleaning by hand, advanced
+        if advanced {
+            number += 1;
+            step(ui, number, "scan-step-cloud");
+            if !has_cloud {
+                caption(ui, t("scan-needs-stop"));
+            }
+            ui.add_enabled_ui(has_cloud && !busy, |ui| self.cloud_ui(ui, out));
+        }
+
+        // surface: Custom and the rebuild from the stops are advanced
+        number += 1;
+        step(ui, number, "scan-step-surface");
+        if !advanced && self.resolution >= RESOLUTIONS.len() {
+            // Custom is not offered: back to the standard choice
+            self.resolution = 1;
+        }
         ui.add_enabled_ui(has_cloud && !busy, |ui| {
             let labels = [
                 t("scan-res-fine"),
@@ -1211,7 +1229,12 @@ impl ScanUi {
                 t("scan-res-fast"),
                 t("scan-res-custom"),
             ];
-            widgets::segmented_fill(ui, &mut self.resolution, &labels, 32.0);
+            let offered = if advanced {
+                labels.len()
+            } else {
+                RESOLUTIONS.len()
+            };
+            widgets::segmented_fill(ui, &mut self.resolution, &labels[..offered], 32.0);
             ui.add_space(6.0);
             let mm = match RESOLUTIONS.get(self.resolution) {
                 Some(&mm) => {
@@ -1252,46 +1275,50 @@ impl ScanUi {
                 out.push(Act::Run(SCAN_MESH_BUILD, json!({ "resolution_mm": mm })));
             }
         });
-        ui.add_enabled_ui(has_cloud && !busy, |ui| {
-            // a scan with stops (the automatic scan) can be rebuilt finer
-            ui.add_space(12.0);
-            sub_heading(ui, "scan-rebuild-title");
-            caption(ui, t("scan-rebuild-hint"));
-            ui.add_space(6.0);
-            self.table.quality_ui(ui, false);
-            ui.add_space(6.0);
-            if Button::secondary(t("scan-rebuild-stops"))
-                .icon(ic::ARROWS_CLOCKWISE)
-                .enabled(has_cloud && !busy)
-                .full_width(true)
-                .show(ui)
-                .clicked()
-            {
-                out.push(Act::Run(
-                    SCAN_RECONSTRUCT,
-                    json!({
-                        "resolution_mm": self.table.resolution_mm(),
-                        "refine": self.table.refine,
-                    }),
-                ));
-            }
-            if let Some(r) = &self.manual_recon {
+        if advanced {
+            ui.add_enabled_ui(has_cloud && !busy, |ui| {
+                // a scan with stops (the automatic scan) can be rebuilt finer
+                ui.add_space(12.0);
+                sub_heading(ui, "scan-rebuild-title");
+                caption(ui, t("scan-rebuild-hint"));
                 ui.add_space(6.0);
-                recon_report(ui, r);
+                self.table.quality_ui(ui, false);
+                ui.add_space(6.0);
+                if Button::secondary(t("scan-rebuild-stops"))
+                    .icon(ic::ARROWS_CLOCKWISE)
+                    .enabled(has_cloud && !busy)
+                    .full_width(true)
+                    .show(ui)
+                    .clicked()
+                {
+                    out.push(Act::Run(
+                        SCAN_RECONSTRUCT,
+                        json!({
+                            "resolution_mm": self.table.resolution_mm(),
+                            "refine": self.table.refine,
+                        }),
+                    ));
+                }
+                if let Some(r) = &self.manual_recon {
+                    ui.add_space(6.0);
+                    recon_report(ui, r);
+                }
+            });
+
+            // 4 surface tools
+            number += 1;
+            step(ui, number, "scan-step-tools");
+            if !has_mesh {
+                caption(ui, t("scan-needs-surface"));
             }
-        });
-
-        // 4 surface tools
-        step(ui, 4, "scan-step-tools");
-        if !has_mesh {
-            caption(ui, t("scan-needs-surface"));
+            ui.add_enabled_ui(has_mesh && !busy, |ui| {
+                self.mesh_ui(ui, has_mesh && !busy, out)
+            });
         }
-        ui.add_enabled_ui(has_mesh && !busy, |ui| {
-            self.mesh_ui(ui, has_mesh && !busy, out)
-        });
 
-        // 5 import: the scan goes to the host, with one of the roles it takes
-        step(ui, 5, "scan-step-import");
+        // import: the scan goes to the host, with one of the roles it takes
+        number += 1;
+        step(ui, number, "scan-step-import");
         let roles = self.target.offered().to_vec();
         let (button, hint) = (
             self.word(|w| &w.button, "scan-import"),
@@ -1952,7 +1979,11 @@ mod tests {
             // the device boxes of the popup have no accessible name (not
             // what is tested here)
             .with_accessibility_check(false)
-            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .with_context_setup(|ctx| {
+                dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+                // the vendor line is for the advanced view
+                dc_module_api::set_advanced_ui(ctx, true);
+            })
             .build_ui(move |ui| popup.contents(ui, false, &mut Vec::new()));
         h.run();
         h

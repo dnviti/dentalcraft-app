@@ -60,6 +60,40 @@ fn describe_and_info() {
 }
 
 #[test]
+fn the_print_commands_are_listed_described_and_refuse_a_missing_resin() {
+    let list = ok_json(&["commands", "--json"]);
+    for id in ["print.profiles", "print.prepare"] {
+        assert!(
+            list.as_array().unwrap().iter().any(|c| c["id"] == id),
+            "{id} not listed"
+        );
+    }
+    let d = ok_json(&["describe", "print.prepare", "--json"]);
+    assert_eq!(d["label"], "Prepare print plates");
+    assert!(d["params_schema"]["properties"]["exposure_s"].is_object());
+    let v = ok_json(&["run", "--cmd", "print.profiles", "--print"]);
+    assert_eq!(
+        v["results"][0]["output"]["profiles"][0]["id"],
+        "saturn-4-ultra-16k"
+    );
+    // no resin values: refused before anything is read or written
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("plates");
+    let cmd = format!(
+        "print.prepare={}",
+        json!({"dir": dir.path(), "out_dir": out})
+    );
+    let bad = cli(&["run", "--cmd", &cmd]);
+    assert!(!bad.status.success());
+    assert!(
+        stderr_of(&bad).contains("print-no-resin-preset"),
+        "{}",
+        stderr_of(&bad)
+    );
+    assert!(!out.exists());
+}
+
+#[test]
 fn run_prints_results_and_saves() {
     let dir = tempfile::tempdir().unwrap();
     let out_path = dir.path().join("case.dcprj");
@@ -779,6 +813,74 @@ fn diagnostics_from_the_command_line_follow_the_app_settings() {
         (off["enabled"].clone(), off["install_id"].clone()),
         (json!(false), Value::Null)
     );
+}
+
+#[test]
+fn the_settings_commands_are_listed_and_described() {
+    let list = ok_json(&["commands", "--json"]);
+    for id in ["app.settings.get", "app.settings.set"] {
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} not listed"));
+        assert_eq!(entry["source"], "app");
+    }
+    let d = ok_json(&["describe", "app.settings.set", "--json"]);
+    assert_eq!(d["label"], "Change the settings");
+    assert_eq!(
+        d["params_schema"]["properties"]["advanced"]["type"],
+        "boolean"
+    );
+    assert!(d["doc"].as_str().unwrap().contains("automatic runs"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn settings_from_the_command_line_edit_the_app_settings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let closed = "http://127.0.0.1:9";
+    // a fresh installation: the advanced options are hidden
+    let s = run_in(root, closed, "app.settings.get").unwrap();
+    assert_eq!(
+        (
+            s["advanced"].clone(),
+            s["theme"].clone(),
+            s["check_updates"].clone()
+        ),
+        (json!(false), json!("dark"), json!(true))
+    );
+    let file = root.join("config/dentalcraft/settings.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"theme":"light","inspector_width":400}"#).unwrap();
+    let on = run_in(root, closed, r#"app.settings.set={"advanced":true}"#).unwrap();
+    assert_eq!(
+        (on["advanced"].clone(), on["theme"].clone()),
+        (json!(true), json!("light"))
+    );
+    let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        (saved["advanced"].clone(), saved["inspector_width"].clone()),
+        (json!(true), json!(400))
+    );
+    // bad or empty parameters change nothing
+    for (bad, why) in [
+        ("app.settings.set={}", "nothing to change"),
+        (r#"app.settings.set={"advanced":1}"#, "true or false"),
+        (
+            r#"app.settings.set={"theme":"dark"}"#,
+            "unknown parameter `theme`",
+        ),
+    ] {
+        let err = run_in(root, closed, bad).unwrap_err();
+        assert!(err.contains(why), "{bad}: {err}");
+    }
+    let s = run_in(root, closed, "app.settings.get").unwrap();
+    assert_eq!(s["advanced"], true);
+    let off = run_in(root, closed, r#"app.settings.set={"advanced":false}"#).unwrap();
+    assert_eq!(off["advanced"], false);
 }
 
 /// A pipe whose reader is gone: every write to it fails (`EPIPE`;

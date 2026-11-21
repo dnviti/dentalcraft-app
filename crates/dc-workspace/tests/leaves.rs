@@ -247,8 +247,9 @@ fn a_folder_answer_runs_the_command_with_the_dir_parameter() {
         detail.contains("4 files"),
         "three listed and the manifest: {detail}"
     );
-    // an export writes files and leaves the case as it is: no undo step
-    assert!(!ws.undo());
+    // an export records its folder in the case (the print finds the shells
+    // there): one undo step
+    assert!(ws.undo());
     assert!(!ws.is_dirty());
 }
 

@@ -33,7 +33,11 @@ fn inspector() -> Harness<'static, Workspace> {
     ws.select_item("aligners.teeth.build");
     let mut h = Harness::builder()
         .with_size(egui::vec2(1600.0, 1000.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // the view of the region is an advanced option
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 ws.show(ui);
