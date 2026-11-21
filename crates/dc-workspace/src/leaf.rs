@@ -36,6 +36,11 @@ pub(crate) const BITE: &str = "aligners.occlusion.align";
 pub(crate) const CASE_ANALYSIS: &str = "aligners.diagnosis.space-analysis";
 /// "Export for printing".
 pub(crate) const EXPORT_ALL: &str = "aligners.output.export-all";
+/// "Print": lists the aligners to print; its output opens the print popup.
+pub(crate) const PRINT: &str = "aligners.production.print";
+/// Records aligners as sent to the printer (after the popup saved their
+/// files).
+pub(crate) const PRINT_MARK: &str = "aligners.print.mark";
 /// "Control visit".
 pub(crate) const VISITS: &str = "aligners.followup.visits";
 /// "3D teeth".
@@ -88,10 +93,11 @@ pub(crate) fn job_name_key(id: &str) -> &'static str {
     }
 }
 
-/// `false` for a leaf whose command writes files and leaves the case as it
-/// is: it makes no undo step.
+/// `false` for a leaf whose command leaves the case as it is (it lists or
+/// shows something): it makes no undo step. The export records its folder
+/// in the case, so the print finds the shells.
 pub(crate) fn changes_case(id: &str) -> bool {
-    id != EXPORT_ALL
+    id != PRINT
 }
 
 /// The notice that warns, when leaf `id` starts, that it can take long: the
@@ -567,6 +573,7 @@ pub(crate) fn button_key(id: &str, input: Option<LeafInput>, done: bool) -> &'st
     }
     match (id, input) {
         (EXPORT_ALL, _) => "ws-btn-export",
+        (PRINT, _) => "ws-btn-print",
         (VISITS, _) => "ws-btn-visit",
         (_, Some(LeafInput::Folder { .. })) => "ws-btn-choose-folder",
         (_, Some(LeafInput::ScanFile { .. })) => "ws-btn-choose-scan",
@@ -1158,9 +1165,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn the_export_is_the_one_leaf_that_changes_no_state() {
-        assert!(!changes_case(EXPORT_ALL));
-        assert!(changes_case(AUTO) && changes_case(BITE) && changes_case(VISITS));
+    fn the_print_list_is_the_one_leaf_that_changes_no_state() {
+        assert!(!changes_case(PRINT));
+        assert!(
+            changes_case(EXPORT_ALL)
+                && changes_case(AUTO)
+                && changes_case(BITE)
+                && changes_case(VISITS)
+        );
+    }
+
+    #[test]
+    fn the_print_leaf_button_opens_the_popup() {
+        assert_eq!(button_key(PRINT, None, false), "ws-btn-print");
+        assert_eq!(button_key(PRINT, None, true), "ws-btn-print");
     }
 
     #[test]

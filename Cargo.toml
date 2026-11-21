@@ -27,11 +27,14 @@ dc-session = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0
 dc-mcp = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
 dc-raster = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
 dc-scanner = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-print = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }
 # the scan popup, opened by the workspace and the new-project screen
 dc-scan-ui = { path = "crates/dc-scan-ui" }
+# the print popup, opened by the workspace for a module leaf
+dc-print-ui = { path = "crates/dc-print-ui" }
 
 # GUI: egui, eframe and egui-wgpu must always share the same version (same as core)
 egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }

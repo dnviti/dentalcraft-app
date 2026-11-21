@@ -368,3 +368,59 @@ fn bridge_reads_and_changes_the_settings_of_the_live_app() {
     let saved = dc_app::config::Store::new(dc_app::config::Dirs::under(dir.path())).load_settings();
     assert!(saved.advanced);
 }
+
+#[test]
+fn bridge_lists_and_runs_the_print_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+    let shells = dir.path().join("shells");
+    let plates = dir.path().join("plates");
+    std::fs::create_dir_all(&shells).unwrap();
+
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let list = c.call("list", json!({})).unwrap();
+        for id in ["print.profiles", "print.prepare"] {
+            let entry = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["id"] == id)
+                .unwrap_or_else(|| panic!("{id} not listed"));
+            assert_eq!(entry["source"], "session", "{entry}");
+        }
+        let d = c.call("describe", json!({"id": "print.prepare"})).unwrap();
+        assert!(
+            d["params_schema"]["properties"]["out_dir"].is_object(),
+            "{d}"
+        );
+        let out = c.call("execute", json!({"id": "print.profiles"})).unwrap();
+        assert_eq!(out["profiles"][0]["id"], "saturn-4-ultra-16k", "{out}");
+        // the resin values are required: refused as a bad call, nothing written
+        let e = c
+            .call(
+                "execute",
+                json!({"id": "print.prepare", "params": {"dir": shells, "out_dir": plates}}),
+            )
+            .unwrap_err();
+        assert_eq!(e["code"], -32602, "{e}");
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap()
+                .contains("print-no-resin-preset"),
+            "{e}"
+        );
+        assert!(!plates.exists());
+    });
+    drive(&mut h, client);
+}

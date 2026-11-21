@@ -55,6 +55,21 @@ fn the_study_models_have_no_empty_parameters_section_by_default() {
 }
 
 #[test]
+fn print_shows_the_tracking_of_the_aligners_with_the_advanced_options_off() {
+    // a new case has no aligners yet: the tracking of the module says so,
+    // next to the button that opens the print window
+    for advanced in [false, true] {
+        let h = harness("aligners.production.print", advanced);
+        assert!(
+            h.query_by_label_contains("There are no aligners yet")
+                .is_some(),
+            "advanced {advanced}: no tracking"
+        );
+        assert!(h.query_by_label("Prepare print…").is_some());
+    }
+}
+
+#[test]
 fn the_next_step_carries_the_next_marker() {
     // a new case: the next step is to import the scans
     let h = harness("aligners.case.import-scans", false);

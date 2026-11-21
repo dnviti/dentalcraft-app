@@ -452,7 +452,8 @@ fn selecting_any_function_runs_nothing_done_or_not() {
         let mut ws = Workspace::new_headless(module(), project, None);
         let before = Arc::clone(ws.state());
         let leaves = ws.module().menu().command_ids();
-        assert_eq!(leaves.len(), 14);
+        // the functions of the menu, Production → Print included
+        assert_eq!(leaves.len(), 15);
         let mut done = 0;
         for id in leaves {
             assert!(dca_module::commands::is_registered(id), "{id}");
@@ -479,7 +480,7 @@ fn a_click_on_any_row_only_selects_it() {
     let mut h = harness(ws);
     h.run();
     let n = h.get_all_by_role(Role::TreeItem).count();
-    assert_eq!(n, 14 + 6, "the functions and their groups, nothing else");
+    assert_eq!(n, 15 + 6, "the functions and their groups, nothing else");
     // bottom-up: collapsing a group only removes rows below it
     for i in (0..n).rev() {
         let nodes: Vec<_> = h.get_all_by_role(Role::TreeItem).collect();

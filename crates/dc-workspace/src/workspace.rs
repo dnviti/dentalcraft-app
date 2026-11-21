@@ -330,6 +330,12 @@ pub struct Workspace {
     /// The surface of the popup being imported: its file lives until the
     /// import job has read it.
     pub(crate) scan_output: Option<dc_scan_ui::ScanOutput>,
+    /// The print popup (`print`), opened by a leaf whose output lists parts
+    /// to print.
+    pub(crate) print: dc_print_ui::PrintPopup,
+    /// Records of saved print files waiting for their turn
+    /// (`aligners.print.mark` parameters).
+    pub(crate) print_marks: VecDeque<Value>,
     /// The command of a menu leaf an agent runs
     /// ([`Workspace::run_leaf_command`]) and its answer once it ended.
     agent_leaf: Option<(&'static str, Option<Result<Value, String>>)>,
@@ -349,6 +355,8 @@ impl Workspace {
         let mut ws = Self::build(module, project, path);
         ws.view = ViewState::with_viewport(render_state);
         ws.scan = dc_scan_ui::ScanPopup::new(Some(render_state.clone()));
+        ws.print = dc_print_ui::PrintPopup::new(dc_print_ui::ResinStore::standard())
+            .with_native_dialogs(true);
         ws.native_dialogs = true;
         ws
     }
@@ -453,6 +461,8 @@ impl Workspace {
             shell_dialog: false,
             scan: dc_scan_ui::ScanPopup::default(),
             scan_output: None,
+            print: dc_print_ui::PrintPopup::default(),
+            print_marks: VecDeque::new(),
             agent_leaf: None,
             actions: VecDeque::new(),
         }
@@ -629,7 +639,7 @@ impl Workspace {
     /// `true` while an import or a command changes the case in the
     /// background: undo, redo, commands and imports wait for it (a save only
     /// reads the state).
-    fn command_running(&self) -> bool {
+    pub(crate) fn command_running(&self) -> bool {
         self.running
             .iter()
             .any(|r| !matches!(r.task, Task::Save(_)))
@@ -1529,6 +1539,7 @@ impl Workspace {
             self.finish(r.task);
         }
         self.poll_scan();
+        self.poll_print();
     }
 
     fn finish(&mut self, task: Task) {
@@ -1696,6 +1707,8 @@ impl Workspace {
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+        // a leaf that lists parts to print opens the print popup with them
+        self.open_print_from(out);
         // an arch chosen by hand: what it cleared, as a role change says it
         if id == leaf::SET_ARCH {
             self.show_role_report(out);

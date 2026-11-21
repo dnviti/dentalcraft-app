@@ -1,6 +1,6 @@
 # dentalcraft-app
 
-The desktop application of [DentalCraft](https://dentalcraft.app), a tool for digital dentistry, written in Rust. This repository holds the application shell (eframe and wgpu), the 3D viewport, the module workspace, the scan popup, the sign-in client, the updater, the anonymous diagnostics, `dentalcraft-cli` (command line and MCP server) and the packaging scripts.
+The desktop application of [DentalCraft](https://dentalcraft.app), a tool for digital dentistry, written in Rust. This repository holds the application shell (eframe and wgpu), the 3D viewport, the module workspace, the scan and print popups, the sign-in client, the updater, the anonymous diagnostics, `dentalcraft-cli` (command line and MCP server) and the packaging scripts.
 
 It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (engine) and [`dentalcraft-aligners`](https://github.com/dnviti/dentalcraft-aligners) (the first module).
 
@@ -16,6 +16,7 @@ It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (
 | Workspace | Menu of functions grouped by what they are for, an inspector with the parameters and tools of the selected function, a 3D viewport with standard dental views and picking, and a timeline of the stages. |
 | Aligners module | Teeth, diagnosis, bite, final position, aligners, review, production and follow-up, from the scans to printable models. |
 | Scan popup (alpha) | Drives a 3D scanner (Revopoint MINI 2) and a turntable, cleans the point cloud, builds and repairs the mesh, and hands it to the screen that opened it. |
+| Print window (alpha) | Prepares the aligners for direct printing on an Elegoo Saturn 4 Ultra 16K: orientation, supports on the outer side only, plates, time and resin, and the print files saved to a folder or a USB stick. |
 | Projects | `.dcprj` files with undo, automatic saving and a step history. |
 | Languages | English and Italian, switchable at run time. |
 | Account | Sign-in with OpenID Connect against the DentalCraft account server (not part of the public sources). Local projects open without it. |
@@ -28,6 +29,7 @@ It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (
 | `dc-workspace` | Workspace screen: menu tree, viewport, inspector, stage timeline, status bar, import and save. |
 | `dc-viewport` | 3D viewport: wgpu mesh rendering inside egui, orbit camera, standard dental views, CPU picking. |
 | `dc-scan-ui` | The scan popup, reusable by any screen or module. |
+| `dc-print-ui` | The print popup, reusable by any screen or module. |
 | `dc-ui` | Design system: tokens, fonts, Phosphor icons, theme, shared widgets. |
 | `dc-auth-client` | Desktop sign-in (OIDC authorization code with PKCE, keyring storage of the refresh token). |
 | `dc-update` | Update check, signature check and installation. |
@@ -71,6 +73,17 @@ The gear at the top right (Home and the workspace) opens **Settings**; the accou
 - **Updates.** Check at startup, and **Check now**.
 - **Privacy.** **Send anonymous diagnostic data** (see below).
 - **Agents.** `app.settings.get` (`advanced`, `language`, `theme`, `check_updates`, `diagnostics`) and `app.settings.set {advanced}` in the app bridge (the window changes at once) and in `dentalcraft-cli` and its MCP server (on the app's settings file, keeping its other keys; the app reads it at its next start).
+
+## Printing (alpha)
+
+**Production → Print** shows how many aligners are printed and how many are still to print, with marks the user may give (printed, failed, to print again); its button **Prepare print…** opens the print window with the aligners of the last **Export for printing**, the missing ones preselected.
+
+- **Printer.** The Elegoo Saturn 4 Ultra 16K, with its DENTAL 45 machine parameters (crate `dc-print` of core).
+- **Resin.** The user enters the maker's values once (layer height, exposures, bottom layers, rest, density); they are kept in `print-resin.json` next to `settings.json`. Without them nothing is prepared.
+- **Prepare.** Each aligner is turned with its fitting side away from the plate, gets supports on its outer side only and a raft, and the aligners are placed on as few plates as needed. Two checks run before any file is written: no support near the fitting side, and no part of a layer starting in mid-air. The window shows each plate from above, the layers, the time and the resin.
+- **Save.** **Save print files…** writes one `plate_NN.goo` per plate to the folder chosen (a USB stick for the printer); the aligners on them are recorded as sent. Nothing is sent over the network yet.
+- **Advanced options.** The layer values, the supports, the spacing on the plate, and the plate saved as STL.
+- **Agents.** `print.profiles`, `print.machine-params` and `print.prepare` (session commands, also in `dentalcraft-cli` and its MCP server), `aligners.print.parts`, `aligners.print.status` and `aligners.print.mark`.
 
 ## Updates
 

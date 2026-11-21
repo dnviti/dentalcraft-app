@@ -1061,6 +1061,7 @@ dependencies = [
  "dc-i18n",
  "dc-mesh",
  "dc-module-api",
+ "dc-print",
  "dc-project",
  "dc-raster",
  "dc-scan-ui",
@@ -1290,6 +1291,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dc-print-ui"
+version = "0.2.0-alpha.12"
+dependencies = [
+ "dc-i18n",
+ "dc-mesh",
+ "dc-module-api",
+ "dc-print",
+ "dc-ui",
+ "directories",
+ "egui",
+ "egui_kittest",
+ "glam 0.34.1",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dc-project"
 version = "0.3.0-alpha.8"
 source = "git+https://github.com/dnviti/dentalcraft-core.git?tag=v0.3.0-alpha.8#4f431250033a5d19347130fa81dd26729851a4f0"
@@ -1463,6 +1484,7 @@ dependencies = [
  "dc-jobs",
  "dc-mesh",
  "dc-module-api",
+ "dc-print-ui",
  "dc-project",
  "dc-scan-ui",
  "dc-scanner",

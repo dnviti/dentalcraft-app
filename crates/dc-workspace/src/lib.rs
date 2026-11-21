@@ -17,6 +17,11 @@
 //! same ones an agent runs with [`Workspace::start_scan_command`]; its
 //! surface joins the case through the import, as one undoable change.
 //!
+//! A leaf whose command lists parts to print (`print_parts` in its output:
+//! Aligners' "Print") opens the print popup of [`dc_print_ui`] with them
+//! once it ran; the files the popup saves are recorded as sent to the
+//! printer, as one undoable change.
+//!
 //! ```ignore
 //! let mut ws = Workspace::new(Box::new(AlignersModule::new()), None, None, render_state);
 //! // every frame
@@ -48,6 +53,7 @@ mod manual;
 mod menu;
 mod overlay;
 mod panels;
+mod print;
 mod production;
 mod project;
 mod region;

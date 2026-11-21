@@ -72,6 +72,12 @@
 //! temporary file and imports it with the workspace's import (one undoable
 //! change); it answers with the import report.
 //!
+//! `list` also has the printing commands `print.*` (`dc_print::commands`,
+//! as in the headless session): they work on files, not on the case, so
+//! they do not wait for the workspace jobs; each runs on a thread of its
+//! own (`print.prepare` takes minutes) and answers when it ends, while the
+//! window keeps drawing.
+//!
 //! Requests travel through a channel to the UI thread, which runs them in
 //! [`ControlServer::pump`] at the start of a frame against the open
 //! workspace: case commands go through the workspace's command path
@@ -777,15 +783,17 @@ impl Bridge {
     }
 
     /// The commands: the session built-ins, the scanner's (`scan.*`, run on
-    /// the workspace's scan controller, the one its scan window shows), then
-    /// the workspace module's (or the installed Aligners module's when no
-    /// workspace is open), then the app's update commands
-    /// (`app.update.check`, `app.update.apply`), diagnostics commands
-    /// (`app.diagnostics.*`) and settings commands (`app.settings.*`).
+    /// the workspace's scan controller, the one its scan window shows), the
+    /// printing ones (`print.*`), then the workspace module's (or the
+    /// installed Aligners module's when no workspace is open), then the
+    /// app's update commands (`app.update.check`, `app.update.apply`),
+    /// diagnostics commands (`app.diagnostics.*`) and settings commands
+    /// (`app.settings.*`).
     fn specs(&self) -> Vec<(&'static str, CommandSpec)> {
         let mut out: Vec<(&'static str, CommandSpec)> = builtins::specs()
             .into_iter()
             .chain(builtins::scan_specs())
+            .chain(builtins::print_specs())
             .map(|s| (dc_session::SESSION_SOURCE, s))
             .collect();
         let module = match self.app.workspace() {
@@ -903,6 +911,9 @@ impl Bridge {
         if dc_scanner::control::is_scan_command(spec.id) {
             return Self::execute_scan(spec.id, params);
         }
+        if dc_print::commands::is_print_command(spec.id) {
+            return Self::execute_print(spec.id, params);
+        }
         if spec.id == WINDOW_SCREENSHOT {
             return self.window_screenshot(&params);
         }
@@ -950,6 +961,34 @@ impl Bridge {
             };
             ws.scan_result(t)
                 .map(|r| r.map_err(|e| RpcError::host(format!("{id}: {e}"))))
+        }))
+    }
+
+    /// Runs the print command `id` (`dc_print::commands`) on a thread of its
+    /// own and answers when it ends; the window keeps drawing meanwhile. It
+    /// works on files, not on the case: it does not wait for the workspace.
+    fn execute_print(id: &'static str, params: Value) -> Step {
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("dc-control-print".into())
+            .spawn(move || {
+                let r = dc_print::commands::execute(id, &params, &|| false, &mut |_| {});
+                let _ = tx.send(r);
+            });
+        if let Err(e) = spawned {
+            return Step::Done(Err(RpcError::host(format!("{id}: {e}"))));
+        }
+        Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
+            Ok(Ok(v)) => Some(Ok(v)),
+            Ok(Err(e)) if e.is_invalid_call() => Some(Err(RpcError::new(
+                codes::INVALID_PARAMS,
+                format!("{id}: {e}"),
+            ))),
+            Ok(Err(e)) => Some(Err(RpcError::host(format!("{id}: {e}")))),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(RpcError::host(format!(
+                "{id}: the print work stopped unexpectedly"
+            )))),
         }))
     }
 

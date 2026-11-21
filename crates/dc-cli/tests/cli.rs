@@ -60,6 +60,40 @@ fn describe_and_info() {
 }
 
 #[test]
+fn the_print_commands_are_listed_described_and_refuse_a_missing_resin() {
+    let list = ok_json(&["commands", "--json"]);
+    for id in ["print.profiles", "print.prepare"] {
+        assert!(
+            list.as_array().unwrap().iter().any(|c| c["id"] == id),
+            "{id} not listed"
+        );
+    }
+    let d = ok_json(&["describe", "print.prepare", "--json"]);
+    assert_eq!(d["label"], "Prepare print plates");
+    assert!(d["params_schema"]["properties"]["exposure_s"].is_object());
+    let v = ok_json(&["run", "--cmd", "print.profiles", "--print"]);
+    assert_eq!(
+        v["results"][0]["output"]["profiles"][0]["id"],
+        "saturn-4-ultra-16k"
+    );
+    // no resin values: refused before anything is read or written
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("plates");
+    let cmd = format!(
+        "print.prepare={}",
+        json!({"dir": dir.path(), "out_dir": out})
+    );
+    let bad = cli(&["run", "--cmd", &cmd]);
+    assert!(!bad.status.success());
+    assert!(
+        stderr_of(&bad).contains("print-no-resin-preset"),
+        "{}",
+        stderr_of(&bad)
+    );
+    assert!(!out.exists());
+}
+
+#[test]
 fn run_prints_results_and_saves() {
     let dir = tempfile::tempdir().unwrap();
     let out_path = dir.path().join("case.dcprj");

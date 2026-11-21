@@ -182,6 +182,13 @@ static FUNCTIONS: &[Function] = &[
         ..PLAIN
     },
     Function {
+        id: leaf::PRINT,
+        // the tracking of the module: how many aligners are printed and
+        // still to print, the list with the marks the user may give
+        params: Params::Module,
+        ..PLAIN
+    },
+    Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
         // the style and the sizes of the bases
@@ -532,5 +539,14 @@ mod tests {
         // nothing of it is corrected by hand
         assert!(matches!(f.corrections, Corrections::None));
         assert!(f.results.is_none() && f.note.is_none());
+    }
+
+    #[test]
+    fn print_shows_the_tracking_of_the_module() {
+        let f = of(leaf::PRINT);
+        // essential: the count and the marks show in the simple interface
+        assert!(matches!(f.params, Params::Module) && !f.advanced_params);
+        assert!(matches!(f.corrections, Corrections::None));
+        assert!(f.results.is_none() && f.note.is_none() && f.more.is_none());
     }
 }

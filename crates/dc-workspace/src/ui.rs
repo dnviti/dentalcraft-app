@@ -50,11 +50,12 @@ impl Workspace {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        // the scan window, its own dialogs and the shell's take them
+        // the scan and print windows, its own dialogs and the shell's take them
         let covered = self.confirm_exit.is_some()
             || self.show_help
             || self.shell_dialog
-            || self.scan.is_open();
+            || self.scan.is_open()
+            || self.print.is_open();
         if !dropped.is_empty() && !covered {
             self.import_dropped(dropped);
         }
@@ -117,8 +118,9 @@ impl Workspace {
             });
         CentralPanel::no_frame().show(ui, |ui| self.center_ui(ui));
 
-        // the scan popup (under the dialogs of the workspace)
+        // the scan and print popups (under the dialogs of the workspace)
         self.scan.show(ui);
+        self.print.show(ui);
         self.dialogs(ui);
         if !self.running.is_empty() {
             ui.ctx()
