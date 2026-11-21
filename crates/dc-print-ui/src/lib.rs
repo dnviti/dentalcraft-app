@@ -10,6 +10,11 @@
 //! chooses (a USB stick for the printer). There is no network: the user
 //! carries the stick to the printer.
 //!
+//! A shell of an export takes the side that sits on the teeth from its
+//! stage model, as `print.prepare` does ([`FittingSource::Model`]); a shell
+//! outside an export has it guessed from its shape
+//! ([`FittingSource::Geometry`]) and the window warns to export again.
+//!
 //! The advanced view (Settings, "Advanced options and parameters":
 //! [`dc_module_api::advanced_ui`]) adds the layer height, the bottom layers
 //! and their exposure, the rest before each exposure, the supports, the
@@ -50,7 +55,7 @@ use egui::{RichText, Ui};
 use serde_json::Value;
 
 pub use resin::{RESIN_FILE, Resin, ResinStore};
-pub use work::{Failure, plate_file_name, plate_model_name};
+pub use work::{Failure, FittingSource, plate_file_name, plate_model_name};
 
 use form::{FormAct, ResinForm};
 use work::{Prepared, Source, Worker};
@@ -387,6 +392,16 @@ impl PrintPopup {
     pub fn failure(&self) -> Option<&Failure> {
         match &self.message {
             Some(Message::Failed(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Where each prepared part's fitting side comes from (`model`: its
+    /// stage model in the export; `geometry`: guessed from its shape), by
+    /// id in the order chosen, once the plates are ready.
+    pub fn fitting_sources(&self) -> Option<Vec<(String, FittingSource)>> {
+        match &self.phase {
+            Phase::Ready(p) | Phase::Saving { prepared: p, .. } => Some(p.fitting.clone()),
             _ => None,
         }
     }

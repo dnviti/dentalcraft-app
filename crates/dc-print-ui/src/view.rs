@@ -17,7 +17,7 @@ use egui::{
 };
 
 use crate::form::{FormAct, ResinForm};
-use crate::work::{Outline, Plate, Step};
+use crate::work::{FittingSource, Outline, Plate, Step};
 use crate::{Message, Output, Phase, PrintPopup, caption, t, tr};
 
 /// Width of the left column.
@@ -560,6 +560,7 @@ impl PrintPopup {
                 .id_salt("dc-print-right")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    self.fitting_view(ui, &p.fitting);
                     if let Some(plate) = plate {
                         estimates(ui, plate);
                     }
@@ -630,6 +631,37 @@ impl PrintPopup {
         {
             acts.push(Act::Cancel);
         }
+    }
+
+    /// Where the fitting side of the prepared parts comes from: a line when
+    /// every one comes from its stage model, a warning naming the parts
+    /// whose side was guessed from their shape.
+    fn fitting_view(&self, ui: &mut Ui, fitting: &[(String, FittingSource)]) {
+        let guessed: Vec<String> = fitting
+            .iter()
+            .filter(|(_, s)| *s == FittingSource::Geometry)
+            .map(|(id, _)| {
+                self.rows
+                    .iter()
+                    .find(|r| &r.item.id == id)
+                    .map_or_else(|| id.clone(), |r| r.item.label.clone())
+            })
+            .collect();
+        if guessed.is_empty() {
+            caption(ui, t("print-fitting-model"));
+        } else {
+            widgets::badge(ui, BadgeKind::Warning, t("print-fitting-guessed"));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t("print-fitting-guessed-body")).font(fonts::ui(13.0)));
+            caption(
+                ui,
+                tr(
+                    "print-fitting-guessed-parts",
+                    &[("parts", &guessed.join(", "))],
+                ),
+            );
+        }
+        ui.add_space(8.0);
     }
 
     fn message_view(&self, ui: &mut Ui) {

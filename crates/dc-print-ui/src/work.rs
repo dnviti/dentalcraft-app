@@ -5,6 +5,12 @@
 //! [`save_plate_models`]). Each run can be cancelled; a file is written to a
 //! `.tmp` first and renamed, so a cancelled or failed save leaves no
 //! half-written file.
+//!
+//! A shell of a DentalCraft export (`stampa_resina/` with
+//! `modelli_termoformatura/` beside it) takes its fitting side from its
+//! stage model, paired as `print.prepare` pairs it
+//! ([`orient::export_model`], [`orient::fitting_from_model`]); any other
+//! part takes it from its shape in the pipeline ([`FittingSource`]).
 
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -13,7 +19,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 
 use dc_mesh::TriMesh;
+use dc_print::commands::PrintCommandError;
 use dc_print::job::{self, JobError, PlateSummary, PreparedPlates, PrintJob};
+use dc_print::orient;
 use dc_print::part::PrintPart;
 
 /// A run that failed: the stable code of the error and its detail
@@ -62,6 +70,7 @@ pub(crate) const KNOWN_CODES: &[&str] = &[
     "invalid-part",
     "invalid-settings",
     "fitting-contact",
+    "model-mismatch",
     "island-unsupported",
     "part-too-tall",
     "part-too-big",
@@ -203,6 +212,28 @@ pub(crate) struct Source {
     pub path: PathBuf,
 }
 
+/// Where a part's fitting side (the side on the teeth, which no support
+/// may touch) comes from; its id is the `fitting_source` of
+/// `print.prepare`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FittingSource {
+    /// The stage model the shell was built on: a shell of an export.
+    Model,
+    /// Guessed from the part's shape: a shell outside an export, or one
+    /// whose model is missing.
+    Geometry,
+}
+
+impl FittingSource {
+    /// `model` or `geometry`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Geometry => "geometry",
+        }
+    }
+}
+
 /// The top view of one part on its plate: the outline of the shell and the
 /// outline of its supports, plate millimetres (convex, counter-clockwise).
 #[derive(Debug, Clone, PartialEq)]
@@ -227,6 +258,8 @@ pub(crate) struct Prepared {
     pub plates: Vec<Plate>,
     /// The arranged plates (for the plate models of the advanced view).
     pub arranged: PreparedPlates,
+    /// Where each part's fitting side comes from, by id, in input order.
+    pub fitting: Vec<(String, FittingSource)>,
 }
 
 impl Prepared {
@@ -239,9 +272,9 @@ impl Prepared {
     }
 }
 
-/// Reads `sources`, places them with [`job::prepare_cancellable`] and
-/// prepares every plate's file in memory with
-/// [`job::write_plate_cancellable`].
+/// Reads `sources` ([`read_part`]), places them with
+/// [`job::prepare_cancellable`] and prepares every plate's file in memory
+/// with [`job::write_plate_cancellable`].
 pub(crate) fn prepare(
     sources: &[Source],
     job: &PrintJob,
@@ -250,18 +283,15 @@ pub(crate) fn prepare(
 ) -> Result<Prepared, Failure> {
     let stop = || cancel.load(Ordering::Relaxed);
     let mut parts = Vec::with_capacity(sources.len());
+    let mut fitting = Vec::with_capacity(sources.len());
     for (i, s) in sources.iter().enumerate() {
         if stop() {
             return Err(JobError::Cancelled.into());
         }
         progress.set(Step::Reading, 0.05 * i as f32 / sources.len() as f32);
-        let mesh = dc_mesh::io::read(&s.path)
-            .map_err(|e| Failure::new("print-read", format!("{}: {e}", s.path.display())))?;
-        parts.push(PrintPart {
-            id: s.id.clone(),
-            mesh,
-            fitting: None,
-        });
+        let (part, source) = read_part(s)?;
+        parts.push(part);
+        fitting.push((s.id.clone(), source));
     }
     progress.set(Step::Placing, 0.05);
     let arranged = job::prepare_cancellable(&parts, job, &stop)?;
@@ -305,7 +335,49 @@ pub(crate) fn prepare(
         },
         1.0,
     );
-    Ok(Prepared { plates, arranged })
+    Ok(Prepared {
+        plates,
+        arranged,
+        fitting,
+    })
+}
+
+/// One part. A shell of an export gets its fitting flags from its stage
+/// model, as in `print.prepare`: the pair from [`orient::export_model`],
+/// the flags from [`orient::fitting_from_model`] within the export's
+/// clearance plus [`orient::MODEL_TOL_MM`]; a model that does not fit the
+/// shell is refused (`print-model-mismatch`). Any other part is left to
+/// the pipeline's guess from its shape.
+fn read_part(s: &Source) -> Result<(PrintPart, FittingSource), Failure> {
+    let read = |p: &Path| {
+        dc_mesh::io::read(p)
+            .map_err(|e| Failure::new("print-read", format!("{}: {e}", p.display())))
+    };
+    let mesh = read(&s.path)?;
+    let Some(paired) = orient::export_model(&s.path) else {
+        let part = PrintPart {
+            id: s.id.clone(),
+            mesh,
+            fitting: None,
+        };
+        return Ok((part, FittingSource::Geometry));
+    };
+    let model = read(&paired.path)?;
+    let tol = paired.clearance_mm + orient::MODEL_TOL_MM;
+    let fitting = orient::fitting_from_model(&mesh, &model, tol).map_err(|e| {
+        let e = PrintCommandError::ModelMismatch {
+            part: s.id.clone(),
+            model: paired.path.display().to_string(),
+            near_share: e.near_share,
+        };
+        Failure::new(e.code(), e.to_string())
+    })?;
+    let part = PrintPart {
+        id: s.id.clone(),
+        mesh,
+        fitting: Some(fitting),
+    };
+    Ok((part, FittingSource::Model))
 }
 
 /// Name of the print file of plate `index` (0-based): `plate_01.goo`, …
