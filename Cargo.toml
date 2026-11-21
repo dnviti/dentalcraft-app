@@ -7,12 +7,14 @@ version = "0.2.0-alpha.12"
 edition = "2024"
 rust-version = "1.99"
 license = "PolyForm-Noncommercial-1.0.0"
-repository = "https://github.com/dnviti-personal-org/dentalcraft-app"
+repository = "https://github.com/dnviti/dentalcraft-app"
 authors = ["Daniele Viti"]
 publish = false
 
 [workspace.dependencies]
-# dentalcraft-core crates
+# dentalcraft-core crates. They keep the old organisation URL (GitHub redirects it)
+# until a dentalcraft-aligners release pins core at github.com/dnviti: the same
+# crates from two git URLs would be two different packages.
 dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
 dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
 dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.7" }
@@ -64,9 +66,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
-dca-algo = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
-dca-module = { git = "https://github.com/dnviti-personal-org/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
+dca-model = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
+dca-algo = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
+dca-module = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.11" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"
