@@ -167,7 +167,11 @@ fn demo_project(arches: &[&str]) -> Project {
 fn harness(ws: Workspace) -> Harness<'static, Workspace> {
     Harness::builder()
         .with_size(egui::vec2(1600.0, 900.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // every control of the inspectors: the advanced options on
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 let _ = ws.show(ui);
@@ -292,7 +296,11 @@ fn the_periodontal_choices_wrap_in_the_narrowest_inspector() {
     // tall enough to show the whole inspector without scrolling
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 3000.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // the periodontal choice is an advanced option
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 let _ = ws.show(ui);

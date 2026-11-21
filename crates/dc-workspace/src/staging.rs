@@ -178,8 +178,10 @@ fn slowed_list(teeth: impl Iterator<Item = (Fdi, f64)>) -> String {
 /// it: the aligners, the days and months, the first and last day with the
 /// hours of wear, the pattern and the complexity, the slowed teeth, the
 /// collisions left (a warning) and the overcorrection. The arch is named
-/// when both have a result. Nothing when no arch has one.
-pub(crate) fn result_lines(data: &AlignersState, today: Date) -> Vec<ResultLine> {
+/// when both have a result. Nothing when no arch has one. Without
+/// `advanced` (the advanced options off) the pattern, the slowed teeth and
+/// the overcorrection are left out.
+pub(crate) fn result_lines(data: &AlignersState, today: Date, advanced: bool) -> Vec<ResultLine> {
     let results = &data.staging_results;
     let both = results.len() > 1;
     let mut out = Vec::new();
@@ -230,20 +232,22 @@ pub(crate) fn result_lines(data: &AlignersState, today: Date) -> Vec<ResultLine>
         }
         let pattern = json!(r.pattern);
         let level = format!("ws-stg-level-{}", r.level.replace('_', "-"));
-        out.push(line(
-            tr(
-                "ws-stg-result-pattern",
-                &[
-                    (
-                        "pattern",
-                        &option_key(&PATTERN, pattern.as_str().unwrap_or_default()),
-                    ),
-                    ("level", &t(&level)),
-                ],
-            ),
-            false,
-        ));
-        if !r.slowed.is_empty() {
+        if advanced {
+            out.push(line(
+                tr(
+                    "ws-stg-result-pattern",
+                    &[
+                        (
+                            "pattern",
+                            &option_key(&PATTERN, pattern.as_str().unwrap_or_default()),
+                        ),
+                        ("level", &t(&level)),
+                    ],
+                ),
+                false,
+            ));
+        }
+        if advanced && !r.slowed.is_empty() {
             out.push(line(
                 tr(
                     "ws-stg-result-slowed",
@@ -264,7 +268,7 @@ pub(crate) fn result_lines(data: &AlignersState, today: Date) -> Vec<ResultLine>
                 true,
             ));
         }
-        if r.overcorrection {
+        if advanced && r.overcorrection {
             out.push(line(t("ws-stg-result-overcorrection"), false));
         }
     }
@@ -302,14 +306,17 @@ impl Workspace {
         let Some(data) = crate::overlay::aligners(&state) else {
             return;
         };
-        show_result_lines(ui, result_lines(data, Date::today()));
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
+        show_result_lines(ui, result_lines(data, Date::today(), advanced));
     }
 
     /// The parameters of the aligners and of their calendar, read from the
     /// case settings: a change is sent when it is made (a slider when it is
     /// let go, the date when the field is left), one undo step each; the
-    /// aligners are computed again only by the run button.
+    /// aligners are computed again only by the run button. With the advanced
+    /// options off only the calendar shows.
     pub(crate) fn staging_params(&mut self, ui: &mut Ui) {
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let state = self.undo.current().clone();
         let settings = crate::overlay::aligners(&state)
             .map(|d| d.settings.clone())
@@ -321,8 +328,10 @@ impl Workspace {
         let mut commit = None;
         let ui_state = &mut self.staging_ui;
         ui.add_enabled_ui(!busy, |ui| {
-            choice(ui, &values, &PERIO, &mut commit);
-            choice(ui, &values, &PATTERN, &mut commit);
+            if advanced {
+                choice(ui, &values, &PERIO, &mut commit);
+                choice(ui, &values, &PATTERN, &mut commit);
+            }
             group_title(ui, "ws-stg-group-calendar");
             choice(ui, &values, &POLICY, &mut commit);
             if settings.interval_policy == IntervalPolicy::Fixed {
@@ -356,6 +365,9 @@ impl Workspace {
                 ui_state.date = Some(text);
             } else {
                 ui_state.date = None;
+            }
+            if !advanced {
+                return;
             }
             ui.add_space(6.0);
             egui::CollapsingHeader::new(
@@ -399,8 +411,10 @@ impl Workspace {
                 );
             });
         });
-        ui.add_space(6.0);
-        caption(ui, t("ws-stg-params-rerun"));
+        if advanced {
+            ui.add_space(6.0);
+            caption(ui, t("ws-stg-params-rerun"));
+        }
         if let Some(p) = commit {
             self.run_module_command(SETTINGS, p);
         }
@@ -609,7 +623,7 @@ mod tests {
         assert_eq!(dc_i18n::current(), dc_i18n::Lang::En);
         let today = Date::parse("2026-11-16").unwrap();
         let mut data = AlignersState::default();
-        assert!(result_lines(&data, today).is_empty());
+        assert!(result_lines(&data, today, true).is_empty());
         data.stages = stages(6);
         data.staging_results.insert(
             ScanRole::Lower,
@@ -624,7 +638,7 @@ mod tests {
         );
         data.settings.start_date = Some("2026-01-05".to_owned());
         data.settings.interval_days = 10;
-        let lines = result_lines(&data, today);
+        let lines = result_lines(&data, today, true);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         // one arch: not named
         assert!(lines.iter().all(|l| !l.heading), "{texts:?}");
@@ -649,18 +663,22 @@ mod tests {
         assert!(lines[5].warning && texts[5].contains('2'), "{texts:?}");
         assert_eq!(texts[6], t("ws-stg-result-overcorrection"));
         assert_eq!(texts.len(), 7);
+        // the advanced options off: no pattern, slowed teeth, overcorrection
+        let simple = result_lines(&data, today, false);
+        assert_eq!(simple.len(), 4);
+        assert!(simple[3].warning, "{simple:?}");
         // the adaptive calendar: 7 days for an anterior translation
         data.settings.interval_policy = IntervalPolicy::Adaptive;
-        let lines = result_lines(&data, today);
+        let lines = result_lines(&data, today, true);
         assert!(lines[1].text.contains("42"), "{:?}", lines[1]);
         // no start date: today
         data.settings.start_date = None;
-        let lines = result_lines(&data, today);
+        let lines = result_lines(&data, today, true);
         assert!(lines[2].text.contains("16/11/2026"), "{:?}", lines[2]);
         // both arches: each named
         data.staging_results
             .insert(ScanRole::Upper, StagingSummary::default());
-        let lines = result_lines(&data, today);
+        let lines = result_lines(&data, today, true);
         assert!(lines[0].heading);
         assert_eq!(lines.iter().filter(|l| l.heading).count(), 2);
     }

@@ -15,6 +15,7 @@ dc-case.workspace = true
 dc-i18n.workspace = true
 dc-jobs.workspace = true
 dc-mesh.workspace = true
+dc-module-api.workspace = true
 dc-scanner.workspace = true
 dc-scene.workspace = true
 # app crates

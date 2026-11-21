@@ -307,3 +307,64 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
     let ws = h.state().bridge().app.workspace().unwrap();
     assert!(!ws.teeth_shown() && !ws.study_shown());
 }
+
+#[test]
+fn bridge_reads_and_changes_the_settings_of_the_live_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+    assert!(!dc_module_api::advanced_ui(&h.ctx));
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let d = c
+            .call("describe", json!({"id": "app.settings.set"}))
+            .unwrap();
+        assert_eq!(d["source"], "app");
+        let s = c
+            .call("execute", json!({"id": "app.settings.get"}))
+            .unwrap();
+        assert_eq!(
+            (s["advanced"].clone(), s["theme"].clone()),
+            (json!(false), json!("dark"))
+        );
+        let on = c
+            .call(
+                "execute",
+                json!({"id": "app.settings.set", "params": {"advanced": true}}),
+            )
+            .unwrap();
+        assert_eq!(on["advanced"], true);
+        for bad in [
+            json!({}),
+            json!({"advanced": "on"}),
+            json!({"theme": "light"}),
+        ] {
+            let e = c
+                .call("execute", json!({"id": "app.settings.set", "params": bad}))
+                .unwrap_err();
+            assert_eq!(e["code"], -32602, "{e}");
+        }
+        let e = c
+            .call(
+                "execute",
+                json!({"id": "app.settings.get", "params": {"x": 1}}),
+            )
+            .unwrap_err();
+        assert_eq!(e["code"], -32602, "{e}");
+    });
+    drive(&mut h, client);
+    h.run_steps(1);
+    // the window follows at once, and the next start too
+    assert!(h.state().bridge().app.advanced());
+    assert!(dc_module_api::advanced_ui(&h.ctx));
+    let saved = dc_app::config::Store::new(dc_app::config::Dirs::under(dir.path())).load_settings();
+    assert!(saved.advanced);
+}

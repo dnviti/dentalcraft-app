@@ -694,8 +694,10 @@ impl Workspace {
     /// The parameters of the final position, read from the case settings:
     /// a change is sent when it is made (a slider when it is let go), one
     /// undo step each; the final position is computed again only by its
-    /// run button.
+    /// run button. With the advanced options off only the scope shows: the
+    /// groups keep the values of the case.
     pub(crate) fn setup_params(&mut self, ui: &mut Ui) {
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let state = self.undo.current().clone();
         let s = crate::overlay::aligners(&state)
             .map(|d| d.settings.setup)
@@ -708,8 +710,16 @@ impl Workspace {
         let drag = &mut self.setup_ui.drag;
         ui.add_enabled_ui(!busy, |ui| {
             choice(ui, &values, &SCOPE, &mut commit);
-            crate::function::caption(ui, t("ws-setup-scope-hint"));
-            for (title, items) in GROUPS {
+            // the hint of the advanced options speaks of the groups below it
+            crate::function::caption(
+                ui,
+                t(if advanced {
+                    "ws-setup-scope-hint"
+                } else {
+                    "ws-setup-scope-hint-simple"
+                }),
+            );
+            for (title, items) in GROUPS.iter().filter(|_| advanced) {
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new(RichText::new(t(title)).font(fonts::semibold(12.0)))
                     .id_salt(*title)
@@ -737,9 +747,11 @@ impl Workspace {
                     });
             }
         });
-        ui.add_space(6.0);
-        crate::function::caption(ui, t("ws-setup-params-rerun"));
-        crate::function::caption(ui, t("ws-setup-params-check"));
+        if advanced {
+            ui.add_space(6.0);
+            crate::function::caption(ui, t("ws-setup-params-rerun"));
+            crate::function::caption(ui, t("ws-setup-params-check"));
+        }
         if let Some(p) = commit {
             self.run_setup_settings(p);
         }

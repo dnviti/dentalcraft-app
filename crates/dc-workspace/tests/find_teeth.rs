@@ -48,7 +48,11 @@ fn harness(arches: &[&str]) -> Harness<'static, Workspace> {
     );
     let mut h = Harness::builder()
         .with_size(vec2(1600.0, 1000.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // the grid of the teeth: the advanced options on
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 let _ = ws.show(ui);
@@ -236,7 +240,10 @@ fn with_both_arches_each_has_its_grid_and_an_empty_case_says_what_to_do() {
     let ws = Workspace::new_headless(Box::new(AlignersModule::new()), None, None);
     let mut h = Harness::builder()
         .with_size(vec2(1600.0, 1000.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, ws: &mut Workspace| {
                 let _ = ws.show(ui);

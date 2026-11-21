@@ -163,8 +163,13 @@ pub(crate) fn show(ui: &mut Ui, view: &mut MenuView, mc: &MenuCtx<'_>) -> Vec<Me
                     );
                 });
             }
+            let walk = Walk {
+                mc,
+                visible: visible.as_ref(),
+                next: next_step(mc.tree, mc.done),
+            };
             for item in &mc.tree.roots {
-                rows(ui, view, mc, visible.as_ref(), item, 0, &mut events);
+                rows(ui, view, &walk, item, 0, &mut events);
             }
         });
 
@@ -265,21 +270,40 @@ fn filter_field(ui: &mut Ui, view: &mut MenuView, width: f32) {
     );
 }
 
+/// The first step of the workflow that is not done: what to do now to reach
+/// the aligners (the same as `Workspace::next_step`).
+pub(crate) fn next_step(tree: &MenuTree, done: &dyn Fn(&str) -> bool) -> Option<&'static str> {
+    tree.step_ids().into_iter().find(|id| !done(id))
+}
+
+/// What every row of one drawing of the menu shares.
+struct Walk<'a> {
+    mc: &'a MenuCtx<'a>,
+    /// The entries the filter keeps (`None`: all).
+    visible: Option<&'a HashSet<&'static str>>,
+    /// The next step of the workflow, marked "Next".
+    next: Option<&'static str>,
+}
+
 fn rows(
     ui: &mut Ui,
     view: &mut MenuView,
-    mc: &MenuCtx<'_>,
-    visible: Option<&HashSet<&'static str>>,
+    w: &Walk<'_>,
     item: &MenuItem,
     depth: usize,
     events: &mut Vec<MenuEvent>,
 ) {
-    if visible.is_some_and(|v| !v.contains(item.id)) {
+    let mc = w.mc;
+    if w.visible.is_some_and(|v| !v.contains(item.id)) {
         return;
     }
     let has_children = !item.children().is_empty();
-    let expanded = has_children && (visible.is_some() || view.expanded.contains(item.id));
+    let expanded = has_children && (w.visible.is_some() || view.expanded.contains(item.id));
     let progress = progress_of(item, mc.done);
+    let next = w.next.is_some_and(|n| item.command_id() == Some(n));
+    // a closed group shows that the next step is inside it
+    let holds_next =
+        has_children && !expanded && w.next.is_some_and(|n| item.step_ids().contains(&n));
     let resp = row(
         ui,
         &Row {
@@ -302,6 +326,8 @@ fn rows(
             shortcut: item
                 .command_id()
                 .and_then(|c| mc.shortcuts.get(c).map(String::as_str)),
+            next,
+            holds_next,
         },
     );
     if resp.clicked() {
@@ -312,7 +338,7 @@ fn rows(
     }
     if expanded {
         for child in item.children() {
-            rows(ui, view, mc, visible, child, depth + 1, events);
+            rows(ui, view, w, child, depth + 1, events);
         }
     }
 }
@@ -328,6 +354,10 @@ struct Row<'a> {
     stub: bool,
     selected: bool,
     shortcut: Option<&'a str>,
+    /// The next step of the workflow: an accent pill "Next".
+    next: bool,
+    /// A closed group with the next step inside: an accent dot.
+    holds_next: bool,
 }
 
 /// One full-width menu row (Group 36 / Item 32 / Sub 28 pt).
@@ -470,6 +500,28 @@ fn row(ui: &mut Ui, r: &Row<'_>) -> Response {
         p.galley(pos2(right, cy - g.size().y / 2.0), g, c.text_secondary);
         right -= 8.0;
     }
+    if r.next {
+        // the accent pill of the next step, named for screen readers (and
+        // the tests): the row keeps its own name
+        let word = t("ws-menu-next");
+        let g = p.layout_no_wrap(word.clone(), fonts::semibold(11.0), c.accent_amber_on);
+        let pill = Rect::from_min_size(
+            pos2(right - g.size().x - 12.0, cy - 9.0),
+            vec2(g.size().x + 12.0, 18.0),
+        );
+        p.rect_filled(pill, CornerRadius::same(9), c.accent_amber);
+        p.galley(
+            pos2(pill.left() + 6.0, cy - g.size().y / 2.0),
+            g,
+            c.accent_amber_on,
+        );
+        ui.interact(pill, Id::unique("dc-workspace-menu-next"), Sense::hover())
+            .widget_info(|| WidgetInfo::labeled(Role::Label, true, &word));
+        right = pill.left() - 8.0;
+    } else if r.holds_next {
+        p.circle_filled(pos2(right - 4.0, cy), 4.0, c.accent_amber);
+        right -= 16.0;
+    }
     let galley = p.layout(r.label.clone(), font, text_color, (right - x).max(10.0));
     let clip = Rect::from_min_max(pos2(x, rect.top()), pos2(right, rect.bottom()));
     ui.painter().with_clip_rect(clip).galley(
@@ -569,5 +621,21 @@ mod tests {
         assert_eq!(progress_of(&t.roots[0], &done), Some((1, 2)));
         assert_eq!(progress_of(&t.roots[1], &done), None);
         assert_eq!(progress_of(&t.roots[0].children()[3], &done), None);
+    }
+
+    #[test]
+    fn the_next_step_is_the_first_step_not_done_never_a_shortcut() {
+        let t = MenuTree::new(vec![MenuItem::submenu(
+            "g",
+            "G",
+            vec![
+                MenuItem::command("a", "A", "a"),
+                MenuItem::command("auto", "Auto", "auto").not_a_step(),
+                MenuItem::command("b", "B", "b"),
+            ],
+        )]);
+        assert_eq!(next_step(&t, &|_| false), Some("a"));
+        assert_eq!(next_step(&t, &|id| id == "a"), Some("b"));
+        assert_eq!(next_step(&t, &|id| id != "auto"), None);
     }
 }

@@ -40,6 +40,9 @@ pub enum WorkspaceAction {
     /// The window may close (after [`Workspace::request_quit`]): the case is
     /// saved, or the user chose not to save it.
     Quit,
+    /// The user clicked the gear of the top bar: the shell opens its
+    /// Settings dialog (and tells it with [`Workspace::set_shell_dialog`]).
+    OpenSettings,
 }
 
 /// Where the user wants to go once the unsaved changes are dealt with.
@@ -319,6 +322,9 @@ pub struct Workspace {
     pub(crate) toasts: Vec<ShownToast>,
     pub(crate) confirm_exit: Option<Exit>,
     pub(crate) show_help: bool,
+    /// A dialog of the shell (Settings) is over the workspace: it takes the
+    /// keys and the dropped files.
+    pub(crate) shell_dialog: bool,
     /// The 3D scanner and its popup (`scan`).
     pub(crate) scan: dc_scan_ui::ScanPopup,
     /// The surface of the popup being imported: its file lives until the
@@ -444,6 +450,7 @@ impl Workspace {
             toasts: Vec::new(),
             confirm_exit: None,
             show_help: false,
+            shell_dialog: false,
             scan: dc_scan_ui::ScanPopup::default(),
             scan_output: None,
             agent_leaf: None,
@@ -505,6 +512,18 @@ impl Workspace {
     /// file): saving then always asks for a new path.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+    }
+
+    /// Tells the workspace whether a dialog of the shell (Settings) is on
+    /// screen: while it is, the keyboard shortcuts and the files dropped on
+    /// the window are not the workspace's.
+    pub fn set_shell_dialog(&mut self, open: bool) {
+        self.shell_dialog = open;
+    }
+
+    /// The gear of the top bar: asks the shell for its Settings dialog.
+    pub(crate) fn open_settings(&mut self) {
+        self.actions.push_back(WorkspaceAction::OpenSettings);
     }
 
     /// `true` while an import or a command runs in the background.
@@ -1720,12 +1739,10 @@ impl Workspace {
         }
     }
 
-    /// The first step of the workflow the case has no result for.
+    /// The first step of the workflow the case has no result for (the one
+    /// the menu marks "Next").
     pub(crate) fn next_step(&self) -> Option<&'static str> {
-        self.menu
-            .step_ids()
-            .into_iter()
-            .find(|id| !self.is_done(id))
+        crate::menu::next_step(&self.menu, &|id| self.is_done(id))
     }
 
     /// The pipeline ended well: refresh the viewport, say how many steps ran

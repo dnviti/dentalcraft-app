@@ -307,7 +307,6 @@ open-read-only = This project was written by a newer DentalCraft or is damaged: 
 error-module-missing = The module { $module } is not installed.
 
 ## Updates
-update-menu-check = Check for updates…
 update-setting-startup = Check for updates at startup
 update-support-check = Check for updates
 update-checking-title = Checking for updates
@@ -371,3 +370,15 @@ app-cmd-window-view = View of the window
 app-cmd-window-view-doc = Sets what the 3D view of the window shows, as its toolbar and its timeline do; the case does not change. Parameters, each optional (what is not given stays): view (occlusal, front, left, right or back), stage (the stage shown on the timeline, at most the last one; 0 is the initial position), study (the Study models layer), target (the Final position layer, the ghost of the teeth at their final position). Answers view, stage, last_stage, study, target, study_shown and teeth_shown.
 app-cmd-window-layout = Layout of the window
 app-cmd-window-layout-doc = Sizes the window and its side panels as the user does, then answers where the parts of the window are; the case does not change. Parameters, each optional: width and height (the inside of the window, in points, given together), menu and inspector (the widths of the left menu and of the inspector, in points, as a drag of their edges sets them: kept within their ranges and saved for the next start). Answers window, menu, inspector and view (x, y, width, height of each), chosen (the panel widths chosen) and overflow (how far the contents of each panel run past its width).
+
+## settings
+settings-title = Settings
+settings-menu = Settings…
+settings-general = General
+settings-workspace = Workspace
+settings-advanced = Advanced options and parameters
+settings-advanced-desc = Off: the side panels show only the automatic steps and the most useful corrections. On: every parameter and technical value too.
+settings-updates = Updates
+settings-check-now = Check now
+settings-privacy = Privacy
+settings-close = Close

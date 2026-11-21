@@ -240,3 +240,75 @@ fn an_agent_closes_the_window_once_the_scan_is_done() {
     let status = host.ok("scan.status", Value::Null);
     assert_eq!(status["state"], json!("idle"), "{status}");
 }
+
+/// A popup with a simulated scanner that is scanning, drawn headless.
+fn scanning_window() -> Harness<'static, ScanPopup> {
+    let mut host = Host::default();
+    host.scan.set_target(ScanTarget::new([ScanRole::Lower]));
+    let frames = 30;
+    host.ok(
+        "scan.connect",
+        json!({
+            "backend": "sim",
+            "device": "sim-typodont-lower",
+            "options": { "realtime": false, "frames": frames, "width": 160, "height": 100 },
+        }),
+    );
+    host.ok("scan.start", Value::Null);
+    let start = Instant::now();
+    while host.ok("scan.status", Value::Null)["frames"].as_u64() != Some(frames) {
+        assert!(start.elapsed() < WAIT, "the frames did not come");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // the device boxes of the window have no accessible name of their own
+        .with_accessibility_check(false)
+        .build_ui_state(|ui, popup: &mut ScanPopup| popup.show(ui), host.scan)
+}
+
+/// `true` when some widget of the window has exactly this label.
+fn has(h: &Harness<'static, ScanPopup>, label: &str) -> bool {
+    h.query_all_by_label(label).next().is_some()
+}
+
+/// `true` when some widget of the window has a label with this text in it.
+fn has_text(h: &Harness<'static, ScanPopup>, text: &str) -> bool {
+    h.query_all_by_label_contains(text).next().is_some()
+}
+
+#[test]
+fn the_window_shows_the_essentials_until_the_advanced_view_is_on() {
+    let mut h = scanning_window();
+    for _ in 0..4 {
+        h.step();
+    }
+    // the way to the surface: acquisition, surface and import, the state
+    for label in ["Acquisition", "Surface", "Import", "Scanning"] {
+        assert!(has(&h, label), "{label} is missing");
+    }
+    // the numbers and the tuning are not
+    for label in ["Point cloud", "Surface tools", "Detail while scanning"] {
+        assert!(!has(&h, label), "{label} is shown");
+    }
+    assert!(!has_text(&h, "frames/s"));
+    assert!(!has_text(&h, "frames joined"));
+
+    dc_module_api::set_advanced_ui(&h.ctx, true);
+    for _ in 0..4 {
+        h.step();
+    }
+    for label in ["Point cloud", "Surface tools", "Acquisition", "Import"] {
+        assert!(has(&h, label), "{label} is missing");
+    }
+    assert!(has_text(&h, "frames/s"));
+    assert!(has_text(&h, "frames joined"));
+
+    dc_module_api::set_advanced_ui(&h.ctx, false);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(!has(&h, "Point cloud"));
+    assert!(!has_text(&h, "frames/s"));
+}

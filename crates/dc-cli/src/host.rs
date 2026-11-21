@@ -1,13 +1,14 @@
 //! [`CliHost`]: the headless [`Session`] with the Aligners module, plus a
 //! CPU render (dc-raster) of the case and the app's commands: updates
-//! (`app.update.check`, `app.update.apply`, run on this installation) and
+//! (`app.update.check`, `app.update.apply`, run on this installation),
 //! anonymous diagnostics (`app.diagnostics.*`, on the app's settings and
-//! queue).
+//! queue) and settings (`app.settings.*`, on the app's settings file).
 
 use std::collections::BTreeMap;
 
 use dc_case::{BlobRef, CaseState, ScanRole};
 use dc_diagnostics::commands::{self as diagnostics, is_diagnostics_command};
+use dc_diagnostics::settings::{self as app_settings, is_settings_command};
 use dc_mcp::{Host, HostError, HostResult};
 use dc_module_api::CommandSpec;
 use dc_raster::RenderRequest;
@@ -44,7 +45,7 @@ impl CliHost {
     }
 
     /// Every command: the session's and the module's, then the app's
-    /// update and diagnostics commands.
+    /// update, diagnostics and settings commands.
     pub fn list_commands(&self) -> Vec<CommandInfo> {
         let mut list = self.session.list_commands();
         list.extend(app_specs().into_iter().map(|s| CommandInfo {
@@ -76,6 +77,14 @@ impl CliHost {
     fn run_diagnostics(&self, id: &str, params: &Value) -> HostResult {
         diagnostics::Headless::standard()
             .run(id, params)
+            .map_err(|e| HostError::new(format!("{id}: {e}")))
+    }
+
+    /// `app.settings.*` on the app's settings file (the running app reads
+    /// it at its next start).
+    fn run_settings(&self, id: &str, params: &Value) -> HostResult {
+        let file = app_settings::Paths::standard().settings();
+        app_settings::run_headless(&file, id, params)
             .map_err(|e| HostError::new(format!("{id}: {e}")))
     }
 
@@ -121,11 +130,12 @@ impl CliHost {
     }
 }
 
-/// The app's commands (source `app`): updates, then diagnostics.
+/// The app's commands (source `app`): updates, diagnostics, then settings.
 fn app_specs() -> Vec<CommandSpec> {
     update::specs()
         .into_iter()
         .chain(diagnostics::specs())
+        .chain(app_settings::specs())
         .collect()
 }
 
@@ -205,10 +215,15 @@ impl Host for CliHost {
         if is_diagnostics_command(id) {
             return self.run_diagnostics(id, &params);
         }
+        if is_settings_command(id) {
+            return self.run_settings(id, &params);
+        }
         Host::execute(&mut self.session, id, params)
     }
     fn batch(&mut self, commands: Vec<(String, Value)>) -> HostResult {
-        let app = |id: &str| is_update_command(id) || is_diagnostics_command(id);
+        let app = |id: &str| {
+            is_update_command(id) || is_diagnostics_command(id) || is_settings_command(id)
+        };
         if !commands.iter().any(|(id, _)| app(id)) {
             return Host::batch(&mut self.session, commands);
         }

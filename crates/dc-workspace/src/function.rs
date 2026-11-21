@@ -16,6 +16,12 @@
 //! [`FUNCTIONS`] says what each function has; one that is not listed has its
 //! title, status and run button only. A new function adds its entry here
 //! rather than a special case in the drawing.
+//!
+//! With the advanced options off (`dc_module_api::advanced_ui`, the default)
+//! the table also says which parts are hidden: a section whose content is
+//! all advanced loses its title too, so no empty section is left. The
+//! drawing functions hide the advanced controls of a section that also has
+//! essential ones. Hidden is only hidden: the values and the commands stay.
 
 use dc_module_api::{MenuItem, MenuStatus, NOT_AVAILABLE_KEY, is_import_scans_command};
 use dc_ui::fonts;
@@ -72,7 +78,17 @@ struct Function {
     /// Controls of their own after the tools of the section "Manual
     /// corrections" (a correction that is a button, not a pointer tool).
     more: Option<Draw>,
+    /// The section "Parameters" holds only advanced options.
+    advanced_params: bool,
+    /// The corrections of [`Corrections::Own`] are only advanced options.
+    advanced_corrections: bool,
+    /// [`Function::more`] is only advanced options.
+    advanced_more: bool,
 }
+
+/// The tools shown only with the advanced options on (the region view of
+/// [`Function::region`] is too).
+const ADVANCED_TOOLS: &[Tool] = &[Tool::Renumber, Tool::Missing];
 
 /// A function with nothing more than its run button.
 const PLAIN: Function = Function {
@@ -83,6 +99,9 @@ const PLAIN: Function = Function {
     corrections: Corrections::None,
     region: false,
     more: None,
+    advanced_params: false,
+    advanced_corrections: false,
+    advanced_more: false,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -112,6 +131,8 @@ static FUNCTIONS: &[Function] = &[
         params: Params::Own(Workspace::segment_params),
         note: Some("ws-seg-info"),
         corrections: Corrections::Tools(&[Tool::Brush, Tool::Clean]),
+        // the three numbers of the separation
+        advanced_params: true,
         ..PLAIN
     },
     Function {
@@ -125,6 +146,8 @@ static FUNCTIONS: &[Function] = &[
         id: leaf::CASE_ANALYSIS,
         results: Some(Workspace::case_analysis_results),
         corrections: Corrections::Own(Workspace::case_analysis_corrections),
+        // the figures set by hand
+        advanced_corrections: true,
         ..PLAIN
     },
     Function {
@@ -140,6 +163,8 @@ static FUNCTIONS: &[Function] = &[
         results: Some(Workspace::staging_results),
         params: Params::Own(Workspace::staging_params),
         corrections: Corrections::Own(Workspace::staging_corrections),
+        // "Slow a tooth"
+        advanced_corrections: true,
         // the aligner in the view, next to the playback as in the plugin
         more: Some(Workspace::aligner_view_controls),
         ..PLAIN
@@ -159,6 +184,8 @@ static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::STUDY_MODELS,
         params: Params::Module,
+        // the style and the sizes of the bases
+        advanced_params: true,
         ..PLAIN
     },
     Function {
@@ -167,6 +194,8 @@ static FUNCTIONS: &[Function] = &[
         params: Params::Own(Workspace::bite_params),
         corrections: Corrections::Tools(&[Tool::ThreePoints]),
         more: Some(Workspace::bite_corrections),
+        // "Correct the interpenetration"
+        advanced_more: true,
         ..PLAIN
     },
 ];
@@ -230,15 +259,23 @@ impl Workspace {
         }
         let f = of(id);
         let done = self.is_done(id);
+        let next = self.next_step() == Some(id);
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         // a function that leaves nothing in the case and is not a step of
         // the workflow has no status to give
         if done || item.counts_as_step {
             ui.add_space(10.0);
-            if done {
-                widgets::badge(ui, BadgeKind::Success, t("ws-fn-done"));
-            } else {
-                widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-done"));
-            }
+            ui.horizontal(|ui| {
+                if done {
+                    widgets::badge(ui, BadgeKind::Success, t("ws-fn-done"));
+                } else {
+                    widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-done"));
+                }
+                // what to do now to reach the aligners
+                if next {
+                    widgets::badge(ui, BadgeKind::Info, t("ws-next-step"));
+                }
+            });
         }
         if let Some(results) = f.results {
             ui.add_space(8.0);
@@ -247,6 +284,7 @@ impl Workspace {
 
         match f.params {
             Params::None => {}
+            _ if f.advanced_params && !advanced => {}
             Params::Module => {
                 section(ui, "ws-fn-params");
                 self.module_inspector(ui);
@@ -273,11 +311,13 @@ impl Workspace {
             .size()
             .x
             + 32.0;
-        // once done, running again is not the main action of the page
-        let button = if done && item.input.is_none() && !is_import_scans_command(id) {
-            Button::secondary(label)
-        } else {
+        // the main action of the page while it is still to do (the next step
+        // first of all); once done, running again is not
+        let primary = next || !done || item.input.is_some() || is_import_scans_command(id);
+        let button = if primary {
             Button::primary(label)
+        } else {
+            Button::secondary(label)
         };
         let enabled = !self.is_busy();
         if is_import_scans_command(id) && item.scanner.is_some() {
@@ -313,33 +353,43 @@ impl Workspace {
             caption(ui, t(line));
         }
 
-        match f.corrections {
-            Corrections::None => {}
-            Corrections::Tools(tools) => {
-                let tools: Vec<Tool> = tools
-                    .iter()
-                    .copied()
-                    .filter(|tool| self.tool_ready(*tool))
-                    .collect();
-                if !tools.is_empty() || f.region || f.more.is_some() {
-                    section(ui, "ws-fn-manual");
-                }
-                if f.region {
-                    self.region_controls(ui);
-                    ui.add_space(8.0);
-                }
-                if !tools.is_empty() {
-                    self.tool_list(ui, &tools);
-                }
-                if let Some(more) = f.more {
-                    ui.add_space(8.0);
-                    more(self, ui);
-                }
-            }
-            Corrections::Own(draw) => {
-                section(ui, "ws-fn-manual");
-                draw(self, ui);
-            }
+        // what the section "Manual corrections" shows: with the advanced
+        // options off only its essential parts, and no title when none is left
+        let tools: Vec<Tool> = match f.corrections {
+            Corrections::Tools(tools) => tools
+                .iter()
+                .copied()
+                .filter(|tool| self.tool_ready(*tool))
+                // an advanced tool still open (from a command) stays closable
+                .filter(|tool| {
+                    advanced || !ADVANCED_TOOLS.contains(tool) || self.manual.tool == Some(*tool)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let own = match f.corrections {
+            Corrections::Own(draw) if advanced || !f.advanced_corrections => Some(draw),
+            _ => None,
+        };
+        // the view of a region is a check: advanced, unless it is on
+        let region = f.region && (advanced || self.region_tooth().is_some());
+        let more = f.more.filter(|_| advanced || !f.advanced_more);
+        if !tools.is_empty() || own.is_some() || region || more.is_some() {
+            section(ui, "ws-fn-manual");
+        }
+        if region {
+            self.region_controls(ui);
+            ui.add_space(8.0);
+        }
+        if !tools.is_empty() {
+            self.tool_list(ui, &tools);
+        }
+        if let Some(draw) = own {
+            draw(self, ui);
+        }
+        if let Some(more) = more {
+            ui.add_space(8.0);
+            more(self, ui);
         }
     }
 

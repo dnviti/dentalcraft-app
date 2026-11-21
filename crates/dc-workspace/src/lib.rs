@@ -24,6 +24,7 @@
 //!     WorkspaceAction::GoHome | WorkspaceAction::Closed => { /* back to Home */ }
 //!     WorkspaceAction::Saved(path) => { /* add to recent projects */ }
 //!     WorkspaceAction::Quit => { /* close the window: nothing is left to save */ }
+//!     WorkspaceAction::OpenSettings => { /* the shell's Settings dialog */ }
 //!     WorkspaceAction::None => {}
 //! }
 //! // the window is asked to close

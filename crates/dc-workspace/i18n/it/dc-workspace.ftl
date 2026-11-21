@@ -806,3 +806,12 @@ ws-prod-ramps-depth = Profondità della rampa
 ws-prod-ramps-height = Altezza della rampa
 ws-prod-ramps-overbite = Overbite per le rampe
 ws-prod-params-rerun = Le modifiche valgono per la prossima esportazione: rifalla per avere i file di stampa.
+
+## settings
+ws-settings = Impostazioni
+
+## simple mode
+ws-menu-next = Avanti
+ws-next-step = Prossimo passo
+ws-bite-simple-summary = Da { $n } scansione/i del morso: { $sides }.
+ws-setup-scope-hint-simple = I denti scelti vanno con le cuspidi sulla linea d'arcata del paziente, raddrizzati; lo spazio che serve viene creato prima.

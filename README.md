@@ -62,11 +62,21 @@ To change core, aligners and the app together, work in the [`dentalcraft`](https
 - [`dentalcraft-docs`](https://github.com/dnviti/dentalcraft-docs): documentation.
 - Layering: core has no DentalCraft dependency; aligners depends on core; this application depends on both.
 
+## Settings
+
+The gear at the top right (Home and the workspace) opens **Settings**; the account menu has **Settings…** too. Every change is saved at once in `settings.json`.
+
+- **General.** Interface language (EN / IT) and theme (Dark, Light, System).
+- **Workspace.** **Advanced options and parameters**, off by default (`advanced`). Off, the inspectors and the scan window show only the automatic runs and the most useful manual corrections, and the status bars hide the technical readouts (memory, frame rate, numbering, units, renderer). On, everything is shown. The shell hands it to every screen each frame (`dc_module_api::advanced_ui`); the agent commands keep all their parameters either way.
+- **Updates.** Check at startup, and **Check now**.
+- **Privacy.** **Send anonymous diagnostic data** (see below).
+- **Agents.** `app.settings.get` (`advanced`, `language`, `theme`, `check_updates`, `diagnostics`) and `app.settings.set {advanced}` in the app bridge (the window changes at once) and in `dentalcraft-cli` and its MCP server (on the app's settings file, keeping its other keys; the app reads it at its next start).
+
 ## Updates
 
 The app and `dentalcraft-cli` update themselves from the DentalCraft website (crate [`dc-update`](crates/dc-update/src/lib.rs)).
 
-- **When.** At startup (account menu > **Check for updates at startup**, on by default), from the account menu > **Check for updates…**, and from **Support** > Your workstation. A check at startup that fails (offline) says nothing; one the user asked for says why.
+- **When.** At startup (Settings > **Check for updates at startup**, on by default), from Settings > **Check now**, and from **Support** > Your workstation. A check at startup that fails (offline) says nothing; one the user asked for says why.
 - **What is trusted.** The website publishes `https://dentalcraft.app/update/stable.json` and its minisign signature `stable.json.minisig`, made by the release job with `packaging/update-manifest.py`. The app checks the signature with the release key built into it (`dc_update::PUBLIC_KEY`, key id `B155D07CF2A36DB0`, `keys/dentalcraft.minisign.pub` on the website) before it uses anything in the file, compares the versions by SemVer (a pre-release comes before its release), and checks every download against the size and SHA-256 the signed file gives. When a check fails nothing is installed. `DC_UPDATE_URL` points the check at another address (a test site); the key never changes.
 - **How.** Each package writes a marker file `install-kind` (one word: `standalone`, `appimage`, `deb`, `rpm`, `flatpak`, `exe`, `msi`) next to the program, or in `../share/dentalcraft/` from its folder; `$APPIMAGE` and `/.flatpak-info` win over it.
 
@@ -85,7 +95,7 @@ The app and `dentalcraft-cli` update themselves from the DentalCraft website (cr
 
 With the user's consent, the app sends anonymous reports of crashes and errors to the DentalCraft server (crate [`dc-diagnostics`](crates/dc-diagnostics/src/lib.rs)), so bugs can be found and fixed.
 
-- **Consent.** At the first start (and at each start while unanswered) a dialog explains what is sent and what never is, with an unticked box and **Continue**; account menu > **Send anonymous diagnostic data** changes it at any time. It is stored in `settings.json` as `diagnostics` (`null` until answered) and `install_id`, a random UUID not linked to the account, made when diagnostics are turned on and deleted, with the reports not sent yet, when they are turned off. Nothing is collected or sent before the box is ticked.
+- **Consent.** At the first start (and at each start while unanswered) a dialog explains what is sent and what never is, with an unticked box and **Continue**; Settings > **Send anonymous diagnostic data** changes it at any time. It is stored in `settings.json` as `diagnostics` (`null` until answered) and `install_id`, a random UUID not linked to the account, made when diagnostics are turned on and deleted, with the reports not sent yet, when they are turned off. Nothing is collected or sent before the box is ticked.
 - **What.** One `session` event per start (`startup_ms`); `crash` events from the panic hook (message, backtrace, last log lines; crash files `crash-<time>.log` of earlier runs are picked up at start and renamed `crash-<time>.reported.log`); `error` events for every `ERROR` log line and `warning` events for `WARN` lines flagged `diag = true`, with the structured fields `code`, `command`, `module`, `source`. Version, commit, installation kind, OS, architecture, language, GPU, memory and processors go with each report. Never scans, projects, patient data or account data: home folder, user name, project and scan file names and their folders, registered patient codes and case references, e-mail addresses and access codes are removed from every text first, and texts are cut to the contract's limits.
 - **Where.** `POST {issuer}/api/v1/diagnostics/reports` (the sign-in server: `DC_AUTH_ISSUER`, the saved setting, else the build default), without any `Authorization`. Events wait in `<data>/diagnostics/queue` (at most 500 events and 5 MiB, oldest dropped) and are sent at start, a few seconds after new ones and every ten minutes; after a `429`, a server error or no connection they wait (`Retry-After`, else 60 s doubling to an hour); a `400` or `413` drops them.
 - **Seeing it.** Support > Your workstation says whether diagnostics are on and shows the next report (**Show what is sent**).

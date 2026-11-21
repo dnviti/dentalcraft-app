@@ -28,10 +28,13 @@ fn run(popup: &mut ScanPopup, id: &str, params: Value) {
     }
 }
 
-fn harness(size: egui::Vec2, popup: ScanPopup) -> Harness<'static, ScanPopup> {
+fn harness(size: egui::Vec2, popup: ScanPopup, advanced: bool) -> Harness<'static, ScanPopup> {
     Harness::builder()
         .with_size(size)
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        .with_context_setup(move |ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, advanced);
+        })
         // this test is about the layout; the open window's device pickers
         // have no accessible name of their own yet
         .with_accessibility_check(false)
@@ -82,13 +85,20 @@ fn assert_fits(h: &mut Harness<'static, ScanPopup>, size: egui::Vec2, what: &str
 #[test]
 fn the_scan_window_fits_the_screen_in_italian() {
     dc_i18n::set_language(dc_i18n::Lang::It).unwrap();
-    for (w, hgt) in [(1600.0, 960.0), (1280.0, 800.0)] {
+    // the simple view (the default) and the advanced one with all its controls
+    for (w, hgt, advanced) in [
+        (1600.0, 960.0, false),
+        (1600.0, 960.0, true),
+        (1280.0, 800.0, false),
+        (1280.0, 800.0, true),
+    ] {
         let size = egui::vec2(w, hgt);
+        let view = if advanced { "advanced" } else { "simple" };
         // nothing connected (the window as it opens)
         let mut popup = ScanPopup::new(None);
         popup.open(ScanTarget::new([ScanRole::Upper]).with_context("Nuovo progetto PT-7"));
-        let mut h = harness(size, popup);
-        assert_fits(&mut h, size, &format!("{w}x{hgt} nothing connected"));
+        let mut h = harness(size, popup, advanced);
+        assert_fits(&mut h, size, &format!("{w}x{hgt} {view} nothing connected"));
         // a scanner and a turntable connected: every control of the table
         let mut popup = ScanPopup::new(None);
         popup.open(ScanTarget::new([ScanRole::Upper]));
@@ -102,7 +112,7 @@ fn the_scan_window_fits_the_screen_in_italian() {
             "turntable.connect",
             json!({"backend": "sim", "options": {"fast": true}}),
         );
-        let mut h = harness(size, popup);
-        assert_fits(&mut h, size, &format!("{w}x{hgt} connected"));
+        let mut h = harness(size, popup, advanced);
+        assert_fits(&mut h, size, &format!("{w}x{hgt} {view} connected"));
     }
 }

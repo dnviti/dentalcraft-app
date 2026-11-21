@@ -288,6 +288,37 @@ fn side_word(side: Option<&str>) -> String {
     })
 }
 
+/// The sides of the bite scans of a registration, in words.
+fn scan_sides(r: &BiteRegistration) -> String {
+    let sides: std::collections::BTreeSet<String> = r
+        .scans
+        .iter()
+        .filter(|s| s.side.is_some())
+        .map(|s| side_word(s.side.as_deref()))
+        .collect();
+    sides.into_iter().collect::<Vec<_>>().join(", ")
+}
+
+/// The one line of the report with the advanced options off: how many bite
+/// scans, on which sides.
+fn registration_line(r: &BiteRegistration) -> String {
+    let sides = scan_sides(r);
+    dc_i18n::tr_args(
+        "ws-bite-simple-summary",
+        &[
+            ("n", &r.scans.len().to_string()),
+            (
+                "sides",
+                &if sides.is_empty() {
+                    side_word(None)
+                } else {
+                    sides
+                },
+            ),
+        ],
+    )
+}
+
 /// The lines of the report of a registration, as the plugin's page shows
 /// them: the summary, the reasons to review it, every bite scan and the
 /// agreement of two.
@@ -297,13 +328,7 @@ pub(crate) fn registration_lines(
     correction: f64,
 ) -> Vec<String> {
     let n = r.scans.len();
-    let sides: std::collections::BTreeSet<String> = r
-        .scans
-        .iter()
-        .filter(|s| s.side.is_some())
-        .map(|s| side_word(s.side.as_deref()))
-        .collect();
-    let sides = sides.into_iter().collect::<Vec<_>>().join(", ");
+    let sides = scan_sides(r);
     let mut out = vec![dc_i18n::tr_args(
         if method == BiteMethod::ThreePoints {
             "ws-bite-summary-points"
@@ -411,8 +436,12 @@ impl Workspace {
                         }),
                     );
                     ui.add_space(4.0);
-                    for text in registration_lines(r, method, rep.correction_mm) {
-                        line(ui, text);
+                    if dc_module_api::advanced_ui(ui.ctx()) {
+                        for text in registration_lines(r, method, rep.correction_mm) {
+                            line(ui, text);
+                        }
+                    } else {
+                        line(ui, registration_line(r));
                     }
                 }
                 (None, _) => {
@@ -481,14 +510,17 @@ impl Workspace {
             self.import_bite_scans();
         }
         ui.add_space(4.0);
-        crate::function::caption(
-            ui,
-            t(if bites.is_empty() {
-                "ws-bite-run-virtual"
-            } else {
-                "ws-bite-run-scans"
-            }),
-        );
+        // what a run does with or without bite scans: an advanced hint
+        if dc_module_api::advanced_ui(ui.ctx()) {
+            crate::function::caption(
+                ui,
+                t(if bites.is_empty() {
+                    "ws-bite-run-virtual"
+                } else {
+                    "ws-bite-run-scans"
+                }),
+            );
+        }
     }
 
     /// The correction of the interpenetration, after the tools.

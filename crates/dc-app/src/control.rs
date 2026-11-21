@@ -41,9 +41,17 @@
 //!
 //! `list` also has the anonymous diagnostics commands
 //! `app.diagnostics.status`, `.set`, `.preview` and `.send` (source `app`,
-//! see `dc_diagnostics::commands`): `set` is the account menu's checkbox
-//! (the first-start question is answered), `send` sends the waiting
+//! see `dc_diagnostics::commands`): `set` is the switch of the Settings
+//! dialog (the first-start question is answered), `send` sends the waiting
 //! reports now and answers when the server did.
+//!
+//! `list` also has the settings commands `app.settings.get` and
+//! `app.settings.set` (source `app`, see `dc_diagnostics::settings`):
+//! `get` answers `{advanced, language, theme, check_updates,
+//! diagnostics}`; `set` takes `advanced` (the switch "Advanced options and
+//! parameters" of the Settings dialog), changes the window at once and
+//! saves it. Hidden options stay reachable here: the commands keep all
+//! their parameters.
 //!
 //! `list` also has `app.menu.select` (source `app`, parameter `id`: a menu
 //! entry, or the command its inspector runs): it selects that entry of the
@@ -772,8 +780,8 @@ impl Bridge {
     /// the workspace's scan controller, the one its scan window shows), then
     /// the workspace module's (or the installed Aligners module's when no
     /// workspace is open), then the app's update commands
-    /// (`app.update.check`, `app.update.apply`) and diagnostics commands
-    /// (`app.diagnostics.*`).
+    /// (`app.update.check`, `app.update.apply`), diagnostics commands
+    /// (`app.diagnostics.*`) and settings commands (`app.settings.*`).
     fn specs(&self) -> Vec<(&'static str, CommandSpec)> {
         let mut out: Vec<(&'static str, CommandSpec)> = builtins::specs()
             .into_iter()
@@ -794,6 +802,11 @@ impl Bridge {
         );
         out.extend(
             dc_diagnostics::commands::specs()
+                .into_iter()
+                .map(|s| (dc_diagnostics::commands::SOURCE, s)),
+        );
+        out.extend(
+            dc_diagnostics::settings::specs()
                 .into_iter()
                 .map(|s| (dc_diagnostics::commands::SOURCE, s)),
         );
@@ -1145,6 +1158,22 @@ impl Bridge {
                     }
                 }
             }
+            // the installation, not the case: the Settings dialog
+            dc_diagnostics::settings::GET => {
+                if let Err(e) = dc_diagnostics::commands::no_params_given(params) {
+                    return Step::Done(Err(invalid(e)));
+                }
+                Ok(self.app.settings_summary())
+            }
+            dc_diagnostics::settings::SET => match dc_diagnostics::settings::change_param(params) {
+                Ok(change) => {
+                    if let Some(on) = change.advanced {
+                        self.app.set_advanced(on);
+                    }
+                    Ok(self.app.settings_summary())
+                }
+                Err(e) => Err(invalid(e)),
+            },
             // case commands (case.import, module commands): the
             // workspace's command path, so they land on its undo stack
             _ => {

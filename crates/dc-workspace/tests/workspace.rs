@@ -28,7 +28,12 @@ struct App {
 fn harness(ws: Workspace) -> Harness<'static, App> {
     Harness::builder()
         .with_size(vec2(1920.0, 1080.0))
-        .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+        // every control of the inspectors and of the toolbar: the advanced
+        // options on (`simple.rs` tests them off)
+        .with_context_setup(|ctx| {
+            dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+            dc_module_api::set_advanced_ui(ctx, true);
+        })
         .build_ui_state(
             |ui, app: &mut App| {
                 let a = app.ws.show(ui);

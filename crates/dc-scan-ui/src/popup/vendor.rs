@@ -86,19 +86,27 @@ impl VendorLine {
 }
 
 /// Draws the vendor line, with the notes as hover text, and a warning badge
-/// when the calibration is the estimate or a setting failed.
+/// when the calibration is the estimate or a setting failed. The line is for
+/// the advanced view; the warnings are always shown.
 pub(super) fn row(ui: &mut Ui, v: &VendorStatus) {
     let c = *colors(ui);
     let line = VendorLine::of(v);
+    let advanced = dc_module_api::advanced_ui(ui.ctx());
+    if !advanced && !line.estimate && !line.error {
+        return;
+    }
+    ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        let label = ui.label(
-            RichText::new(&line.text)
-                .font(fonts::ui(13.0))
-                .color(c.text_secondary),
-        );
-        if !line.notes.is_empty() {
-            label.on_hover_text(&line.notes);
+        if advanced {
+            let label = ui.label(
+                RichText::new(&line.text)
+                    .font(fonts::ui(13.0))
+                    .color(c.text_secondary),
+            );
+            if !line.notes.is_empty() {
+                label.on_hover_text(&line.notes);
+            }
         }
         if line.estimate {
             widgets::badge(ui, BadgeKind::Warning, t("scan-vendor-warn-estimate"))
@@ -189,12 +197,40 @@ mod tests {
         assert!(!l.error);
     }
 
-    fn drawn(v: VendorStatus) -> Harness<'static> {
+    fn drawn_as(v: VendorStatus, advanced: bool) -> Harness<'static> {
         let mut h = Harness::builder()
-            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .with_context_setup(move |ctx| {
+                dc_ui::theme::install(ctx, dc_ui::Mode::Dark);
+                dc_module_api::set_advanced_ui(ctx, advanced);
+            })
             .build_ui(move |ui| row(ui, &v));
         h.run();
         h
+    }
+
+    /// The row as the advanced view draws it.
+    fn drawn(v: VendorStatus) -> Harness<'static> {
+        drawn_as(v, true)
+    }
+
+    #[test]
+    fn the_simple_view_keeps_the_warnings_and_hides_the_line() {
+        let h = drawn_as(good(), false);
+        assert!(h.query_by_label_contains("Calibration:").is_none());
+        let h = drawn_as(
+            VendorStatus {
+                calibration: "estimate",
+                fast_exposure: "error:device".into(),
+                ..good()
+            },
+            false,
+        );
+        assert!(h.query_by_label_contains("Calibration:").is_none());
+        assert!(
+            h.query_by_label_contains("Approximate calibration")
+                .is_some()
+        );
+        assert!(h.query_by_label_contains("did not apply").is_some());
     }
 
     #[test]

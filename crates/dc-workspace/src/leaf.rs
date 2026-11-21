@@ -777,7 +777,7 @@ impl Workspace {
     /// run.
     pub(crate) fn case_analysis_results(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();
-        case_analysis(ui, &state);
+        case_analysis(ui, &state, dc_module_api::advanced_ui(ui.ctx()));
     }
 
     /// "Manual corrections" of the case analysis: the values the clinician
@@ -874,8 +874,9 @@ impl Workspace {
 }
 
 /// The main figures of the case analysis, one card per arch and the ratios
-/// and the complexity of the case.
-fn case_analysis(ui: &mut Ui, state: &CaseState) {
+/// and the complexity of the case. With the advanced options off: per arch
+/// the space and its verdict, and the complexity.
+fn case_analysis(ui: &mut Ui, state: &CaseState, advanced: bool) {
     let c = *colors(ui);
     let data = state.module_data::<AlignersState>(MODULE_ID);
     let diagnosis = data.map(|d| &d.diagnosis).filter(|d| !d.arches.is_empty());
@@ -899,12 +900,13 @@ fn case_analysis(ui: &mut Ui, state: &CaseState) {
             ScanRole::Lower => "ws-role-lower",
             ScanRole::Bite => continue,
         };
-        arch_card(ui, &t(name), d, *role, space);
+        arch_card(ui, &t(name), d, *role, space, advanced);
         ui.add_space(8.0);
     }
     // the ratios need both arches; when a tooth of the segment is missing in
     // one of them they are not calculated, and the card says so
-    if d.arches.len() > 1 || d.bolton_anterior.is_some() || d.bolton_overall.is_some() {
+    if advanced && (d.arches.len() > 1 || d.bolton_anterior.is_some() || d.bolton_overall.is_some())
+    {
         card(ui, |ui| {
             ui.label(
                 RichText::new(t("ws-ca-bolton"))
@@ -982,7 +984,14 @@ fn figure(ui: &mut Ui, name: &str, value: String) {
     });
 }
 
-fn arch_card(ui: &mut Ui, name: &str, d: &Diagnosis, role: ScanRole, space: &ArchSpace) {
+fn arch_card(
+    ui: &mut Ui,
+    name: &str,
+    d: &Diagnosis,
+    role: ScanRole,
+    space: &ArchSpace,
+    advanced: bool,
+) {
     let c = *colors(ui);
     let by_hand = !d.edits_of(role).is_empty();
     card(ui, |ui| {
@@ -1015,7 +1024,9 @@ fn arch_card(ui: &mut Ui, name: &str, d: &Diagnosis, role: ScanRole, space: &Arc
             widgets::badge(ui, kind, t(key));
         });
         let little = d.little_index_mm(role).unwrap_or(space.little_index_mm);
-        figure(ui, &t("ws-ca-little"), format!("{} mm", mm(little)));
+        if advanced {
+            figure(ui, &t("ws-ca-little"), format!("{} mm", mm(little)));
+        }
         let (kind, key) = match LittleCategory::of(little) {
             LittleCategory::Perfect => (BadgeKind::Success, "ws-ca-little-perfect"),
             LittleCategory::Minimal => (BadgeKind::Success, "ws-ca-little-minimal"),
@@ -1024,7 +1035,7 @@ fn arch_card(ui: &mut Ui, name: &str, d: &Diagnosis, role: ScanRole, space: &Arc
             LittleCategory::VerySevere => (BadgeKind::Danger, "ws-ca-little-very-severe"),
         };
         widgets::badge(ui, kind, t(key));
-        if d.details.contains_key(&role) {
+        if advanced && d.details.contains_key(&role) {
             figure(
                 ui,
                 &t("ws-ca-midline"),

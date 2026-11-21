@@ -427,6 +427,37 @@ pub(crate) fn end_lines(data: &AlignersState, role: ScanRole) -> Vec<ResultLine>
     lines
 }
 
+/// The case code of the stamp, when the stamp is on: a field written when it
+/// is left; "the stamp is off" otherwise.
+fn stamp_code(ui: &mut Ui, stamp: &Value, typing: &mut Option<String>, change: &mut Option<Value>) {
+    if stamp["enabled"].as_bool() != Some(true) {
+        caption(ui, t("ws-prod-stamp-off"));
+        return;
+    }
+    let stored = stamp["code"].as_str().unwrap_or_default().to_owned();
+    let mut text = typing.clone().unwrap_or_else(|| stored.clone());
+    let ok = StampSettings::code_ok(text.trim());
+    let error = (!ok).then(|| t("ws-prod-stamp-code-invalid"));
+    let r = widgets::text_input(
+        ui,
+        &t("ws-prod-stamp-code"),
+        &mut text,
+        &t("ws-prod-stamp-code-hint"),
+        Some(&t("ws-prod-stamp-code-help")),
+        error.as_deref(),
+    );
+    if r.lost_focus() {
+        *typing = None;
+        if ok && text.trim() != stored {
+            *change = Some(json!({ "code": text.trim() }));
+        }
+    } else if r.has_focus() {
+        *typing = Some(text);
+    } else {
+        *typing = None;
+    }
+}
+
 /// Whether `item` is shown with the values `values` of its group.
 fn shown(item: &Item, values: &Value) -> bool {
     match item {
@@ -440,8 +471,10 @@ fn shown(item: &Item, values: &Value) -> bool {
 
 impl Workspace {
     /// The parameters of "Export for printing" (see the module
-    /// documentation).
+    /// documentation). With the advanced options off: where the aligner
+    /// ends, the quality and the stamp on or off with its case code.
     pub(crate) fn production_params(&mut self, ui: &mut Ui) {
+        let advanced = dc_module_api::advanced_ui(ui.ctx());
         let state = self.undo.current().clone();
         let data = crate::overlay::aligners(&state)
             .cloned()
@@ -538,6 +571,19 @@ impl Workspace {
                 commit = Some(("quality", q));
             }
 
+            if !advanced {
+                // the stamp alone, out of its group
+                ui.add_space(6.0);
+                let stamp = &values["stamp"];
+                let mut change = None;
+                flag(ui, stamp, "enabled", "ws-prod-stamp-enabled", &mut change);
+                stamp_code(ui, stamp, &mut ui_state.code, &mut change);
+                if let Some(c) = change {
+                    commit = Some(("stamp", c));
+                }
+                return;
+            }
+
             // the folded groups
             for (gi, (group, title, items)) in GROUPS.iter().enumerate() {
                 let group_values = &values[*group];
@@ -571,32 +617,8 @@ impl Workspace {
                                 Item::When(..) => {}
                             }
                         }
-                        if *group == "stamp" && group_values["enabled"].as_bool() == Some(true) {
-                            let stored =
-                                group_values["code"].as_str().unwrap_or_default().to_owned();
-                            let mut text = ui_state.code.clone().unwrap_or_else(|| stored.clone());
-                            let ok = StampSettings::code_ok(text.trim());
-                            let error = (!ok).then(|| t("ws-prod-stamp-code-invalid"));
-                            let r = widgets::text_input(
-                                ui,
-                                &t("ws-prod-stamp-code"),
-                                &mut text,
-                                &t("ws-prod-stamp-code-hint"),
-                                Some(&t("ws-prod-stamp-code-help")),
-                                error.as_deref(),
-                            );
-                            if r.lost_focus() {
-                                ui_state.code = None;
-                                if ok && text.trim() != stored {
-                                    change = Some(json!({ "code": text.trim() }));
-                                }
-                            } else if r.has_focus() {
-                                ui_state.code = Some(text);
-                            } else {
-                                ui_state.code = None;
-                            }
-                        } else if *group == "stamp" {
-                            caption(ui, t("ws-prod-stamp-off"));
+                        if *group == "stamp" {
+                            stamp_code(ui, group_values, &mut ui_state.code, &mut change);
                         }
                         if let Some(c) = change {
                             commit = Some((group, c));
@@ -604,8 +626,10 @@ impl Workspace {
                     });
             }
         });
-        ui.add_space(6.0);
-        caption(ui, t("ws-prod-params-rerun"));
+        if advanced {
+            ui.add_space(6.0);
+            caption(ui, t("ws-prod-params-rerun"));
+        }
         if let Some(p) = end_send {
             self.run_module_command(ALIGNER_END, p);
         } else if let Some((group, change)) = commit {
