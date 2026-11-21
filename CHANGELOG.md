@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.14](https://github.com/dnviti/dentalcraft-app/compare/v0.2.0-alpha.13...v0.2.0-alpha.14) (2026-11-21)
+
+
+### Bug Fixes
+
+* **print:** pair export shells with their stage models in the print window ([#38](https://github.com/dnviti/dentalcraft-app/issues/38)) ([ca3c0d3](https://github.com/dnviti/dentalcraft-app/commit/ca3c0d3589f3eab191720d2025cccf9275db9ef9))
+
 ## [0.2.0-alpha.13](https://github.com/dnviti/dentalcraft-app/compare/v0.2.0-alpha.12...v0.2.0-alpha.13) (2026-11-21)
 
 
