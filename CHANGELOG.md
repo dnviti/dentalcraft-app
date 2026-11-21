@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-alpha.13](https://github.com/dnviti/dentalcraft-app/compare/v0.2.0-alpha.12...v0.2.0-alpha.13) (2026-11-21)
+
+
+### Features
+
+* **print:** print window for the aligners, Production → Print in the workspace ([7ee55ef](https://github.com/dnviti/dentalcraft-app/commit/7ee55ef0dcf6c29cde7480eb9ab38eea6be7a8a6))
+* **settings:** Settings dialog with advanced options, simple interface by default ([7ee55ef](https://github.com/dnviti/dentalcraft-app/commit/7ee55ef0dcf6c29cde7480eb9ab38eea6be7a8a6))
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.8 and aligners v0.2.0-alpha.12 ([7ee55ef](https://github.com/dnviti/dentalcraft-app/commit/7ee55ef0dcf6c29cde7480eb9ab38eea6be7a8a6))
+
 ## [0.2.0-alpha.12](https://github.com/dnviti-personal-org/dentalcraft-app/compare/v0.2.0-alpha.11...v0.2.0-alpha.12) (2026-11-20)
 
 
