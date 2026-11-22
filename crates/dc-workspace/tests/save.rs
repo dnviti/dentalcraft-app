@@ -721,6 +721,20 @@ fn plan() -> Vec<(&'static str, Plan)> {
                 json!({ "from": "bite", "to": "bite", "scan_id": scan.id.to_string() })
             }),
         ),
+        (
+            "case.remove-scan",
+            Run(|ws, _| {
+                // the bite scan imported first goes; the other one stays
+                let scan = ws
+                    .state()
+                    .case
+                    .scans
+                    .iter()
+                    .find(|s| s.source_name == "bite-one.stl")
+                    .unwrap();
+                json!({ "scan_id": scan.id.to_string() })
+            }),
+        ),
         // the study models are kept in the case (a coarse voxel keeps it short)
         (
             "aligners.output.study-models",
@@ -792,10 +806,12 @@ fn every_command_that_can_change_the_case_is_in_the_round_trip() {
     let ws = Workspace::new_headless(module(), None, None);
     let mut registered: BTreeSet<&str> = ws.module().command_specs().iter().map(|s| s.id).collect();
     // the shell's commands the workspace runs on the case: the scan import
-    // (the module's own replaces it), the role of a scan, and the commands
-    // of the scan window (the scanner, then the import of its scan)
+    // (the module's own replaces it), the role of a scan, its removal, and
+    // the commands of the scan window (the scanner, then the import of its
+    // scan)
     registered.insert("case.import");
     registered.insert("case.set-role");
+    registered.insert("case.remove-scan");
     registered.extend(dc_scanner::control::command_infos().iter().map(|i| i.id));
     let planned: BTreeSet<&str> = plan().iter().map(|(id, _)| *id).collect();
     let missing: Vec<_> = registered.difference(&planned).collect();

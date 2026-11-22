@@ -13,7 +13,7 @@ use dc_module_api::{
     NOT_AVAILABLE_KEY, Toast, ToastLevel, is_import_scans_command,
 };
 use dc_project::{Manifest, Project};
-use dc_session::builtins::{CASE_IMPORT, CASE_SET_ROLE};
+use dc_session::builtins::{CASE_IMPORT, CASE_REMOVE_SCAN, CASE_SET_ROLE};
 use dca_algo::diagnosis::edit::EditField;
 use egui::KeyboardShortcut;
 use serde_json::{Value, json};
@@ -125,6 +125,9 @@ pub(crate) enum SpecKind {
     Import,
     /// `case.set-role`: its output tells what the module cleared.
     SetRole,
+    /// `case.remove-scan`: its output names the scan removed and what the
+    /// module cleared.
+    RemoveScan,
     /// The command of a menu leaf (by its id): the output of some is shown
     /// ([`leaf::report`]).
     Leaf(&'static str),
@@ -138,7 +141,9 @@ impl SpecKind {
     fn error_key(self) -> &'static str {
         match self {
             SpecKind::Import | SpecKind::ScanImport(_) => "ws-toast-import-failed",
-            SpecKind::SetRole | SpecKind::Leaf(_) => "ws-toast-command-failed",
+            SpecKind::SetRole | SpecKind::RemoveScan | SpecKind::Leaf(_) => {
+                "ws-toast-command-failed"
+            }
         }
     }
 
@@ -147,7 +152,7 @@ impl SpecKind {
         match self {
             SpecKind::Import | SpecKind::ScanImport(_) => "import",
             SpecKind::Leaf(_) if command.contains("export") => "export",
-            SpecKind::SetRole | SpecKind::Leaf(_) => "command",
+            SpecKind::SetRole | SpecKind::RemoveScan | SpecKind::Leaf(_) => "command",
         }
     }
 }
@@ -318,6 +323,9 @@ pub struct Workspace {
     pub(crate) scan_open: std::collections::BTreeMap<dc_case::BlobRef, bool>,
     import_spec: Option<CommandSpec>,
     set_role_spec: Option<CommandSpec>,
+    remove_scan_spec: Option<CommandSpec>,
+    /// The scan the user asked to remove, waiting for the confirmation.
+    pub(crate) confirm_remove: Option<Uuid>,
     pub(crate) timeline: TimelineState,
     pub(crate) toasts: Vec<ShownToast>,
     pub(crate) confirm_exit: Option<Exit>,
@@ -407,6 +415,7 @@ impl Workspace {
             .find(|s| is_import_scans_command(s.id))
             .or_else(|| builtin(CASE_IMPORT));
         let set_role_spec = builtin(CASE_SET_ROLE);
+        let remove_scan_spec = builtin(CASE_REMOVE_SCAN);
         let jobs = JobSystem::new(0)
             .or_else(|_| JobSystem::new(1))
             .expect("cannot start the background job threads");
@@ -454,6 +463,8 @@ impl Workspace {
             scan_open: std::collections::BTreeMap::new(),
             import_spec,
             set_role_spec,
+            remove_scan_spec,
+            confirm_remove: None,
             timeline: TimelineState::default(),
             toasts: Vec::new(),
             confirm_exit: None,
@@ -1020,6 +1031,59 @@ impl Workspace {
         self.run_spec(spec, params, SpecKind::SetRole, "ws-job-command");
     }
 
+    /// Asks the user to confirm the removal of scan `scan_id` (a dialog);
+    /// nothing changes until they do. Ignored for a scan the case no longer
+    /// has; refused, with the reason, for an arch scan the arches lock
+    /// ([`Workspace::scan_removal_locked`]).
+    pub fn ask_remove_scan(&mut self, scan_id: Uuid) {
+        if self.undo.current().case.scan_by_id(scan_id).is_none() {
+            return;
+        }
+        if let Some(why) = self.scan_removal_locked(scan_id) {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-scan-locked").with_detail(why));
+            return;
+        }
+        self.confirm_remove = Some(scan_id);
+    }
+
+    /// The scan whose removal waits for the user's confirmation.
+    pub fn pending_scan_removal(&self) -> Option<Uuid> {
+        self.confirm_remove
+    }
+
+    /// Removes scan `scan_id` from the case (`case.remove-scan`). One
+    /// undoable change: what the module computed from the scan is cleared
+    /// and reported, Ctrl+Z brings both back. The open tool closes first (the
+    /// points of "Three points" may lie on that scan). Refused while an
+    /// import or command runs.
+    pub fn remove_scan(&mut self, scan_id: Uuid) {
+        if self.command_running() {
+            self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
+            return;
+        }
+        if let Some(spec) = self.remove_scan_spec {
+            self.close_tool();
+            let params = json!({ "scan_id": scan_id.to_string() });
+            self.run_spec(spec, params, SpecKind::RemoveScan, "ws-job-command");
+        }
+    }
+
+    /// Why scan `scan_id` cannot be removed now, in words: an arch scan
+    /// while a module holds data this version cannot read (the same refusal
+    /// as `case.remove-scan`). `None` when it can.
+    pub(crate) fn scan_removal_locked(&self, scan_id: Uuid) -> Option<String> {
+        let state = self.undo.current();
+        let scan = state.case.scan_by_id(scan_id)?;
+        if scan.role == ScanRole::Bite {
+            return None;
+        }
+        let module = state
+            .modules
+            .iter()
+            .find_map(|(id, m)| m.is_opaque().then(|| id.clone()))?;
+        Some(dc_case::import::ImportError::ArchesLocked { module }.to_string())
+    }
+
     /// Turns the occlusal side of the arch scan `role` over, or back
     /// (`aligners.case.set-arch` with `flip_occlusal`). One undoable change.
     /// Refused while an import or command runs.
@@ -1162,6 +1226,33 @@ impl Workspace {
         }
     }
 
+    /// Notifications of a removed scan: which one went, and what the module
+    /// cleared with it. The selection of the scan goes too.
+    fn show_remove_report(&mut self, report: &Value) {
+        let removed = report
+            .get("scan_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if removed
+            .is_some_and(|id| self.selection.component == Some(crate::select::Component::Scan(id)))
+        {
+            self.select_component(None);
+        }
+        let name = report
+            .get("source_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.toast(
+            Toast::new(ToastLevel::Success, "ws-toast-scan-removed").with_detail(dc_i18n::tr_args(
+                "ws-scan-removed-detail",
+                &[("name", name)],
+            )),
+        );
+        if let Some(toast) = import::removed_toast(self.module.id(), report) {
+            self.toast(toast);
+        }
+    }
+
     /// Runs `cmd` on the current state in the background and pushes the
     /// result on the undo stack.
     pub fn run_command(&mut self, cmd: Box<dyn Command>) {
@@ -1291,7 +1382,10 @@ impl Workspace {
     /// `true` while a dialog waits for the user: leaving with unsaved
     /// changes, the keyboard shortcuts, or a native file dialog.
     fn modal_open(&self) -> bool {
-        self.confirm_exit.is_some() || self.show_help || self.dialog.is_some()
+        self.confirm_exit.is_some()
+            || self.confirm_remove.is_some()
+            || self.show_help
+            || self.dialog.is_some()
     }
 
     /// `true` while a request to leave ([`Workspace::request_quit`]) may
@@ -1618,6 +1712,7 @@ impl Workspace {
                         self.show_import_report(&out);
                     }
                     SpecKind::SetRole => self.show_role_report(&out),
+                    SpecKind::RemoveScan => self.show_remove_report(&out),
                     SpecKind::Leaf(id) => self.show_leaf_report(id, &out),
                 }
             }

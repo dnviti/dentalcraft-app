@@ -161,6 +161,8 @@ pub(crate) enum ClearCause {
     /// A scan changed role (`case.set-role`, or an import that moved a
     /// provisional scan to the other arch) and nothing was replaced.
     RoleChanged,
+    /// A scan was removed (`case.remove-scan`).
+    Removed,
     /// Scans were added and nothing was replaced or moved.
     Added,
 }
@@ -184,6 +186,7 @@ impl ClearCause {
         match self {
             Self::Replaced => ("ws-toast-import-cleared", "ws-import-cleared-detail"),
             Self::RoleChanged => ("ws-toast-role-changed", "ws-role-changed-detail"),
+            Self::Removed => ("ws-toast-remove-cleared", "ws-remove-cleared-detail"),
             Self::Added => ("ws-toast-import-affected", "ws-import-affected-detail"),
         }
     }
@@ -206,6 +209,12 @@ pub(crate) fn cleared_toast(module_id: &str, report: &Value, cause: ClearCause) 
 /// Notification of the report of a role change (`case.set-role`).
 pub(crate) fn role_changed_toast(module_id: &str, report: &Value) -> Option<Toast> {
     cleared_toast(module_id, report, ClearCause::RoleChanged)
+}
+
+/// Notification of what a module cleared with a removed scan
+/// (`case.remove-scan`), if anything.
+pub(crate) fn removed_toast(module_id: &str, report: &Value) -> Option<Toast> {
+    cleared_toast(module_id, report, ClearCause::Removed)
 }
 
 /// A notification of an import report and whether it stays until the user

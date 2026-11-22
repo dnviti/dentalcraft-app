@@ -202,6 +202,10 @@ pub(crate) struct Manual {
     pub third_molars: bool,
     /// The points of "Three points" given so far.
     pub bite: crate::bite::BitePicks,
+    /// The case the points of "Three points" were given on: when the undo
+    /// stack moves away from it (undo, redo, another command, a scan
+    /// removed) they are dropped, since the scans they lie on may be gone.
+    bite_base: Option<Arc<CaseState>>,
     /// Picks of the stroke being drawn.
     stroke: Vec<Pick>,
     /// Their screen positions (for the feedback while drawing).
@@ -237,6 +241,7 @@ impl Default for Manual {
             seq_base: None,
             third_molars: false,
             bite: crate::bite::BitePicks::default(),
+            bite_base: None,
             stroke: Vec::new(),
             stroke_screen: Vec::new(),
             sink: Arc::default(),
@@ -1191,6 +1196,7 @@ impl Workspace {
         self.manual.sequence = None;
         self.manual.seq_base = None;
         self.manual.bite = crate::bite::BitePicks::default();
+        self.manual.bite_base = Some(Arc::clone(self.undo.current()));
         // the numbering in order searches the third molars as Find the teeth does
         if tool == Tool::Seeds {
             self.manual.third_molars = overlay::aligners(self.undo.current())
@@ -1219,6 +1225,27 @@ impl Workspace {
             self.manual.sequence = None;
             self.manual.seq_base = None;
             self.toast(Toast::new(ToastLevel::Info, "ws-manual-seq-stopped"));
+        }
+    }
+
+    /// Drops the points of "Three points" when the case is no longer the
+    /// one they were given on (undo, redo, another command, a scan removed):
+    /// they may lie on a scan that is gone, and Apply would register on the
+    /// wrong one.
+    pub(crate) fn bite_follow_undo(&mut self) {
+        let current = Arc::clone(self.undo.current());
+        if self.manual.bite.is_empty() {
+            self.manual.bite_base = Some(current);
+            return;
+        }
+        match &self.manual.bite_base {
+            Some(base) if !Arc::ptr_eq(base, &current) => {
+                self.manual.bite = crate::bite::BitePicks::default();
+                self.manual.bite_base = Some(current);
+                self.toast(Toast::new(ToastLevel::Info, "ws-bite-points-reset"));
+            }
+            Some(_) => {}
+            None => self.manual.bite_base = Some(current),
         }
     }
 
@@ -1329,6 +1356,7 @@ impl Workspace {
             }
         }
         self.sequence_follow_undo();
+        self.bite_follow_undo();
     }
 
     /// The controls of the open tool `tool`, in the section "Manual

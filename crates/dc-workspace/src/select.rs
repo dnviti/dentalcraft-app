@@ -16,8 +16,9 @@
 //! runs `aligners.components.transform` once (one undo step, saved like any
 //! change, the same command the CLI and the MCP server run). The inspector
 //! starts with the section "Selected component": the name, the gizmo mode,
-//! the position, rotation and size fields (each change one command), Reset
-//! and Deselect.
+//! the position, rotation and size fields (each change one command), Reset,
+//! Deselect and, for a scan, Remove (Delete too; both ask first, then run
+//! `case.remove-scan`).
 //!
 //! | Component | Move and turn | Scale |
 //! | --- | --- | --- |
@@ -163,7 +164,8 @@ impl Component {
 }
 
 /// The component a pick lands on: a 3D tooth, a gingiva, the tooth whose
-/// colour is under the pointer on a scan, else the scan.
+/// colour is under the pointer on a scan, else the scan. A bite scan is
+/// never one (it is not drawn, see [`crate::view::scene_meshes`]).
 pub(crate) fn component_at(state: &CaseState, pick: &Pick, eye: Vec3) -> Option<Component> {
     if let Some(f) = manual::tooth_of_mesh(pick.mesh_id) {
         return Some(Component::Tooth(f));
@@ -175,6 +177,7 @@ pub(crate) fn component_at(state: &CaseState, pick: &Pick, eye: Vec3) -> Option<
         .case
         .scans
         .iter()
+        .filter(|s| s.role != ScanRole::Bite)
         .find(|s| manual::scan_mesh_id(s) == pick.mesh_id)?;
     // a tooth region of the scan selects that tooth
     if let Some(f) = manual::target_of(state, pick, eye)
@@ -852,6 +855,11 @@ impl Workspace {
         }
         ui.add_space(6.0);
         let mut commit: Option<Value> = None;
+        let mut remove = None;
+        let locked = match c {
+            Component::Scan(id) => self.scan_removal_locked(id),
+            _ => None,
+        };
         let mut preview: Option<Option<GizmoDelta>> = None;
         ui.add_enabled_ui(!busy, |ui| {
             if advanced && let Some((pose, centre)) = now.pose {
@@ -972,7 +980,27 @@ impl Workspace {
                     _ => json!({ "reset": true }),
                 });
             }
+            // a scan of the case can leave it (asks first; Delete does the
+            // same), unless the arches are locked
+            if let Component::Scan(id) = c {
+                ui.add_space(4.0);
+                let r = Button::secondary(t("ws-scan-remove"))
+                    .icon(ic::TRASH)
+                    .full_width(true)
+                    .enabled(locked.is_none())
+                    .show(ui);
+                let r = match &locked {
+                    Some(why) => r.on_disabled_hover_text(why),
+                    None => r,
+                };
+                if r.clicked() {
+                    remove = Some(id);
+                }
+            }
         });
+        if let Some(id) = remove {
+            self.ask_remove_scan(id);
+        }
         if let Some(p) = preview {
             self.selection.preview = p;
         }
@@ -1050,5 +1078,164 @@ mod tests {
         assert!((a - b).length() < 1e-5, "{a:?} {b:?}");
         // the pivot stays where it is
         assert!((world.apply_point(d.pivot.as_dvec3()) - d.pivot.as_dvec3()).length() < 1e-5);
+    }
+
+    /// A case with one scan per role of `roles`, each with its own mesh.
+    fn with_scans(roles: &[ScanRole]) -> (Workspace, Vec<dc_case::Scan>) {
+        let mut state = CaseState::new(dc_case::Case::new("T"));
+        for (k, &role) in roles.iter().enumerate() {
+            let size = 12.0 + 10.0 * k as f32;
+            let mesh = state.blobs.insert(TriMesh::new(
+                vec![
+                    Vec3::ZERO,
+                    Vec3::new(size, 0.0, 0.0),
+                    Vec3::new(0.0, size, 0.0),
+                    Vec3::new(0.0, 0.0, size),
+                ],
+                vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            ));
+            state.case.scans.push(dc_case::Scan {
+                id: Uuid::new_v4(),
+                role,
+                role_source: dc_case::RoleSource::Explicit,
+                source_name: format!("{role:?}.stl").to_lowercase(),
+                source_units: dc_mesh::Units::Millimeters,
+                import_xform: Pose::default(),
+                mesh,
+            });
+        }
+        let scans = state.case.scans.clone();
+        let project = dc_project::Project::new(
+            dc_project::AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            state,
+        );
+        let ws = Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            None,
+        );
+        (ws, scans)
+    }
+
+    /// A case with an upper and a bite scan.
+    fn two_scans() -> (Workspace, dc_case::Scan, dc_case::Scan) {
+        let (ws, scans) = with_scans(&[ScanRole::Upper, ScanRole::Bite]);
+        (ws, scans[0].clone(), scans[1].clone())
+    }
+
+    #[test]
+    fn removing_the_only_arch_shown_shows_the_hidden_one() {
+        let (mut ws, scans) = with_scans(&[ScanRole::Upper, ScanRole::Lower]);
+        let lower = manual::scan_mesh_id(&scans[1]);
+        let shown = |ws: &mut Workspace| {
+            ws.sync_scene_with(dc_scene::Color::rgba(0.9, 0.9, 0.9, 1.0));
+            ws.view
+                .meshes
+                .iter()
+                .filter(|m| m.visible)
+                .map(|m| m.id)
+                .collect::<Vec<_>>()
+        };
+        ws.view.arches.lower = false;
+        assert_eq!(shown(&mut ws), [manual::scan_mesh_id(&scans[0])]);
+        ws.remove_scan(scans[0].id);
+        assert!(ws.wait_for_jobs(std::time::Duration::from_secs(20)));
+        // the view does not go empty: the lower arch comes back
+        assert_eq!(shown(&mut ws), [lower]);
+        assert!(ws.view.arches.lower);
+    }
+
+    #[test]
+    fn the_selected_scan_is_removed_by_delete_or_its_button_after_the_confirmation() {
+        use egui::{Key, Modifiers};
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        struct App(Workspace);
+        let (ws, upper, bite) = two_scans();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .with_context_setup(|ctx| dc_ui::theme::install(ctx, dc_ui::Mode::Dark))
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    let _ = app.0.show(ui);
+                },
+                App(ws),
+            );
+        h.run();
+        // the simple interface (the default): removing a scan is not advanced
+        assert!(!dc_module_api::advanced_ui(&h.ctx));
+        let shown = |h: &Harness<'_, App>, s: &dc_case::Scan| {
+            let id = manual::scan_mesh_id(s);
+            h.state().0.view.meshes.iter().any(|m| m.id == id)
+        };
+        // the bite scan is in the case but not in the scene
+        assert!(h.state().0.state().case.scan_by_id(bite.id).is_some());
+        assert!(!shown(&h, &bite) && shown(&h, &upper));
+
+        // the button of the selection inspector asks; Cancel keeps the scan
+        h.state_mut()
+            .0
+            .select_component(Some(Component::Scan(bite.id)));
+        h.run();
+        h.get_by_label("Remove the scan").click();
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), Some(bite.id));
+        assert!(h.query_by_label("Remove the scan?").is_some());
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), None);
+        assert_eq!(h.state().0.state().case.scans.len(), 2);
+
+        // with a tool open, Delete belongs to the tool
+        h.state_mut().0.manual.tool = Some(manual::Tool::ThreePoints);
+        h.key_press(Key::Delete);
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), None);
+        h.state_mut().0.manual.tool = None;
+
+        // with a text field holding the keyboard (the filter of the menu),
+        // Delete edits the field
+        h.state_mut().0.menu_view.focus_filter = true;
+        h.run();
+        assert!(h.ctx.egui_wants_keyboard_input());
+        h.key_press(Key::Delete);
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), None);
+        h.ctx.memory_mut(|m| m.stop_text_input());
+        h.run();
+        assert!(!h.ctx.egui_wants_keyboard_input());
+
+        // Delete asks too; Remove takes the scan out of the case and the view
+        h.key_press(Key::Delete);
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), Some(bite.id));
+        h.get_by_label("Remove").click();
+        h.step();
+        assert!(
+            h.state_mut()
+                .0
+                .wait_for_jobs(std::time::Duration::from_secs(20))
+        );
+        h.run();
+        let ws = &h.state().0;
+        assert_eq!(ws.pending_scan_removal(), None);
+        assert!(ws.state().case.scan_by_id(bite.id).is_none());
+        assert!(!ws.state().blobs.contains(&bite.mesh));
+        assert_eq!(ws.selection.component, None);
+        assert!(
+            ws.toast_keys()
+                .contains(&"ws-toast-scan-removed".to_owned())
+        );
+        assert!(!shown(&h, &bite) && shown(&h, &upper));
+
+        // Ctrl+Z brings it back, in the case and in the view
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        h.run();
+        assert!(h.state().0.state().case.scan_by_id(bite.id).is_some());
+        assert!(!shown(&h, &bite));
     }
 }
