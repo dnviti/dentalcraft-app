@@ -1166,6 +1166,8 @@ mod tests {
                 App(ws),
             );
         h.run();
+        // the simple interface (the default): removing a scan is not advanced
+        assert!(!dc_module_api::advanced_ui(&h.ctx));
         let shown = |h: &Harness<'_, App>, s: &dc_case::Scan| {
             let id = manual::scan_mesh_id(s);
             h.state().0.view.meshes.iter().any(|m| m.id == id)
@@ -1194,6 +1196,18 @@ mod tests {
         h.run();
         assert_eq!(h.state().0.pending_scan_removal(), None);
         h.state_mut().0.manual.tool = None;
+
+        // with a text field holding the keyboard (the filter of the menu),
+        // Delete edits the field
+        h.state_mut().0.menu_view.focus_filter = true;
+        h.run();
+        assert!(h.ctx.egui_wants_keyboard_input());
+        h.key_press(Key::Delete);
+        h.run();
+        assert_eq!(h.state().0.pending_scan_removal(), None);
+        h.ctx.memory_mut(|m| m.stop_text_input());
+        h.run();
+        assert!(!h.ctx.egui_wants_keyboard_input());
 
         // Delete asks too; Remove takes the scan out of the case and the view
         h.key_press(Key::Delete);
