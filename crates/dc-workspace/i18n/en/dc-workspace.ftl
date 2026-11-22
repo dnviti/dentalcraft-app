@@ -566,8 +566,14 @@ ws-region-unavailable = This module has no query of the region of a tooth.
 ## Bite (the report of the last bite, the bite scans, three points, the correction)
 ws-bite-verdict-good = Bite registered
 ws-bite-verdict-review = Bite registered, to check
-ws-bite-summary = Bite registered from { $n } buccal scan(s) ({ $sides }): largest RMS deviation { $rms } mm, interpenetration { $penetration } mm.
-ws-bite-summary-points = Bite registered from { $n } buccal scan(s) ({ $sides }), started from three points picked by hand: largest RMS deviation { $rms } mm, interpenetration { $penetration } mm.
+ws-bite-summary = Bite registered from { $n } buccal { $count ->
+    [one] scan
+   *[other] scans
+} ({ $sides }): largest RMS deviation { $rms } mm, interpenetration { $penetration } mm.
+ws-bite-summary-points = Bite registered from { $n } buccal { $count ->
+    [one] scan
+   *[other] scans
+} ({ $sides }), started from three points picked by hand: largest RMS deviation { $rms } mm, interpenetration { $penetration } mm.
 ws-bite-corrected = Bite opened by { $mm } mm to remove the interpenetration.
 ws-bite-to-check = To check: { $why }
 ws-bite-scan-line = { $scan } ({ $side }): RMS { $rms_lower } / { $rms_upper } mm, teeth { $teeth_lower } + { $teeth_upper }, { $area_lower } + { $area_upper } mm² in common (lower / upper arch).
@@ -579,6 +585,9 @@ ws-bite-why-one-side = Bite of one side only: the relation of the other side is 
 ws-bite-why-disagree = The two bite scans do not agree: { $mm } mm apart on the upper teeth (did the patient close differently in the two scans?).
 ws-bite-why-penetration = Interpenetration of the arches { $mm } mm (over 0.10 mm): typical of a bite under load (teeth moving in their ligament) and of scanning error; it is removed by opening the bite.
 ws-bite-why-open = The registered arches do not touch (closest { $mm } mm): check that the patient was in maximum intercuspation.
+ws-bite-why-coherence = { $scan }: only { $share }% of the surface facing the { $arch } arch lies within 0.10 mm of it (noisy or distorted scan, good from 70%): check the contacts.
+ws-bite-why-ignored = { $scan } was not used: it does not fit the arches (another patient, mirrored, or without the teeth of both arches); the registration rests on the other bite scan.
+ws-bite-why-front-only = Bite of the front teeth only: the relation of the back teeth is extrapolated; check the contacts of premolars and molars.
 ws-bite-side-right = right
 ws-bite-side-left = left
 ws-bite-side-both = right and left
@@ -816,3 +825,17 @@ ws-menu-next = Next
 ws-next-step = Next step
 ws-bite-simple-summary = From { $n } bite scan(s): { $sides }.
 ws-setup-scope-hint-simple = The chosen teeth go with their cusps on the patient's arch line, straightened; the space they need is made first.
+
+# Removing a scan (case.remove-scan): the bin of a scan row, the selection
+# inspector and the Delete key ask first.
+ws-scan-remove = Remove the scan
+ws-scan-remove-title = Remove the scan?
+ws-scan-remove-body = { $name } leaves the case, with everything computed from it. Ctrl+Z brings it back.
+ws-scan-remove-confirm = Remove
+ws-key-remove = Remove the selected scan (asks first)
+ws-toast-scan-removed = Scan removed
+ws-scan-removed-detail = { $name } was removed from the case. Ctrl+Z brings it back.
+ws-toast-remove-cleared = Results cleared
+ws-remove-cleared-detail = Cleared or to be redone because the scan was removed: { $list }. Ctrl+Z brings the scan and these results back.
+ws-toast-scan-locked = The scan cannot be removed
+ws-bite-points-reset = The points of Three points were cleared because the case changed (undo, redo, a scan removed or another command): give them again.

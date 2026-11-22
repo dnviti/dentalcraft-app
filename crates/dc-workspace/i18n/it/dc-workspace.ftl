@@ -566,8 +566,14 @@ ws-region-unavailable = Questo modulo non ha la richiesta della zona di un dente
 ## Bite (the report of the last bite, the bite scans, three points, the correction)
 ws-bite-verdict-good = Morso registrato
 ws-bite-verdict-review = Morso registrato, da verificare
-ws-bite-summary = Morso registrato da { $n } scansioni vestibolari ({ $sides }): scarto RMS massimo { $rms } mm, compenetrazione { $penetration } mm.
-ws-bite-summary-points = Morso registrato da { $n } scansioni vestibolari ({ $sides }), partendo da tre punti scelti a mano: scarto RMS massimo { $rms } mm, compenetrazione { $penetration } mm.
+ws-bite-summary = Morso registrato da { $n } { $count ->
+    [one] scansione vestibolare
+   *[other] scansioni vestibolari
+} ({ $sides }): scarto RMS massimo { $rms } mm, compenetrazione { $penetration } mm.
+ws-bite-summary-points = Morso registrato da { $n } { $count ->
+    [one] scansione vestibolare
+   *[other] scansioni vestibolari
+} ({ $sides }), partendo da tre punti scelti a mano: scarto RMS massimo { $rms } mm, compenetrazione { $penetration } mm.
 ws-bite-corrected = Morso aperto di { $mm } mm per eliminare la compenetrazione.
 ws-bite-to-check = Da verificare: { $why }
 ws-bite-scan-line = { $scan } ({ $side }): RMS { $rms_lower } / { $rms_upper } mm, denti { $teeth_lower } + { $teeth_upper }, { $area_lower } + { $area_upper } mm² in comune (arcata inferiore / superiore).
@@ -579,6 +585,9 @@ ws-bite-why-one-side = Morso di un solo lato: la relazione del lato opposto è e
 ws-bite-why-disagree = I due morsi non concordano: { $mm } mm di differenza sui denti superiori (il paziente ha chiuso in modo diverso nelle due scansioni?).
 ws-bite-why-penetration = Compenetrazione tra le arcate { $mm } mm (oltre 0,10 mm): tipica del morso sotto carico (denti che si spostano nel legamento) e dell'errore di scansione; si corregge aprendo il morso.
 ws-bite-why-open = Le arcate registrate non si toccano (distanza minima { $mm } mm): verifica che il paziente fosse in massima intercuspidazione.
+ws-bite-why-coherence = { $scan }: solo il { $share }% della superficie affacciata all'arcata { $arch } sta entro 0,10 mm (scansione rumorosa o deformata, buona dal 70%): controlla i contatti.
+ws-bite-why-ignored = { $scan } non è stata usata: non combacia con le arcate (altro paziente, speculare, o senza i denti di entrambe le arcate); la registrazione si basa sull'altra scansione del morso.
+ws-bite-why-front-only = Morso dei soli denti anteriori: la relazione dei denti posteriori è estrapolata; controlla i contatti di premolari e molari.
 ws-bite-side-right = destro
 ws-bite-side-left = sinistro
 ws-bite-side-both = destro e sinistro
@@ -816,3 +825,17 @@ ws-menu-next = Avanti
 ws-next-step = Prossimo passo
 ws-bite-simple-summary = Da { $n } scansione/i del morso: { $sides }.
 ws-setup-scope-hint-simple = I denti scelti vanno con le cuspidi sulla linea d'arcata del paziente, raddrizzati; lo spazio che serve viene creato prima.
+
+# Rimozione di una scansione (case.remove-scan): il cestino di una riga, il
+# pannello della selezione e il tasto Canc chiedono prima conferma.
+ws-scan-remove = Rimuovi la scansione
+ws-scan-remove-title = Rimuovere la scansione?
+ws-scan-remove-body = { $name } esce dal caso, insieme a tutto ciò che è stato calcolato da essa. Ctrl+Z la riporta.
+ws-scan-remove-confirm = Rimuovi
+ws-key-remove = Rimuovi la scansione selezionata (chiede conferma)
+ws-toast-scan-removed = Scansione rimossa
+ws-scan-removed-detail = { $name } è stata rimossa dal caso. Ctrl+Z la riporta.
+ws-toast-remove-cleared = Risultati cancellati
+ws-remove-cleared-detail = Cancellati o da rifare perché la scansione è stata rimossa: { $list }. Ctrl+Z riporta la scansione e questi risultati.
+ws-toast-scan-locked = La scansione non si può rimuovere
+ws-bite-points-reset = I punti di Tre punti sono stati cancellati perché il caso è cambiato (annulla, ripeti, una scansione rimossa o un altro comando): indicali di nuovo.

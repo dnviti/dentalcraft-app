@@ -52,6 +52,7 @@ impl Workspace {
         });
         // the scan and print windows, its own dialogs and the shell's take them
         let covered = self.confirm_exit.is_some()
+            || self.confirm_remove.is_some()
             || self.show_help
             || self.shell_dialog
             || self.scan.is_open()
@@ -169,6 +170,15 @@ impl Workspace {
         }
         // W, E, R: the mode of the gizmo of the selected component
         self.selection_keys(ui);
+        // Delete (Backspace on a Mac keyboard): the selected scan goes, after
+        // the confirmation, unless a tool or the numbering holds the keys
+        if self.manual.tool.is_none()
+            && self.manual.sequence.is_none()
+            && let Some(crate::select::Component::Scan(id)) = self.selection.component
+            && (consume(Modifiers::NONE, Key::Delete) || consume(Modifiers::NONE, Key::Backspace))
+        {
+            self.ask_remove_scan(id);
+        }
         if consume(Modifiers::NONE, Key::Escape) {
             if std::mem::take(&mut self.menu_view.filter_focused) {
                 // Escape in the filter field: clear it
@@ -495,6 +505,7 @@ impl Workspace {
         let advanced = dc_module_api::advanced_ui(ui.ctx());
         let mut change = None;
         let mut flip = None;
+        let mut remove = None;
         for (id, name, role, source) in scans {
             Frame::new()
                 .fill(c.bg_raised)
@@ -518,6 +529,9 @@ impl Workspace {
                             .truncate(),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if self.scan_bin(ui, id, busy) {
+                                remove = Some(id);
+                            }
                             ui.label(
                                 RichText::new(role_label(role))
                                     .font(fonts::mono(12.0))
@@ -607,7 +621,9 @@ impl Workspace {
                 });
             ui.add_space(6.0);
         }
-        if let Some((id, from, to)) = change {
+        if let Some(id) = remove {
+            self.ask_remove_scan(id);
+        } else if let Some((id, from, to)) = change {
             self.set_scan_role(id, from, to);
         } else if let Some(role) = flip {
             self.flip_occlusal(role);
@@ -803,6 +819,19 @@ impl Workspace {
                 None => {}
             }
         }
+        if let Some(id) = self.confirm_remove {
+            let name = self
+                .undo
+                .current()
+                .case
+                .scan_by_id(id)
+                .map(|s| s.source_name.clone());
+            match name {
+                // the scan left the case meanwhile (an undo): nothing to ask
+                None => self.confirm_remove = None,
+                Some(name) => self.remove_dialog(ui, id, &name),
+            }
+        }
         if self.show_help {
             let resp = Modal::new(Id::unique("dc-workspace-help"))
                 .frame(widgets::card_frame(ui).inner_margin(Margin::same(24)))
@@ -859,6 +888,72 @@ impl Workspace {
             if resp.inner || resp.should_close() {
                 self.show_help = false;
             }
+        }
+    }
+
+    /// The bin of a scan row ("Remove the scan"): `true` when clicked. Off
+    /// while `busy`, and while the arches are locked for an arch scan, with
+    /// the reason on hover.
+    pub(crate) fn scan_bin(&self, ui: &mut Ui, id: uuid::Uuid, busy: bool) -> bool {
+        let locked = self.scan_removal_locked(id);
+        let r = widgets::icon_button_sized(
+            ui,
+            ic::TRASH,
+            t("ws-scan-remove"),
+            28.0,
+            !busy && locked.is_none(),
+        );
+        match locked {
+            Some(why) => r.on_disabled_hover_text(why).clicked(),
+            None => r.clicked(),
+        }
+    }
+
+    /// "Remove the scan?": Remove runs `case.remove-scan`, Cancel, Esc or a
+    /// click outside keep the scan.
+    fn remove_dialog(&mut self, ui: &mut Ui, id: uuid::Uuid, name: &str) {
+        let c = *colors(ui);
+        let busy = self.is_busy();
+        let resp = Modal::new(Id::unique("dc-workspace-confirm-remove"))
+            .frame(widgets::card_frame(ui).inner_margin(Margin::same(24)))
+            .show(ui.ctx(), |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new(t("ws-scan-remove-title"))
+                        .font(fonts::semibold(18.0))
+                        .color(c.text_primary),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(dc_i18n::tr_args("ws-scan-remove-body", &[("name", name)]))
+                        .font(fonts::ui(13.0))
+                        .color(c.text_secondary),
+                );
+                ui.add_space(16.0);
+                let mut choice = None;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if Button::primary(t("ws-scan-remove-confirm"))
+                        .icon(ic::TRASH)
+                        .enabled(!busy)
+                        .show(ui)
+                        .clicked()
+                    {
+                        choice = Some(true);
+                    }
+                    if Button::ghost(t("cancel")).show(ui).clicked() {
+                        choice = Some(false);
+                    }
+                });
+                choice
+            });
+        match resp.inner {
+            Some(true) => {
+                self.confirm_remove = None;
+                self.remove_scan(id);
+            }
+            Some(false) => self.confirm_remove = None,
+            None if resp.should_close() => self.confirm_remove = None,
+            None => {}
         }
     }
 }
@@ -952,6 +1047,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("/", "ws-key-find"),
     ("Esc", "ws-key-clear"),
     ("W E R", "ws-key-gizmo"),
+    ("Delete Backspace", "ws-key-remove"),
     (", .", "ws-key-stage"),
     ("Space", "ws-key-play"),
     ("Home End", "ws-key-first-last"),

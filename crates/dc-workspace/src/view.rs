@@ -211,6 +211,22 @@ impl Arches {
         }
         true
     }
+
+    /// The arches after the scans of the case changed (`has_upper`,
+    /// `has_lower`: the case holds a scan of that arch): when the only arch
+    /// shown has no scan any more and the hidden one has, the hidden one is
+    /// shown, so the view never goes empty (an arch scan removed while the
+    /// other was hidden). Returns `true` when it changed.
+    pub fn follow_scans(&mut self, has_upper: bool, has_lower: bool) -> bool {
+        let (show_upper, show_lower) = match (self.upper, self.lower) {
+            (true, false) => (false, !has_upper && has_lower),
+            (false, true) => (!has_lower && has_upper, false),
+            _ => (false, false),
+        };
+        self.upper |= show_upper;
+        self.lower |= show_lower;
+        show_upper || show_lower
+    }
 }
 
 impl ViewState {
@@ -465,10 +481,14 @@ fn crowns_only(mut mesh: dc_mesh::TriMesh, labels: &[u16]) -> dc_mesh::TriMesh {
 }
 
 /// Meshes to show: the scans in the world frame (upper and lower arch per
-/// the toggles, the bite scan with both), coloured by tooth label or by the
-/// contact map and posed at the stage shown, the seed markers and the
+/// the toggles; a bite scan never, see below), coloured by tooth label or by
+/// the contact map and posed at the stage shown, the seed markers and the
 /// module's scene entries at that stage (`Module::scene_at`).
 ///
+/// - A bite scan is purely functional (it only puts the arches in
+///   occlusion): it is not in the scene at all, so it is neither drawn nor
+///   pickable, unless it is the [`SceneInput::focus`] (the scan the next
+///   point of "Three points" goes on).
 /// - An entry of a hidden arch is not drawn nor pickable.
 /// - With [`SceneInput::teeth`], a scan is left out while an entry that
 ///   replaces it (`hides_scan`) is shown for its arch; without it, the
@@ -508,7 +528,7 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     let shown = |role: ScanRole| match role {
         ScanRole::Upper => upper,
         ScanRole::Lower => lower,
-        ScanRole::Bite => upper && lower,
+        ScanRole::Bite => false,
     };
     let posed_stage = al.and_then(|a| overlay::stage(a, input.stage).map(|s| (a, s)));
     // the final position, for its ghost
@@ -562,6 +582,10 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     };
     let mut out = Vec::new();
     for scan in &state.case.scans {
+        // the bite scan is not a 3D object: only "Three points" shows it
+        if scan.role == ScanRole::Bite && input.focus != Some(scan.id) {
+            continue;
+        }
         if replacing.contains(&scan.role) && shown(scan.role) && input.focus.is_none() {
             continue;
         }
@@ -824,6 +848,11 @@ impl Workspace {
     /// on an entry (only without `wait`) and the scene is to be rebuilt.
     fn sync_scene_mode(&mut self, enamel: Color, target: Color, wait: bool) -> bool {
         let contacts = self.contact_map();
+        // the arch shown lost its scan: the hidden one comes back
+        let case = &self.undo.current().case;
+        let has = |r| case.scan(r).is_some();
+        let (upper, lower) = (has(ScanRole::Upper), has(ScanRole::Lower));
+        self.view.arches.follow_scans(upper, lower);
         // the region of a tooth is shown on the scan, at the initial position,
         // and so are the points of "Three points" (they go on the scans at rest)
         let region = self.region_tooth();
@@ -3580,6 +3609,31 @@ mod built_teeth_tests {
             "ws-region-margin",
         ] {
             assert_ne!(dc_i18n::tr_args(key, &[("fdi", "36")]), key);
+        }
+    }
+
+    #[test]
+    fn the_hidden_arch_comes_back_only_when_the_shown_one_lost_its_scan() {
+        let only = |upper, lower| Arches { upper, lower };
+        // the arch shown still has its scan, or the other has none: no change
+        for (arches, has) in [
+            (only(true, false), (true, true)),
+            (only(true, false), (false, false)),
+            (only(false, true), (true, true)),
+            (only(true, true), (false, true)),
+        ] {
+            let mut a = arches;
+            assert!(!a.follow_scans(has.0, has.1), "{arches:?} {has:?}");
+            assert_eq!(a, arches);
+        }
+        // the arch shown lost its scan and the hidden one has one
+        for (arches, has) in [
+            (only(true, false), (false, true)),
+            (only(false, true), (true, false)),
+        ] {
+            let mut a = arches;
+            assert!(a.follow_scans(has.0, has.1), "{arches:?}");
+            assert_eq!(a, Arches::default());
         }
     }
 }

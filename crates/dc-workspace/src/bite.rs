@@ -261,6 +261,20 @@ pub(crate) fn reason_text(code: &str, r: &BiteRegistration) -> String {
                 ("n", &fit(scan, arch).map_or(0, |f| f.n_teeth).to_string()),
             ],
         ),
+        "low_coherence" => {
+            let share = fit(scan, arch).map_or(0.0, |f| f.coherence) * 100.0;
+            dc_i18n::tr_args(
+                "ws-bite-why-coherence",
+                &[
+                    ("scan", scan),
+                    ("arch", &arch_word),
+                    ("share", &format!("{share:.0}")),
+                ],
+            )
+        }
+        "scan_ignored" => dc_i18n::tr_args("ws-bite-why-ignored", &[("scan", scan)]),
+        "front_only" => t("ws-bite-why-front-only"),
+        // no longer given; kept for the reports of older registrations
         "full_arch_scan" => t("ws-bite-why-full-arch"),
         "one_side_only" => t("ws-bite-why-one-side"),
         "scans_disagree" => dc_i18n::tr_args(
@@ -337,6 +351,7 @@ pub(crate) fn registration_lines(
         },
         &[
             ("n", &n.to_string()),
+            ("count", if n == 1 { "one" } else { "other" }),
             ("sides", &sides),
             ("rms", &mm(r.max_rms_mm(), 3)),
             ("penetration", &mm(r.penetration_mm, 2)),
@@ -490,15 +505,30 @@ impl Workspace {
                     .color(c.text_primary),
             );
         }
+        let busy = self.is_busy();
+        let mut remove = None;
         for (k, s) in bites.iter().enumerate() {
-            ui.label(
-                RichText::new(dc_i18n::tr_args(
-                    "ws-bite-scan-slot",
-                    &[("n", &(k + 1).to_string()), ("name", &s.source_name)],
-                ))
-                .font(fonts::ui(13.0))
-                .color(c.text_primary),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(dc_i18n::tr_args(
+                            "ws-bite-scan-slot",
+                            &[("n", &(k + 1).to_string()), ("name", &s.source_name)],
+                        ))
+                        .font(fonts::ui(13.0))
+                        .color(c.text_primary),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.scan_bin(ui, s.id, busy) {
+                        remove = Some(s.id);
+                    }
+                });
+            });
+        }
+        if let Some(id) = remove {
+            self.ask_remove_scan(id);
         }
         ui.add_space(6.0);
         if Button::secondary(t("ws-bite-import"))
@@ -811,6 +841,43 @@ mod tests {
             .collect()
     }
 
+    /// The scan has a mesh in the scene (drawn or not).
+    fn in_scene(ws: &mut Workspace, scan: &Scan) -> bool {
+        ws.sync_scene_with(dc_scene::Color::rgba(0.9, 0.9, 0.9, 1.0));
+        let id = manual::scan_mesh_id(scan);
+        ws.view.meshes.iter().any(|m| m.id == id)
+    }
+
+    #[test]
+    fn the_bite_scan_is_not_a_3d_object_outside_the_three_points_tool() {
+        let (_, moved) = bite_case();
+        let mut ws = workspace(moved);
+        let state = Arc::clone(ws.state());
+        let bite = first_bite(&state).unwrap().clone();
+        let (lower, upper) = (
+            manual::scan_mesh_id(state.case.scan(ScanRole::Lower).unwrap()),
+            manual::scan_mesh_id(state.case.scan(ScanRole::Upper).unwrap()),
+        );
+        // after the import and the registration: only the arches, and a click
+        // on the viewport can never land on the bite scan
+        assert!(!in_scene(&mut ws, &bite));
+        let mut shown = visible(&mut ws);
+        shown.retain(|&id| id != 1 << 61); // the seed markers
+        shown.sort_unstable();
+        let mut arches = [lower, upper];
+        arches.sort_unstable();
+        assert_eq!(shown, arches);
+        let pick = pick_on(&state, &bite, 0);
+        assert_eq!(crate::select::component_at(&state, &pick, Vec3::ZERO), None);
+        // the tool shows it only for the step that picks on it
+        assert!(ws.open_tool(Tool::ThreePoints));
+        assert!(!in_scene(&mut ws, &bite), "the lower arch step");
+        ws.manual.bite.step = 1;
+        assert_eq!(visible(&mut ws), [manual::scan_mesh_id(&bite)]);
+        ws.close_tool();
+        assert!(!in_scene(&mut ws, &bite), "the tool is closed");
+    }
+
     #[test]
     fn three_points_register_the_bite_in_one_undo_step() {
         let (truth, moved) = bite_case();
@@ -874,11 +941,51 @@ mod tests {
         );
         // the scene shows everything again
         assert!(visible(&mut ws).len() > 1);
+        assert!(
+            !in_scene(&mut ws, &bite),
+            "the bite scan is not drawn again"
+        );
         // one undo step
         assert!(ws.undo());
         assert!(Arc::ptr_eq(ws.state(), &state));
         assert!(ws.redo());
         assert!(Arc::ptr_eq(ws.state(), &after));
+    }
+
+    #[test]
+    fn the_three_points_go_when_the_case_changes_or_a_scan_is_removed() {
+        let (_, moved) = bite_case();
+        let pairs = three_pairs(&moved);
+        let mut ws = workspace(moved);
+        assert!(ws.open_tool(Tool::ThreePoints));
+        let state = Arc::clone(ws.state());
+        let lower = state.case.scan(ScanRole::Lower).unwrap().clone();
+        let click = |ws: &mut Workspace, k: usize| {
+            let pick = pick_on(&state, &lower, pairs[k].1);
+            ws.manual_events(vec![Event::Click(pick, Mods::default())]);
+        };
+        click(&mut ws, 0);
+        // the same case: the point stays
+        ws.manual_feedback();
+        assert!(!ws.manual.bite.is_empty());
+        // the case changes under it (another command, an undo, the bridge):
+        // the points go, with a notice
+        let mut other = state.as_ref().clone();
+        other.case.notes = "changed".to_owned();
+        ws.undo.push(Arc::new(other), "test");
+        ws.manual_feedback();
+        assert!(ws.manual.bite.is_empty());
+        assert!(ws.toast_keys().contains(&"ws-bite-points-reset".to_owned()));
+        // a scan removed while the tool is open: the tool closes first, so
+        // Apply can never register on points of a scan that is gone
+        click(&mut ws, 0);
+        assert!(!ws.manual.bite.is_empty());
+        let bite = first_bite(ws.state()).unwrap().id;
+        ws.remove_scan(bite);
+        assert_eq!(ws.manual.tool, None);
+        assert!(ws.manual.bite.is_empty());
+        assert!(ws.wait_for_jobs(WAIT));
+        assert!(ws.state().case.scan_by_id(bite).is_none());
     }
 
     #[test]
@@ -1015,6 +1122,7 @@ mod tests {
                 lower: BiteFit {
                     rms_mm: 0.123,
                     n_teeth: 1,
+                    coherence: 0.554,
                     ..BiteFit::default()
                 },
                 upper: BiteFit::default(),
@@ -1030,6 +1138,9 @@ mod tests {
                 "interpenetration".into(),
                 "arches_not_in_contact".into(),
                 "full_arch_scan".into(),
+                "low_coherence:right.stl:lower".into(),
+                "scan_ignored:left.stl".into(),
+                "front_only".into(),
             ],
             ..BiteRegistration::default()
         };
@@ -1042,12 +1153,17 @@ mod tests {
         assert!(texts[3].contains("0.25"), "{texts:?}");
         assert!(texts[4].contains("0.40"), "{texts:?}");
         assert!(texts[5].contains("0.30"), "{texts:?}");
+        assert!(
+            texts[7].contains("55%") && texts[7].contains("right.stl"),
+            "{texts:?}"
+        );
+        assert!(texts[8].starts_with("left.stl"), "{texts:?}");
         for (code, text) in r.reasons.iter().zip(&texts) {
             assert_ne!(code, text, "no words for {code}");
         }
         let lines = registration_lines(&r, BiteMethod::Registration, 0.25);
-        // summary, correction, 7 reasons, 1 scan, agreement
-        assert_eq!(lines.len(), 1 + 1 + 7 + 1 + 1, "{lines:?}");
+        // summary, correction, 10 reasons, 1 scan, agreement
+        assert_eq!(lines.len(), 1 + 1 + 10 + 1 + 1, "{lines:?}");
         let rep = BiteReport::virtual_bite();
         assert!(rep.registration.is_none());
     }

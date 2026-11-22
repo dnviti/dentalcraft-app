@@ -1161,6 +1161,114 @@ fn moving_an_arch_scan_renumbers_it_and_a_bite_role_clears_it() {
     );
 }
 
+#[test]
+fn scans_are_removed_from_their_rows_after_the_confirmation_and_undo_brings_them_back() {
+    let mut p = synthetic_project_with(&[ScanRole::Upper, ScanRole::Bite, ScanRole::Bite]);
+    let mut al = p
+        .case_state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.seeds.push(Seed {
+        fdi: Fdi::new(11).unwrap(),
+        position: DVec3::new(1.0, -30.0, 2.0),
+    });
+    al.bite_registered = true;
+    p.case_state
+        .set_module(dca_model::MODULE_ID, ModuleState::new(al));
+    let ids: Vec<_> = p.case_state.case.scans.iter().map(|s| s.id).collect();
+    let mut h = harness(Workspace::new_headless(module(), Some(p), None));
+    let bins = |h: &Harness<'static, App>| h.get_all_by_label("Remove the scan").count();
+
+    // "Scans in the case": a bin on every row; it asks before anything goes
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    assert_eq!(bins(&h), 3);
+    h.get_all_by_label("Remove the scan")
+        .next()
+        .unwrap()
+        .click();
+    h.run();
+    assert_eq!(h.state().ws.pending_scan_removal(), Some(ids[0]));
+    assert_eq!(h.state().ws.state().case.scans.len(), 3);
+    click_in_view(&mut h, "Remove");
+    settle(&mut h);
+    {
+        let ws = &h.state().ws;
+        assert!(ws.state().case.scan_by_id(ids[0]).is_none());
+        // the arch went: what was computed from it went with it, and is said
+        assert!(aligners(ws).seeds.is_empty());
+        let keys = ws.toast_keys();
+        assert!(
+            keys.contains(&"ws-toast-scan-removed".to_owned()),
+            "{keys:?}"
+        );
+        assert!(
+            keys.contains(&"ws-toast-remove-cleared".to_owned()),
+            "{keys:?}"
+        );
+    }
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert!(h.state().ws.state().case.scan_by_id(ids[0]).is_some());
+    assert_eq!(aligners(&h.state().ws).seeds.len(), 1);
+    assert!(aligners(&h.state().ws).bite_registered);
+
+    // "Bite registration": a bin on every bite scan; the bite to redo
+    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.run();
+    assert_eq!(bins(&h), 2);
+    h.get_all_by_label("Remove the scan")
+        .last()
+        .unwrap()
+        .click();
+    h.run();
+    assert_eq!(h.state().ws.pending_scan_removal(), Some(ids[2]));
+    click_in_view(&mut h, "Remove");
+    settle(&mut h);
+    let ws = &h.state().ws;
+    assert!(ws.state().case.scan_by_id(ids[2]).is_none());
+    assert_eq!(ws.state().case.scans.len(), 2);
+    assert!(!aligners(ws).bite_registered);
+    assert_eq!(aligners(ws).seeds.len(), 1, "the arches keep their results");
+    assert!(h.state_mut().ws.undo());
+    assert_eq!(h.state().ws.state().case.scans.len(), 3);
+    assert!(aligners(&h.state().ws).bite_registered);
+}
+
+#[test]
+fn an_arch_scan_cannot_be_removed_while_a_newer_module_locks_the_arches() {
+    let mut p = synthetic_project_with(&[ScanRole::Upper, ScanRole::Bite]);
+    p.case_state.set_module(
+        "future",
+        ModuleState::new(dc_case::OpaqueModuleData {
+            schema_version: 9,
+            value: json!({"results": true}),
+        }),
+    );
+    let ids: Vec<_> = p.case_state.case.scans.iter().map(|s| s.id).collect();
+    let mut h = harness(Workspace::new_headless(module(), Some(p), None));
+    h.state_mut().ws.select_item(IMPORT_ID);
+    h.run();
+    // the bin of the arch scan is off, the one of the bite scan is not
+    let off: Vec<bool> = h
+        .get_all_by_label("Remove the scan")
+        .map(|n| egui_kittest::kittest::NodeT::accesskit_node(&n).is_disabled())
+        .collect();
+    assert_eq!(off, [true, false]);
+    // asked anyway (the Delete key): refused with the reason, nothing asked
+    h.state_mut().ws.ask_remove_scan(ids[0]);
+    h.run();
+    assert_eq!(h.state().ws.pending_scan_removal(), None);
+    let details = h.state().ws.toast_details();
+    let (key, detail) = details.last().unwrap();
+    assert_eq!(key, "ws-toast-scan-locked");
+    assert!(detail.as_deref().unwrap().contains("future"), "{detail:?}");
+    // the bite scan still goes
+    h.state_mut().ws.ask_remove_scan(ids[1]);
+    assert_eq!(h.state().ws.pending_scan_removal(), Some(ids[1]));
+}
+
 /// The demo lower arch opened under the gum (the demo scan is closed): the
 /// faces of its lowest 4 mm along the occlusal axis (+Z) removed.
 fn open_lower_project() -> Project {
@@ -2098,7 +2206,7 @@ fn the_bite_inspector_shows_the_report_the_scans_and_the_corrections() {
     for label in [
         // the report
         "Bite registered, to check",
-        "Bite registered from 1 buccal scan(s) (right): largest RMS deviation 0.034 mm, \
+        "Bite registered from 1 buccal scan (right): largest RMS deviation 0.034 mm, \
          interpenetration 0.18 mm.",
         "To check: Bite of one side only",
         "To check: Interpenetration of the arches 0.18 mm",
