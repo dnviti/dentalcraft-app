@@ -13,21 +13,21 @@ publish = false
 
 [workspace.dependencies]
 # dentalcraft-core crates
-dc-mesh = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-geom = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-case = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-command = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-jobs = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-scene = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-project = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-module-api = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-i18n = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-theme = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-session = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-mcp = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-raster = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-scanner = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
-dc-print = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.8" }
+dc-mesh = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-geom = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-case = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-command = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-jobs = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-scene = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-project = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-module-api = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-i18n = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-theme = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-session = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-mcp = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-raster = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-scanner = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
+dc-print = { git = "https://github.com/dnviti/dentalcraft-core.git", tag = "v0.3.0-alpha.9" }
 
 # app crates
 dc-viewport = { path = "crates/dc-viewport" }
@@ -67,9 +67,9 @@ tempfile = "3.27.0"
 dc-ui = { path = "crates/dc-ui" }
 dc-auth-client = { path = "crates/dc-auth-client" }
 # dentalcraft-aligners crates
-dca-model = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
-dca-algo = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
-dca-module = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.12" }
+dca-model = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.13" }
+dca-algo = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.13" }
+dca-module = { git = "https://github.com/dnviti/dentalcraft-aligners.git", tag = "v0.2.0-alpha.13" }
 egui_kittest = { version = "=0.37.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] } # rfd 0.17 has no async-std feature (xdg-portal uses pollster)
 directories = "6.0.0"
