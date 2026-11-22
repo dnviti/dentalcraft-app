@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0-alpha.15](https://github.com/dnviti/dentalcraft-app/compare/v0.2.0-alpha.14...v0.2.0-alpha.15) (2026-11-22)
+
+
+### Features
+
+* **case:** remove scans from the case, from their rows, the selected component or the Delete key ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+* **teeth:** close the gingiva of the 3D teeth with a flat base ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+
+
+### Bug Fixes
+
+* **bite:** register partial and low-quality bite scans ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+* **deps:** move to core v0.3.0-alpha.9 and aligners v0.2.0-alpha.13 ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+* **teeth:** no phantom teeth behind the last molars and no merged teeth ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+* **viewport:** the bite scan is not drawn in the 3D view ([4708ed5](https://github.com/dnviti/dentalcraft-app/commit/4708ed52e8d74fecc95e5267fd29716092ee4006))
+
 ## [0.2.0-alpha.14](https://github.com/dnviti/dentalcraft-app/compare/v0.2.0-alpha.13...v0.2.0-alpha.14) (2026-11-21)
 
 
