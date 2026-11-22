@@ -64,6 +64,7 @@ pub fn runtime_keys() -> Vec<&'static str> {
         E::ServerRejected,
         E::InvalidGrant,
         E::TokenInvalid,
+        E::Clock,
         E::Cancelled,
         E::StorageUnavailable,
         E::NotSignedIn,

@@ -1211,6 +1211,31 @@ fn a_failed_automatic_save_is_shown_and_tried_again_at_the_next_change() {
 }
 
 #[test]
+fn a_save_whose_backup_cannot_be_kept_succeeds_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ws, path) = saved_lower(dir.path());
+    // `<file>.bak` is a folder: the backup cannot replace it
+    let bak = dir.path().join("auto.dcprj.bak");
+    let _ = std::fs::remove_file(&bak);
+    std::fs::create_dir_all(bak.join("keep")).unwrap();
+    rename(&mut ws, "W");
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.take_action(), WorkspaceAction::Saved(path.clone()));
+    assert!(!ws.is_dirty(), "the save counts as done");
+    assert_eq!(reopen(&path).case_state.case.patient_code, "W");
+    let details = ws.toast_details();
+    assert!(
+        details
+            .iter()
+            .any(|(k, d)| k == "ws-toast-save-warning"
+                && d.as_deref().is_some_and(|d| !d.is_empty())),
+        "the warning reaches the user: {details:?}"
+    );
+    assert!(!ws.toast_keys().contains(&"ws-toast-save-failed".to_owned()));
+}
+
+#[test]
 fn a_change_that_lands_after_save_is_pressed_is_saved_too() {
     let dir = tempfile::tempdir().unwrap();
     let (mut ws, path) = saved_lower(dir.path());

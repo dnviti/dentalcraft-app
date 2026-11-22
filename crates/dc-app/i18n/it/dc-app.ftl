@@ -167,6 +167,7 @@ auth-error-access-denied = L'accesso è stato rifiutato nel browser.
 auth-error-server-rejected = Il servizio di accesso ha rifiutato la richiesta. Riprova o contatta l'assistenza.
 auth-error-invalid-grant = L'accesso è scaduto. Accedi di nuovo.
 auth-error-token-invalid = Non è stato possibile verificare l'accesso. Riprova o contatta l'assistenza.
+auth-error-clock = L'orologio di questo computer sembra sbagliato, quindi non è possibile verificare l'accesso. Imposta la data e l'ora corrette, poi riprova.
 auth-error-cancelled = Accesso annullato.
 auth-error-storage-unavailable = Accesso eseguito, ma il portachiavi di sistema non è disponibile: la prossima volta dovrai accedere di nuovo.
 auth-error-not-signed-in = Non hai eseguito l'accesso.

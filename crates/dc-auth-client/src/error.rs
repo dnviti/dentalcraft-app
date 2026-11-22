@@ -27,8 +27,11 @@ pub enum AuthErrorCode {
     ServerRejected,
     /// The refresh token or authorization code is no longer valid: sign in again.
     InvalidGrant,
-    /// The id_token failed verification (signature, algorithm, issuer, audience, expiry or nonce).
+    /// The id_token failed verification (signature, algorithm, issuer, audience or nonce).
     TokenInvalid,
+    /// The id_token is valid except for its times (`exp` in the past, `iat` in
+    /// the future): the computer clock is wrong. Never forgets the session.
+    Clock,
     /// The sign-in was cancelled by the user.
     Cancelled,
     /// The credential store (OS keyring) is not available.
@@ -53,6 +56,7 @@ impl AuthErrorCode {
             Self::ServerRejected => "server-rejected",
             Self::InvalidGrant => "invalid-grant",
             Self::TokenInvalid => "token-invalid",
+            Self::Clock => "clock",
             Self::Cancelled => "cancelled",
             Self::StorageUnavailable => "storage-unavailable",
             Self::NotSignedIn => "not-signed-in",
@@ -73,6 +77,7 @@ impl AuthErrorCode {
             Self::ServerRejected => "auth-error-server-rejected",
             Self::InvalidGrant => "auth-error-invalid-grant",
             Self::TokenInvalid => "auth-error-token-invalid",
+            Self::Clock => "auth-error-clock",
             Self::Cancelled => "auth-error-cancelled",
             Self::StorageUnavailable => "auth-error-storage-unavailable",
             Self::NotSignedIn => "auth-error-not-signed-in",
@@ -81,7 +86,7 @@ impl AuthErrorCode {
     }
 
     /// Every code, for the en/it key-parity test of the application.
-    pub const ALL: [AuthErrorCode; 14] = [
+    pub const ALL: [AuthErrorCode; 15] = [
         Self::InvalidIssuer,
         Self::Network,
         Self::Timeout,
@@ -92,6 +97,7 @@ impl AuthErrorCode {
         Self::ServerRejected,
         Self::InvalidGrant,
         Self::TokenInvalid,
+        Self::Clock,
         Self::Cancelled,
         Self::StorageUnavailable,
         Self::NotSignedIn,

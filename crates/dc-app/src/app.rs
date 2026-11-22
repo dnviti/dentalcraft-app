@@ -653,8 +653,9 @@ impl DentalCraftApp {
             && let Some(s) = a.poll()
         {
             match &s {
-                AuthState::SignedIn(u) => {
-                    tracing::info!("signed in as {}", u.email);
+                AuthState::SignedIn(_) => {
+                    // nothing identifying in the plain-text local log
+                    tracing::info!("signed in");
                     if let Some(w) = a.storage_warning() {
                         tracing::warn!(
                             "the session cannot be saved ({w}): it will not survive a restart"
@@ -662,13 +663,15 @@ impl DentalCraftApp {
                     }
                 }
                 AuthState::Error(e) => {
-                    // the user's own choices and an offline machine are no bugs
+                    // the user's own choices, an offline machine and a wrong
+                    // computer clock are no bugs
                     let report = !matches!(
                         e.code,
                         AuthErrorCode::Cancelled
                             | AuthErrorCode::AccessDenied
                             | AuthErrorCode::Network
                             | AuthErrorCode::Timeout
+                            | AuthErrorCode::Clock
                     );
                     tracing::warn!(
                         diag = report,

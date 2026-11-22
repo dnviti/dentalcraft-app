@@ -20,7 +20,7 @@ It depends on [`dentalcraft-core`](https://github.com/dnviti/dentalcraft-core) (
 | Projects | `.dcprj` files with undo, automatic saving and a step history. |
 | Languages | English and Italian, switchable at run time. |
 | Account | Sign-in with OpenID Connect against the DentalCraft account server (not part of the public sources). Local projects open without it. |
-| Agents | `dentalcraft-cli` runs every command headless and serves them over MCP. `dentalcraft --control <port>` lets the CLI drive a running window. |
+| Agents | `dentalcraft-cli` runs every command headless and serves them over MCP. `dentalcraft --control <port>` lets the CLI drive a running window (`dentalcraft-cli mcp --connect <port>`), on `127.0.0.1` only and behind a per-run token: see [Control bridge](#control-bridge). |
 | Updates and diagnostics | Signed automatic updates, and anonymous diagnostics only after an explicit opt-in. |
 
 | Crate | What it does |
@@ -113,7 +113,22 @@ With the user's consent, the app sends anonymous reports of crashes and errors t
 - **What.** One `session` event per start (`startup_ms`); `crash` events from the panic hook (message, backtrace, last log lines; crash files `crash-<time>.log` of earlier runs are picked up at start and renamed `crash-<time>.reported.log`); `error` events for every `ERROR` log line and `warning` events for `WARN` lines flagged `diag = true`, with the structured fields `code`, `command`, `module`, `source`. Version, commit, installation kind, OS, architecture, language, GPU, memory and processors go with each report. Never scans, projects, patient data or account data: home folder, user name, project and scan file names and their folders, registered patient codes and case references, e-mail addresses and access codes are removed from every text first, and texts are cut to the contract's limits.
 - **Where.** `POST {issuer}/api/v1/diagnostics/reports` (the sign-in server: `DC_AUTH_ISSUER`, the saved setting, else the build default), without any `Authorization`. Events wait in `<data>/diagnostics/queue` (at most 500 events and 5 MiB, oldest dropped) and are sent at start, a few seconds after new ones and every ten minutes; after a `429`, a server error or no connection they wait (`Retry-After`, else 60 s doubling to an hour); a `400` or `413` drops them.
 - **Seeing it.** Support > Your workstation says whether diagnostics are on and shows the next report (**Show what is sent**).
-- **Agents.** `app.diagnostics.status`, `app.diagnostics.set {enabled}`, `app.diagnostics.preview` and `app.diagnostics.send` in the app bridge and in `dentalcraft-cli` and its MCP server (the CLI works on the app's settings file and queue).
+- **Agents.** `app.diagnostics.status`, `app.diagnostics.set {enabled: false}`, `app.diagnostics.preview` and `app.diagnostics.send` in the app bridge and in `dentalcraft-cli` and its MCP server (the CLI works on the app's settings file and queue). Agents can only turn diagnostics off: `{enabled: true}` fails with `consent-only-in-app`, because data is sent only after the user ticks the box in the app (the first-start question or Settings).
+
+## Control bridge
+
+`dentalcraft --control <port>` (0 picks a free port) listens on `127.0.0.1:<port>` and prints `control: listening on 127.0.0.1:<port>` and `control: token file <path>` on stdout. The protocol is `dentalcraft-control/1`: one JSON-RPC 2.0 message per line, at most 16 MiB per line and 4 connections at once (the module docs of `dc_app::control` list the methods).
+
+- **Token.** At start the app writes a random 256-bit token (64 hex digits) to `control-<port>.token`, readable only by the user, and deletes it when it ends; a file left by a crashed run is replaced. The folder is `$XDG_RUNTIME_DIR/dentalcraft` on Linux (when set; folder 0700, file 0600), else the `control` folder of the app's local data: `~/.local/share/dentalcraft/control` (Linux without `XDG_RUNTIME_DIR`), `~/Library/Application Support/app.DentalCraft.dentalcraft/control` (macOS), `%LOCALAPPDATA%\DentalCraft\dentalcraft\data\control` (Windows).
+- **Handshake.** Each connection proves the token in both directions without sending it. The app's proof is checked first, so a program that took the port learns nothing:
+  ```text
+  -> {"jsonrpc":"2.0","id":1,"method":"auth.hello","params":{"protocol":"dentalcraft-control/1","nonce":"<64 hex>"}}
+  <- {"jsonrpc":"2.0","id":1,"result":{"protocol":"dentalcraft-control/1","nonce":"<64 hex>","proof":"<64 hex>"}}
+  -> {"jsonrpc":"2.0","id":2,"method":"auth.proof","params":{"proof":"<64 hex>"}}
+  <- {"jsonrpc":"2.0","id":2,"result":{"app":"DentalCraft","version":"…","protocol":"dentalcraft-control/1"}}
+  ```
+  A proof is the BLAKE3 keyed hash, under the token, of `dentalcraft-control/1 server` (the app) or `dentalcraft-control/1 client`, the port (2 bytes, big-endian), the client nonce and the server nonce (32 bytes each). Anything else as the first two lines, a wrong proof, or a handshake not done within 5 s closes the connection without an answer. After the handshake, a line that is not a JSON-RPC 2.0 request gets its error and closes the connection.
+- **Clients.** `dentalcraft-cli mcp --connect <port>` finds the token file of the port by itself. `DC_CONTROL_TOKEN_FILE=<path>` names another file, for example when the app runs with another `XDG_RUNTIME_DIR`. Scripts that talk to the bridge directly must do the handshake (`dc_app::control::auth::client_handshake` in Rust).
 
 ## Licence
 

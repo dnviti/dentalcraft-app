@@ -31,6 +31,8 @@ pub enum SendOutcome {
 pub fn post(endpoint: &str, body: &[u8]) -> SendOutcome {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
+        // a redirect could take the report elsewhere (or to plain http)
+        .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(concat!("DentalCraft/", env!("CARGO_PKG_VERSION")))
         .build()

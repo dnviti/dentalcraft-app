@@ -57,6 +57,20 @@ pub fn endpoint(issuer: &str) -> String {
     format!("{}{REPORTS_PATH}", issuer.trim_end_matches('/'))
 }
 
+/// `true` when reports may go to `endpoint`: `https`, or `http` only on this
+/// computer (development), as the sign-in accepts its issuer. Anything else
+/// (plain http to another host, not a URL) is never sent to.
+pub fn endpoint_allowed(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    match (url.scheme(), url.host_str()) {
+        ("https", Some(h)) => !h.is_empty(),
+        ("http", Some(h)) => matches!(h, "127.0.0.1" | "localhost" | "[::1]" | "::1"),
+        _ => false,
+    }
+}
+
 /// The current time as `2026-11-18T16:00:00Z`.
 pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)

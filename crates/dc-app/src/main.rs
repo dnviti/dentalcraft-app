@@ -1,8 +1,9 @@
 //! `dentalcraft`: the DentalCraft desktop application.
 //!
 //! `dentalcraft --control <port>` also listens on `127.0.0.1:<port>` for
-//! the bridge protocol of `dentalcraft-cli mcp --connect <port>` (see
-//! `dc_app::control`).
+//! the bridge protocol of `dentalcraft-cli mcp --connect <port>`, behind a
+//! handshake with a per-run token file only the user can read (see
+//! `dc_app::control` and `dc_app::control::auth`).
 
 // Release builds on Windows are GUI-subsystem (no console window); logs go to the log file.
 #![cfg_attr(
@@ -92,13 +93,22 @@ fn main() -> eframe::Result {
         }
     };
     tracing::info!("sign-in server: {issuer}");
+    // the token is good only for this run: the server deletes its file
+    // when dropped, and this covers an end that skips the drop
+    let token_file = control.as_ref().map(|c| c.token_file().to_path_buf());
     if let Some(c) = &control {
-        // scripts read the port from this line; a closed or missing reader
-        // (a wrapper that went away, no console) must not stop the app
+        // scripts read the port (and the token file) from these lines; a
+        // closed or missing reader (a wrapper that went away, no console)
+        // must not stop the app
         let mut out = std::io::stdout().lock();
-        let _ =
-            writeln!(out, "control: listening on {}", c.local_addr()).and_then(|()| out.flush());
-        tracing::info!("control bridge listening on {}", c.local_addr());
+        let _ = writeln!(out, "control: listening on {}", c.local_addr())
+            .and_then(|()| writeln!(out, "control: token file {}", c.token_file().display()))
+            .and_then(|()| out.flush());
+        tracing::info!(
+            "control bridge listening on {} (token file {})",
+            c.local_addr(),
+            c.token_file().display()
+        );
     }
 
     let options = eframe::NativeOptions {
@@ -148,6 +158,9 @@ fn main() -> eframe::Result {
             })
         }),
     );
+    if let Some(f) = token_file {
+        let _ = std::fs::remove_file(f);
+    }
     match &result {
         Ok(()) => tracing::info!("DentalCraft ended: the window closed"),
         Err(e) => tracing::error!("DentalCraft ended with an error: {e}"),

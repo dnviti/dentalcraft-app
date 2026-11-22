@@ -4,8 +4,12 @@
 //! # Protocol (`dentalcraft-control/1`)
 //!
 //! TCP on `127.0.0.1:<port>` only (port 0 picks a free one; the app prints
-//! `control: listening on 127.0.0.1:<port>` on stdout). UTF-8, one JSON-RPC
-//! 2.0 message per line; every request gets one answer line, in order:
+//! `control: listening on 127.0.0.1:<port>` and `control: token file
+//! <path>` on stdout). Every connection starts with the handshake of
+//! [`auth`], which proves the per-run token both ways; at most
+//! [`MAX_CONNECTIONS`] connections at once. Then UTF-8, one JSON-RPC 2.0
+//! message per line of at most [`MAX_LINE`] bytes; every request gets one
+//! answer line, in order:
 //!
 //! ```text
 //! -> {"jsonrpc":"2.0","id":1,"method":"execute","params":{"id":"aligners.demo","params":{"arch":"upper"}}}
@@ -29,8 +33,8 @@
 //! | `render`, `screenshot` | render parameters (`dc_raster::RenderRequest`), plus `model` (`scan` / `teeth`, default what the viewport shows) and `stage` (default the stage shown) | `{png: <base64>, width, height}` |
 //!
 //! Errors of an operation use code `-32000`; malformed lines `-32700`,
-//! invalid requests `-32600`, unknown methods `-32601`, bad parameters
-//! `-32602`.
+//! invalid requests `-32600` (both also close the connection), unknown
+//! methods `-32601`, bad parameters `-32602`.
 //!
 //! `list` also has the app's commands `app.update.check` and
 //! `app.update.apply` (source `app`, see `dc_update::commands`): they act
@@ -41,9 +45,10 @@
 //!
 //! `list` also has the anonymous diagnostics commands
 //! `app.diagnostics.status`, `.set`, `.preview` and `.send` (source `app`,
-//! see `dc_diagnostics::commands`): `set` is the switch of the Settings
-//! dialog (the first-start question is answered), `send` sends the waiting
-//! reports now and answers when the server did.
+//! see `dc_diagnostics::commands`): `set` only turns the switch of the
+//! Settings dialog off (`enabled: true` fails with `consent-only-in-app`:
+//! consent is the user's checkbox), `send` sends the waiting reports now
+//! and answers when the server did.
 //!
 //! `list` also has the settings commands `app.settings.get` and
 //! `app.settings.set` (source `app`, see `dc_diagnostics::settings`):
@@ -90,11 +95,12 @@
 //! read-back of the GPU viewport.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use dc_case::CaseState;
@@ -111,6 +117,226 @@ use crate::DentalCraftApp;
 
 /// Protocol name answered by `hello`.
 pub const PROTOCOL: &str = "dentalcraft-control/1";
+
+/// Longest line after the handshake; a longer one closes the connection.
+pub const MAX_LINE: u64 = 16 * 1024 * 1024;
+/// Longest handshake line (a hello is about 150 bytes).
+const MAX_HANDSHAKE_LINE: u64 = 1024;
+/// Connections served at once; more are closed as soon as they arrive.
+pub const MAX_CONNECTIONS: usize = 4;
+/// Time a new connection has for the whole handshake.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The secret of one `--control` run and the handshake that proves it.
+///
+/// At start the app makes a random 256-bit token and writes it, as 64 hex
+/// digits, to `control-<port>.token` in [`token_dir`], a file only the
+/// user can read; it deletes it when it ends. A client proves it read the
+/// file and the app proves it wrote it, without sending the token:
+///
+/// ```text
+/// -> {"jsonrpc":"2.0","id":1,"method":"auth.hello","params":{"protocol":"dentalcraft-control/1","nonce":"<64 hex: client nonce>"}}
+/// <- {"jsonrpc":"2.0","id":1,"result":{"protocol":"dentalcraft-control/1","nonce":"<64 hex: server nonce>","proof":"<64 hex: server proof>"}}
+/// -> {"jsonrpc":"2.0","id":2,"method":"auth.proof","params":{"proof":"<64 hex: client proof>"}}
+/// <- {"jsonrpc":"2.0","id":2,"result":{"app":"DentalCraft","version":"…","protocol":"dentalcraft-control/1"}}
+/// ```
+///
+/// A proof is the BLAKE3 keyed hash, under the token, of
+/// `"dentalcraft-control/1 server"` (or `" client"`), the port as 2
+/// big-endian bytes, the client nonce and the server nonce (32 bytes
+/// each). Proofs are compared in constant time. The client checks the
+/// app's proof before it sends its own, so a program that took the port
+/// first learns nothing. Anything else as the first two lines, a wrong
+/// proof, or a handshake not done in [`HANDSHAKE_TIMEOUT`] closes the
+/// connection without an answer.
+pub mod auth {
+    use std::io::{self, BufRead, Write};
+    use std::path::{Path, PathBuf};
+
+    use serde_json::{Value, json};
+
+    use super::PROTOCOL;
+
+    /// Method of the first line.
+    pub const HELLO: &str = "auth.hello";
+    /// Method of the second line.
+    pub const PROOF: &str = "auth.proof";
+    /// Environment variable with the path of the token file, for clients
+    /// that do not find it from the port (`dentalcraft-cli` reads it too).
+    pub const TOKEN_FILE_ENV: &str = "DC_CONTROL_TOKEN_FILE";
+
+    /// A 256-bit secret or nonce.
+    pub type Bytes = [u8; 32];
+
+    /// Who proves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Role {
+        /// The app.
+        Server,
+        /// The client.
+        Client,
+    }
+
+    /// 32 random bytes from the OS.
+    pub fn random() -> io::Result<Bytes> {
+        let mut b = [0; 32];
+        getrandom::fill(&mut b).map_err(|e| io::Error::other(format!("no random bytes: {e}")))?;
+        Ok(b)
+    }
+
+    /// 64 lowercase hex digits.
+    pub fn to_hex(b: &Bytes) -> String {
+        blake3::Hash::from_bytes(*b).to_hex().to_string()
+    }
+
+    /// The bytes of 64 hex digits.
+    pub fn from_hex(s: &str) -> Option<Bytes> {
+        blake3::Hash::from_hex(s).ok().map(|h| *h.as_bytes())
+    }
+
+    /// The proof of `role` for one connection to `port`.
+    pub fn proof(
+        token: &Bytes,
+        role: Role,
+        port: u16,
+        client_nonce: &Bytes,
+        server_nonce: &Bytes,
+    ) -> blake3::Hash {
+        let mut h = blake3::Hasher::new_keyed(token);
+        h.update(PROTOCOL.as_bytes());
+        h.update(match role {
+            Role::Server => b" server",
+            Role::Client => b" client",
+        });
+        h.update(&port.to_be_bytes());
+        h.update(client_nonce);
+        h.update(server_nonce);
+        h.finalize()
+    }
+
+    /// `true` when `hex` is `expected` (constant time).
+    pub fn proof_matches(hex: &str, expected: &blake3::Hash) -> bool {
+        blake3::Hash::from_hex(hex).is_ok_and(|h| h == *expected)
+    }
+
+    /// The folder of the token files: `$XDG_RUNTIME_DIR/dentalcraft` on
+    /// Linux (and the other Unix systems but macOS) when it is set, else
+    /// `control` in the app's local data folder:
+    /// `~/.local/share/dentalcraft/control` (Linux),
+    /// `~/Library/Application Support/app.DentalCraft.dentalcraft/control`
+    /// (macOS), `%LOCALAPPDATA%\DentalCraft\dentalcraft\data\control`
+    /// (Windows).
+    pub fn token_dir() -> Option<PathBuf> {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Some(d.join("dentalcraft"));
+        }
+        directories::ProjectDirs::from("app", "DentalCraft", "dentalcraft")
+            .map(|d| d.data_local_dir().join("control"))
+    }
+
+    /// The token file of the bridge on `port` in `dir`.
+    pub fn token_file(dir: &Path, port: u16) -> PathBuf {
+        dir.join(format!("control-{port}.token"))
+    }
+
+    /// Reads a token file.
+    pub fn read_token(path: &Path) -> io::Result<Bytes> {
+        let text = std::fs::read_to_string(path)?;
+        from_hex(text.trim()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: not a control token", path.display()),
+            )
+        })
+    }
+
+    /// Writes `token` to the token file of `port` in `dir`, readable by
+    /// the user only (folder 0700, file 0600 on Unix; on Windows the
+    /// folder is in the user's private `%LOCALAPPDATA%`). A file left by
+    /// a run that crashed is replaced: the port is this run's now.
+    pub fn write_token(dir: &Path, port: u16, token: &Bytes) -> io::Result<PathBuf> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)?;
+        let path = token_file(dir, port);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&path)?;
+        f.write_all(to_hex(token).as_bytes())?;
+        Ok(path)
+    }
+
+    /// The client side of the handshake on a new connection to `port`;
+    /// answers the app's `auth.proof` result. Fails when the app's proof
+    /// is wrong (not the app of this token) or the app closes the
+    /// connection (it refused the client's proof).
+    pub fn client_handshake(
+        reader: &mut impl BufRead,
+        writer: &mut impl Write,
+        token: &Bytes,
+        port: u16,
+    ) -> io::Result<Value> {
+        let bad = |m: &str| io::Error::new(io::ErrorKind::PermissionDenied, m.to_owned());
+        let mut call = |id: u64, method: &str, params: Value| -> io::Result<Value> {
+            let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            writer.write_all(format!("{req}\n").as_bytes())?;
+            writer.flush()?;
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(bad("the app closed the connection: wrong control token"));
+            }
+            let v: Value = serde_json::from_str(&line).map_err(|_| bad("not a DentalCraft app"))?;
+            match v.get("result") {
+                Some(r) if v.get("id") == Some(&json!(id)) => Ok(r.clone()),
+                _ => Err(bad("not a DentalCraft app")),
+            }
+        };
+        let client_nonce = random()?;
+        let hello = call(
+            1,
+            HELLO,
+            json!({"protocol": PROTOCOL, "nonce": to_hex(&client_nonce)}),
+        )?;
+        let server_nonce = hello
+            .get("nonce")
+            .and_then(Value::as_str)
+            .and_then(from_hex)
+            .ok_or_else(|| bad("not a DentalCraft app"))?;
+        let expected = proof(token, Role::Server, port, &client_nonce, &server_nonce);
+        if !hello
+            .get("proof")
+            .and_then(Value::as_str)
+            .is_some_and(|p| proof_matches(p, &expected))
+        {
+            return Err(bad(
+                "the program on this port does not know the control token: not this DentalCraft app",
+            ));
+        }
+        let mine = proof(token, Role::Client, port, &client_nonce, &server_nonce);
+        call(2, PROOF, json!({"proof": mine.to_hex().as_str()}))
+    }
+}
 
 /// JSON-RPC error codes.
 mod codes {
@@ -173,6 +399,7 @@ type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 /// The TCP listener and the UI-thread side of the request channel.
 pub struct ControlServer {
     addr: SocketAddr,
+    token_file: PathBuf,
     rx: mpsc::Receiver<Request>,
     waker: Waker,
     waker_set: bool,
@@ -181,25 +408,57 @@ pub struct ControlServer {
 
 impl ControlServer {
     /// Listens on `127.0.0.1:port` (0 = any free port) on a background
-    /// thread; each connection gets its own thread.
+    /// thread, with its token file in [`auth::token_dir`]; each
+    /// connection gets its own thread, at most [`MAX_CONNECTIONS`].
     pub fn bind(port: u16) -> std::io::Result<Self> {
+        let dir = auth::token_dir().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no folder for the control token (no XDG_RUNTIME_DIR nor home folder)",
+            )
+        })?;
+        Self::bind_in(port, &dir)
+    }
+
+    /// [`bind`](Self::bind) with the token file in `token_dir`.
+    pub fn bind_in(port: u16, token_dir: &Path) -> std::io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
         let addr = listener.local_addr()?;
+        let token = auth::random()?;
+        let token_file = auth::write_token(token_dir, addr.port(), &token)?;
+        let keys = Arc::new(Keys {
+            token,
+            port: addr.port(),
+        });
         let (tx, rx) = mpsc::channel();
         let waker: Waker = Arc::new(Mutex::new(None));
         let w = Arc::clone(&waker);
-        std::thread::Builder::new()
+        let open = Arc::new(AtomicUsize::new(0));
+        let spawned = std::thread::Builder::new()
             .name("dc-control".into())
             .spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let (tx, w) = (tx.clone(), Arc::clone(&w));
+                    if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        continue; // dropping `stream` closes it
+                    }
+                    let slot = Slot(Arc::clone(&open));
+                    let (tx, w, keys) = (tx.clone(), Arc::clone(&w), Arc::clone(&keys));
                     let _ = std::thread::Builder::new()
                         .name("dc-control-conn".into())
-                        .spawn(move || serve_connection(stream, &tx, &w));
+                        .spawn(move || {
+                            let _slot = slot;
+                            serve_connection(stream, &keys, &tx, &w);
+                        });
                 }
-            })?;
+            });
+        if let Err(e) = spawned {
+            let _ = std::fs::remove_file(&token_file);
+            return Err(e);
+        }
         Ok(Self {
             addr,
+            token_file,
             rx,
             waker,
             waker_set: false,
@@ -210,6 +469,11 @@ impl ControlServer {
     /// The address listened on.
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// The file with this run's token (deleted when the server is dropped).
+    pub fn token_file(&self) -> &Path {
+        &self.token_file
     }
 
     /// Called from the connection threads when a request arrives (the app
@@ -250,6 +514,131 @@ impl ControlServer {
     }
 }
 
+impl Drop for ControlServer {
+    fn drop(&mut self) {
+        // the token is good only while this run listens
+        let _ = std::fs::remove_file(&self.token_file);
+    }
+}
+
+/// The token of a server and the port its proofs name.
+struct Keys {
+    token: auth::Bytes,
+    port: u16,
+}
+
+/// A connection slot, freed when its thread ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The read half of a connection: past `deadline` reads fail, so a
+/// silent or slow client cannot hold a slot through the handshake.
+struct ReadHalf {
+    stream: TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl Read for ReadHalf {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(d) = self.deadline {
+            let left = d.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.stream.set_read_timeout(Some(left))?;
+        }
+        self.stream.read(buf)
+    }
+}
+
+/// Reads one line of at most `max` bytes into `buf`, without its `\n` (or
+/// `\r\n`). `None` at the end of the connection, on an error, on a longer
+/// line (never buffered whole) and on a line that is not UTF-8.
+fn read_line<'a>(r: &mut impl BufRead, buf: &'a mut Vec<u8>, max: u64) -> Option<&'a str> {
+    buf.clear();
+    let n = r.by_ref().take(max + 1).read_until(b'\n', buf).ok()?;
+    if n == 0 || buf.pop() != Some(b'\n') {
+        return None;
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    std::str::from_utf8(buf).ok()
+}
+
+fn write_line(w: &mut TcpStream, v: &Value) -> Option<()> {
+    let mut text = v.to_string();
+    text.push('\n');
+    w.write_all(text.as_bytes()).ok()?;
+    w.flush().ok()
+}
+
+/// The params of `msg` when it is the JSON-RPC 2.0 request `method`.
+fn auth_params<'a>(msg: &'a Value, method: &str) -> Option<&'a Map<String, Value>> {
+    let ok = msg.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+        && msg.get("method").and_then(Value::as_str) == Some(method)
+        && msg.get("id").is_some();
+    if !ok {
+        return None;
+    }
+    msg.get("params")?.as_object()
+}
+
+/// The app side of the handshake ([`auth`]). `None` closes the connection
+/// without an answer.
+fn handshake(reader: &mut BufReader<ReadHalf>, writer: &mut TcpStream, keys: &Keys) -> Option<()> {
+    let mut buf = Vec::new();
+    let hello: Value =
+        serde_json::from_str(read_line(reader, &mut buf, MAX_HANDSHAKE_LINE)?).ok()?;
+    let params = auth_params(&hello, auth::HELLO)?;
+    if params.get("protocol")?.as_str()? != PROTOCOL {
+        return None;
+    }
+    let client_nonce = auth::from_hex(params.get("nonce")?.as_str()?)?;
+    let server_nonce = auth::random().ok()?;
+    let (token, port) = (&keys.token, keys.port);
+    let mine = auth::proof(
+        token,
+        auth::Role::Server,
+        port,
+        &client_nonce,
+        &server_nonce,
+    );
+    write_line(
+        writer,
+        &json!({"jsonrpc": "2.0", "id": hello["id"], "result": {
+            "protocol": PROTOCOL,
+            "nonce": auth::to_hex(&server_nonce),
+            "proof": mine.to_hex().as_str(),
+        }}),
+    )?;
+    let msg: Value = serde_json::from_str(read_line(reader, &mut buf, MAX_HANDSHAKE_LINE)?).ok()?;
+    let params = auth_params(&msg, auth::PROOF)?;
+    let expected = auth::proof(
+        token,
+        auth::Role::Client,
+        port,
+        &client_nonce,
+        &server_nonce,
+    );
+    if !auth::proof_matches(params.get("proof")?.as_str()?, &expected) {
+        return None;
+    }
+    write_line(
+        writer,
+        &json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+            "app": "DentalCraft",
+            "version": env!("CARGO_PKG_VERSION"),
+            "protocol": PROTOCOL,
+        }}),
+    )
+}
+
 fn response(id: Value, r: RpcResult) -> Value {
     match r {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -261,25 +650,43 @@ fn response(id: Value, r: RpcResult) -> Value {
     }
 }
 
-/// Reads request lines from `stream`, forwards them to the UI thread and
-/// writes the answers.
-fn serve_connection(stream: TcpStream, tx: &mpsc::Sender<Request>, waker: &Waker) {
+/// Runs the handshake, then reads request lines from `stream`, forwards
+/// them to the UI thread and writes the answers. A line that is not a
+/// JSON-RPC 2.0 request gets its error answer, then the connection closes.
+fn serve_connection(stream: TcpStream, keys: &Keys, tx: &mpsc::Sender<Request>, waker: &Waker) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
+    let mut reader = BufReader::new(ReadHalf {
+        stream: read_half,
+        deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
+    });
     let mut writer = stream;
-    for line in BufReader::new(read_half).lines() {
-        let Ok(line) = line else { return };
+    if handshake(&mut reader, &mut writer, keys).is_none() {
+        return;
+    }
+    reader.get_mut().deadline = None;
+    if reader.get_ref().stream.set_read_timeout(None).is_err() {
+        return;
+    }
+    let mut buf = Vec::new();
+    loop {
+        let Some(line) = read_line(&mut reader, &mut buf, MAX_LINE) else {
+            return;
+        };
         if line.trim().is_empty() {
             continue;
         }
-        let answer = match serde_json::from_str::<Value>(&line) {
-            Err(e) => response(
-                Value::Null,
-                Err(RpcError::new(
-                    codes::PARSE_ERROR,
-                    format!("parse error: {e}"),
-                )),
+        let (answer, close) = match serde_json::from_str::<Value>(line) {
+            Err(e) => (
+                response(
+                    Value::Null,
+                    Err(RpcError::new(
+                        codes::PARSE_ERROR,
+                        format!("parse error: {e}"),
+                    )),
+                ),
+                true,
             ),
             Ok(msg) => {
                 let id = msg.get("id").cloned().unwrap_or(Value::Null);
@@ -305,21 +712,22 @@ fn serve_connection(stream: TcpStream, tx: &mpsc::Sender<Request>, waker: &Waker
                             w();
                         }
                         let Ok(r) = rx.recv() else { return };
-                        response(id, r)
+                        (response(id, r), false)
                     }
-                    _ => response(
-                        id,
-                        Err(RpcError::new(
-                            codes::INVALID_REQUEST,
-                            "expected a JSON-RPC 2.0 request with a method",
-                        )),
+                    _ => (
+                        response(
+                            id,
+                            Err(RpcError::new(
+                                codes::INVALID_REQUEST,
+                                "expected a JSON-RPC 2.0 request with a method",
+                            )),
+                        ),
+                        true,
                     ),
                 }
             }
         };
-        let mut text = answer.to_string();
-        text.push('\n');
-        if writer.write_all(text.as_bytes()).is_err() || writer.flush().is_err() {
+        if write_line(&mut writer, &answer).is_none() || close {
             return;
         }
     }
@@ -1164,15 +1572,14 @@ impl Bridge {
                 }));
             }
             // the installation, not the case: the consent of the account menu
-            dc_diagnostics::commands::SET => {
-                match dc_diagnostics::commands::enabled_param(params) {
-                    Ok(on) => {
-                        self.app.set_diagnostics(on);
-                        Ok(self.app.diagnostics_status())
-                    }
-                    Err(e) => Err(invalid(e)),
+            // only off: consent is the user's checkbox in the app
+            dc_diagnostics::commands::SET => match dc_diagnostics::commands::off_param(params) {
+                Ok(()) => {
+                    self.app.set_diagnostics(false);
+                    Ok(self.app.diagnostics_status())
                 }
-            }
+                Err(e) => Err(invalid(e)),
+            },
             dc_diagnostics::commands::STATUS
             | dc_diagnostics::commands::PREVIEW
             | dc_diagnostics::commands::SEND => {
@@ -1511,6 +1918,11 @@ impl ControlledApp {
         &self.bridge
     }
 
+    /// The bridge, to act as the user does in the window (tests).
+    pub fn bridge_mut(&mut self) -> &mut Bridge {
+        &mut self.bridge
+    }
+
     /// The address the bridge listens on.
     pub fn local_addr(&self) -> SocketAddr {
         self.server.local_addr()
@@ -1539,5 +1951,155 @@ impl eframe::App for ControlledApp {
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.bridge.app.pace_frame(raw_input);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, ErrorKind};
+
+    /// A server on a free port, its token file in a temporary folder.
+    fn server() -> (ControlServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = ControlServer::bind_in(0, dir.path()).unwrap();
+        (s, dir)
+    }
+
+    fn connect(s: &ControlServer) -> (BufReader<TcpStream>, TcpStream) {
+        let w = TcpStream::connect(s.local_addr()).unwrap();
+        w.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        (BufReader::new(w.try_clone().unwrap()), w)
+    }
+
+    /// The app closes the connection at once and sends nothing.
+    fn closed_unanswered(r: &mut BufReader<TcpStream>) {
+        let start = Instant::now();
+        let mut all = Vec::new();
+        if let Err(e) = r.read_to_end(&mut all) {
+            assert!(
+                matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ),
+                "not closed: {e}"
+            );
+        }
+        assert!(all.is_empty(), "{}", String::from_utf8_lossy(&all));
+        assert!(
+            start.elapsed() < HANDSHAKE_TIMEOUT,
+            "closed only by the timeout"
+        );
+    }
+
+    #[test]
+    fn the_handshake_proves_the_token_both_ways() {
+        let (s, _dir) = server();
+        let token = auth::read_token(s.token_file()).unwrap();
+        let (mut r, mut w) = connect(&s);
+        let ok = auth::client_handshake(&mut r, &mut w, &token, s.local_addr().port()).unwrap();
+        assert_eq!(
+            (ok["app"].as_str(), ok["protocol"].as_str()),
+            (Some("DentalCraft"), Some(PROTOCOL))
+        );
+        // then a line that is not JSON-RPC gets its error and closes the connection
+        writeln!(w, "GET / HTTP/1.1").unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["error"]["code"], codes::PARSE_ERROR);
+        closed_unanswered(&mut r);
+        assert!(s.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_wrong_token_fails_the_handshake() {
+        let (s, _dir) = server();
+        let port = s.local_addr().port();
+        // the client sees that the app does not prove its token and stops
+        let (mut r, mut w) = connect(&s);
+        let e = auth::client_handshake(&mut r, &mut w, &[7; 32], port).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+        // a client that sends back the app's own proof (it has no token) is closed
+        let (mut r, mut w) = connect(&s);
+        let hello = json!({"jsonrpc": "2.0", "id": 1, "method": auth::HELLO,
+                           "params": {"protocol": PROTOCOL, "nonce": auth::to_hex(&[1; 32])}});
+        writeln!(w, "{hello}").unwrap();
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        let theirs = answer["result"]["proof"].as_str().unwrap().to_owned();
+        let proof =
+            json!({"jsonrpc": "2.0", "id": 2, "method": auth::PROOF, "params": {"proof": theirs}});
+        writeln!(w, "{proof}").unwrap();
+        closed_unanswered(&mut r);
+        assert!(s.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn anything_but_a_hello_first_closes_the_connection_unanswered() {
+        let (s, _dir) = server();
+        let port = s.local_addr().port();
+        // what a web page's `fetch` sends: the request line and headers, then the body line
+        let body = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"execute\",\"params\":{\"id\":\"app.window.screenshot\",\"params\":{\"path\":\"x.png\"}}}\n";
+        let http = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let wrong_protocol = json!({"jsonrpc": "2.0", "id": 1, "method": auth::HELLO,
+                                    "params": {"protocol": "other/1", "nonce": auth::to_hex(&[1; 32])}});
+        for first in [
+            http,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"list\"}\n".to_owned(),
+            "\n".to_owned(),
+            format!("{wrong_protocol}\n"),
+            "x".repeat(4096),
+        ] {
+            let (mut r, mut w) = connect(&s);
+            w.write_all(first.as_bytes()).unwrap();
+            closed_unanswered(&mut r);
+        }
+        // nothing reached the window
+        assert!(s.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn lines_and_connections_are_bounded() {
+        let mut buf = Vec::new();
+        let mut line =
+            |text: &[u8]| read_line(&mut Cursor::new(text), &mut buf, 8).map(str::to_owned);
+        assert_eq!(line(b"12345678\nnext").as_deref(), Some("12345678"));
+        assert_eq!(line(b"ab\r\n").as_deref(), Some("ab"));
+        assert_eq!(line(b"123456789\n"), None);
+        assert_eq!(line(b"no end"), None);
+        assert_eq!(line(b""), None);
+        // silent clients hold every slot: the next connection is closed at once
+        let (s, _dir) = server();
+        let held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connect(&s)).collect();
+        let (mut r, _w) = connect(&s);
+        closed_unanswered(&mut r);
+        drop(held);
+    }
+
+    #[test]
+    fn the_token_file_is_private_replaced_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("control");
+        let stale = auth::write_token(&tokens, 1, &[1; 32]).unwrap();
+        let fresh = auth::write_token(&tokens, 1, &[2; 32]).unwrap();
+        assert_eq!(stale, fresh);
+        assert_eq!(auth::read_token(&fresh).unwrap(), [2; 32]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!((mode(&fresh), mode(&tokens)), (0o600, 0o700));
+        }
+        let s = ControlServer::bind_in(0, &tokens).unwrap();
+        let file = s.token_file().to_path_buf();
+        assert_eq!(file, auth::token_file(&tokens, s.local_addr().port()));
+        assert_ne!(auth::read_token(&file).unwrap(), [2; 32]);
+        drop(s);
+        assert!(!file.exists());
     }
 }

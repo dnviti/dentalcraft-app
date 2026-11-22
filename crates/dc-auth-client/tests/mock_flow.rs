@@ -40,6 +40,8 @@ struct Ms {
     refresh_delay: Duration,
     signin_expires_in: u64,
     wrong_nonce: bool,
+    /// Seconds the server clock runs ahead of this computer (negative: behind).
+    clock_ahead: i64,
 }
 
 struct Mock {
@@ -70,7 +72,8 @@ fn form(body: &str) -> HashMap<String, String> {
 impl Ms {
     fn id_token(&self, nonce: Option<&str>) -> String {
         let header = json!({"alg": "EdDSA", "typ": "JWT", "kid": "k1"});
-        let mut claims = json!({"iss": self.issuer, "sub": "usr_1", "aud": CLIENT, "azp": CLIENT, "iat": now(), "exp": now() + 3600});
+        let t = now().saturating_add_signed(self.clock_ahead);
+        let mut claims = json!({"iss": self.issuer, "sub": "usr_1", "aud": CLIENT, "azp": CLIENT, "iat": t, "exp": t + 3600});
         if let Some(n) = nonce {
             claims["nonce"] = json!(n);
         }
@@ -250,6 +253,7 @@ impl Mock {
             refresh_delay: Duration::ZERO,
             signin_expires_in: 3600,
             wrong_nonce: false,
+            clock_ahead: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let (st2, stop2) = (st.clone(), stop.clone());
@@ -314,31 +318,42 @@ fn browser(mock: &Mock, mode: Browser) -> Arc<dyn dc_auth_client::BrowserOpener>
             code
         };
         let (state, iss) = match mode {
-            Browser::BadState => ("forged".to_owned(), issuer.clone()),
             Browser::BadIss => (q["state"].clone(), "https://evil.example".to_owned()),
             _ => (q["state"].clone(), issuer.clone()),
         };
-        let mut cb = url::Url::parse(&q["redirect_uri"]).unwrap();
-        {
-            let mut p = cb.query_pairs_mut();
-            if mode == Browser::Denied {
-                p.append_pair("error", "access_denied");
-            } else {
-                p.append_pair("code", &code);
+        let callback = |state: &str| {
+            let mut cb = url::Url::parse(&q["redirect_uri"]).unwrap();
+            {
+                let mut p = cb.query_pairs_mut();
+                if mode == Browser::Denied {
+                    p.append_pair("error", "access_denied");
+                } else {
+                    p.append_pair("code", &code);
+                }
+                p.append_pair("state", state).append_pair("iss", &iss);
             }
-            p.append_pair("state", &state).append_pair("iss", &iss);
+            cb
+        };
+        // BadState: a forged redirect first (refused, the wait goes on), then
+        // the real one
+        let mut hits = Vec::new();
+        if mode == Browser::BadState {
+            hits.push(callback("forged"));
         }
+        hits.push(callback(&state));
         std::thread::spawn(move || {
-            let port = cb.port().unwrap();
-            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            let target = format!("{}?{}", cb.path(), cb.query().unwrap());
-            write!(
-                s,
-                "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            let mut out = String::new();
-            let _ = s.read_to_string(&mut out);
+            for cb in hits {
+                let port = cb.port().unwrap();
+                let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                let target = format!("{}?{}", cb.path(), cb.query().unwrap());
+                write!(
+                    s,
+                    "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut out = String::new();
+                let _ = s.read_to_string(&mut out);
+            }
         });
         true
     })
@@ -643,10 +658,6 @@ fn state_and_iss_mismatches_are_rejected() {
     let mock = Mock::start();
     let store = mem();
     expect_error(
-        &client(&mock, store.clone(), Browser::BadState),
-        AuthErrorCode::CallbackInvalid,
-    );
-    expect_error(
         &client(&mock, store.clone(), Browser::BadIss),
         AuthErrorCode::CallbackInvalid,
     );
@@ -655,7 +666,36 @@ fn state_and_iss_mismatches_are_rejected() {
         AuthErrorCode::AccessDenied,
     );
     assert_eq!(store.load(&mock.issuer).unwrap(), None);
-    assert_eq!(mock.with(|m| m.counter), 3, "no token was ever issued");
+    assert_eq!(mock.with(|m| m.counter), 2, "no token was ever issued");
+}
+
+#[test]
+fn a_forged_redirect_does_not_abort_the_sign_in() {
+    let mock = Mock::start();
+    let store = mem();
+    // a redirect with another `state` is refused and the real one still lands
+    let c = client(&mock, store.clone(), Browser::BadState);
+    assert!(
+        matches!(sign_in(&c), AuthState::SignedIn(_)),
+        "{:?}",
+        c.state()
+    );
+}
+
+#[test]
+fn a_token_rotated_by_another_instance_is_used_on_refresh() {
+    let mock = Mock::start();
+    let store = mem();
+    let first = client(&mock, store.clone(), Browser::Good);
+    sign_in(&first);
+    // a second instance of the app starts and rotates the stored token
+    let second = client(&mock, store.clone(), Browser::Idle);
+    assert!(matches!(second.restore_blocking(), AuthState::SignedIn(_)));
+    // the first one refreshes with the stored token, not its spent one
+    first.refresh_now().unwrap();
+    assert!(matches!(first.state(), AuthState::SignedIn(_)));
+    second.refresh_now().unwrap();
+    assert!(store.load(&mock.issuer).unwrap().is_some());
 }
 
 #[test]
@@ -667,6 +707,59 @@ fn id_token_with_a_wrong_nonce_is_rejected() {
     expect_error(&c, AuthErrorCode::TokenInvalid);
     assert_eq!(c.user(), None);
     assert_eq!(c.access_token(), None);
+}
+
+#[test]
+fn a_clock_two_minutes_behind_still_signs_in() {
+    let mock = Mock::start();
+    mock.with(|m| m.clock_ahead = 120);
+    let store = mem();
+    let c = client(&mock, store.clone(), Browser::Good);
+    assert!(
+        matches!(sign_in(&c), AuthState::SignedIn(_)),
+        "{:?}",
+        c.state()
+    );
+    // and the session restores
+    let c = client(&mock, store.clone(), Browser::Idle);
+    assert!(matches!(c.restore_blocking(), AuthState::SignedIn(_)));
+}
+
+#[test]
+fn a_clock_ten_minutes_behind_is_a_clock_error_that_keeps_the_session() {
+    let mock = Mock::start();
+    let store = mem();
+    sign_in(&client(&mock, store.clone(), Browser::Good));
+    mock.with(|m| m.clock_ahead = 600);
+
+    let c = client(&mock, store.clone(), Browser::Idle);
+    assert!(
+        matches!(c.restore_blocking(), AuthState::Error(e) if e.code == AuthErrorCode::Clock),
+        "{:?}",
+        c.state()
+    );
+    let kept = store.load(&mock.issuer).unwrap();
+    assert!(kept.is_some(), "the stored refresh token was wiped");
+    // a fresh sign-in reports the clock too
+    expect_error(&client(&mock, mem(), Browser::Good), AuthErrorCode::Clock);
+
+    // once the clock is right again, the kept session restores
+    mock.with(|m| m.clock_ahead = 0);
+    let c = client(&mock, store.clone(), Browser::Idle);
+    assert!(matches!(c.restore_blocking(), AuthState::SignedIn(_)));
+}
+
+#[test]
+fn a_huge_expires_in_does_not_overflow() {
+    let mock = Mock::start();
+    mock.with(|m| m.signin_expires_in = u64::MAX);
+    let c = client(&mock, mem(), Browser::Good);
+    assert!(
+        matches!(sign_in(&c), AuthState::SignedIn(_)),
+        "{:?}",
+        c.state()
+    );
+    assert!(c.access_token().is_some());
 }
 
 #[test]

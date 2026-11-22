@@ -406,6 +406,14 @@ impl PrintPopup {
         }
     }
 
+    /// Warning codes of the printer profile in use, shown in the popup and
+    /// carried by every `print.prepare` result (`warnings`):
+    /// [`dc_print::profile::PROFILE_NOT_VALIDATED`] until the profile's
+    /// scale and orientation are checked against the printer.
+    pub fn profile_warnings(&self) -> Vec<&'static str> {
+        self.profile.warnings()
+    }
+
     /// The print job of the chosen resin and the settings in force.
     fn print_job(&self, resin: &Resin) -> PrintJob {
         PrintJob {
@@ -644,6 +652,21 @@ mod tests {
     fn en_it_parity() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("i18n");
         dc_i18n::parity::check_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unvalidated_profile_is_shown_with_its_warning() {
+        let p = PrintPopup::default();
+        assert_eq!(
+            p.profile_warnings(),
+            [dc_print::profile::PROFILE_NOT_VALIDATED]
+        );
+        for key in [
+            "print-profile-not-validated",
+            "print-profile-not-validated-body",
+        ] {
+            assert_ne!(t(key), key, "{key} has no text");
+        }
     }
 
     #[test]

@@ -27,9 +27,13 @@ pub const SCOPES: &str = "openid profile email offline_access";
 /// How long the browser step may take before the sign-in is abandoned.
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
-const LEEWAY_SECS: u64 = 60;
+/// Clock-skew tolerance of the id_token times: a computer clock a few minutes
+/// off must not break sign-in.
+const LEEWAY_SECS: u64 = 300;
 const EXPIRY_SKEW: Duration = Duration::from_secs(60);
 const DEFAULT_TOKEN_TTL: u64 = 3600;
+/// Upper bound of a server-sent `expires_in`, so `Instant + Duration` cannot overflow.
+const MAX_TOKEN_TTL: u64 = 86_400;
 const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
 const JWKS_TTL: Duration = Duration::from_secs(3600);
 const JWKS_MIN_REFETCH: Duration = Duration::from_secs(10);
@@ -140,6 +144,11 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Lifetime of an access token, `expires_in` bounded to [`MAX_TOKEN_TTL`].
+fn token_ttl(expires_in: Option<u64>) -> Duration {
+    Duration::from_secs(expires_in.unwrap_or(DEFAULT_TOKEN_TTL).min(MAX_TOKEN_TTL))
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -481,7 +490,15 @@ impl Inner {
         token: &str,
         nonce: Option<&str>,
     ) -> Result<jwt::IdClaims> {
-        let invalid = |e: jwt::JwtError| AuthError::new(AuthErrorCode::TokenInvalid, e.to_string());
+        // Time-only failures mean the computer clock is off: a distinct error
+        // that never forgets the stored session (see `wipe`).
+        let invalid = |e: jwt::JwtError| {
+            let code = match e {
+                jwt::JwtError::Expired | jwt::JwtError::NotYetValid => AuthErrorCode::Clock,
+                _ => AuthErrorCode::TokenInvalid,
+            };
+            AuthError::new(code, e.to_string())
+        };
         let kid = jwt::peek_kid(token).map_err(invalid)?;
         let jwks = self.jwks(disc, kid.as_deref())?;
         let expect = Expect {
@@ -539,8 +556,7 @@ impl Inner {
             ));
         }
         Ok(Session {
-            expires_at: Instant::now()
-                + Duration::from_secs(tok.expires_in.unwrap_or(DEFAULT_TOKEN_TTL)),
+            expires_at: Instant::now() + token_ttl(tok.expires_in),
             access_token: tok.access_token,
             refresh_token: tok.refresh_token,
             user,
@@ -647,17 +663,26 @@ impl Inner {
     /// Exchanges the refresh token for new tokens and persists the rotated one
     /// at once (the old one is spent). The caller holds `refresh_lock`.
     fn refresh_locked(&self, disc: &Discovery) -> Result<TokenResponse> {
-        let in_memory = lock(&self.shared)
-            .session
-            .as_ref()
-            .and_then(|s| s.refresh_token.clone());
-        let rt = match in_memory {
-            Some(t) => t,
-            None => self
-                .store
-                .load(&self.issuer)?
-                .ok_or(AuthErrorCode::NotSignedIn)?,
+        let (in_memory, store_ok) = {
+            let sh = lock(&self.shared);
+            (
+                sh.session.as_ref().and_then(|s| s.refresh_token.clone()),
+                sh.warning.is_none(),
+            )
         };
+        // Another instance of the app may have rotated the token since we read
+        // it: the stored one wins when it differs, unless the store has been
+        // failing (then it may hold an older, spent token).
+        let stored = if in_memory.is_none() || store_ok {
+            match self.store.load(&self.issuer) {
+                Ok(t) => t,
+                Err(e) if in_memory.is_none() => return Err(e),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let rt = stored.or(in_memory).ok_or(AuthErrorCode::NotSignedIn)?;
         let tok = match self.token_request(
             disc,
             &[
@@ -733,8 +758,7 @@ impl Inner {
                 return Err(AuthErrorCode::NotSignedIn.into());
             };
             s.access_token = tok.access_token;
-            s.expires_at =
-                Instant::now() + Duration::from_secs(tok.expires_in.unwrap_or(DEFAULT_TOKEN_TTL));
+            s.expires_at = Instant::now() + token_ttl(tok.expires_in);
             match fresh_user {
                 Some(u) if u != s.user => {
                     s.user = u;

@@ -47,7 +47,7 @@ fn set_params() -> Value {
         "type": "object",
         "properties": {
             "enabled": {
-                "description": "true: send anonymous diagnostic data (a new random installation number is made); false: stop, and delete the reports not sent yet and the number.",
+                "description": "Must be false: stop sending anonymous diagnostic data, and delete the reports not sent yet and the installation number. true is refused (error consent-only-in-app): only the user gives consent, with the checkbox of the app (the first-start question or Settings).",
                 "type": "boolean"
             }
         },
@@ -127,6 +127,19 @@ pub fn enabled_param(params: &Value) -> Result<bool, String> {
     }
 }
 
+/// The error of [`SET`] with `enabled: true`.
+pub const CONSENT_ONLY_IN_APP: &str = "consent-only-in-app: diagnostic data is sent only after the user ticks the box in the app (the first-start question or Settings); the CLI, MCP and the app bridge can only turn it off (`enabled: false`)";
+
+/// The parameters of [`SET`] as the CLI, MCP and the app bridge take them:
+/// only `enabled: false`. Turning diagnostics on is the user's explicit
+/// opt-in, so `true` fails with [`CONSENT_ONLY_IN_APP`].
+pub fn off_param(params: &Value) -> Result<(), String> {
+    if enabled_param(params)? {
+        return Err(CONSENT_ONLY_IN_APP.into());
+    }
+    Ok(())
+}
+
 /// The output of [`STATUS`]: `asked` is the stored consent (`None`: the
 /// user was not asked yet).
 pub fn status_json(diag: &Diagnostics, asked: Option<bool>) -> Value {
@@ -171,17 +184,17 @@ impl Headless {
         let file = self.paths.settings();
         match id {
             SET => {
-                let on = enabled_param(params)?;
-                let install_id = self.diag.set_enabled(on);
+                off_param(params)?;
+                let install_id = self.diag.set_enabled(false);
                 settings::write_consent(
                     &file,
                     &Consent {
-                        enabled: Some(on),
+                        enabled: Some(false),
                         install_id,
                     },
                 )
                 .map_err(|e| format!("cannot save the setting: {e}"))?;
-                Ok(status_json(&self.diag, Some(on)))
+                Ok(status_json(&self.diag, Some(false)))
             }
             STATUS | PREVIEW | SEND => {
                 no_params_given(params)?;
@@ -250,6 +263,24 @@ mod tests {
     }
 
     #[test]
+    fn agents_can_only_turn_diagnostics_off() {
+        assert_eq!(off_param(&json!({"enabled": false})), Ok(()));
+        assert_eq!(
+            off_param(&json!({"enabled": true})),
+            Err(CONSENT_ONLY_IN_APP.to_owned())
+        );
+        assert!(CONSENT_ONLY_IN_APP.starts_with("consent-only-in-app:"));
+        assert!(off_param(&json!({"enabled": "no"})).is_err());
+        assert!(off_param(&json!({})).is_err());
+        assert!(
+            set_params()["properties"]["enabled"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("consent-only-in-app")
+        );
+    }
+
+    #[test]
     fn without_the_app_the_settings_file_holds_the_consent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
@@ -263,18 +294,31 @@ mod tests {
             (Value::Null, json!(0))
         );
         assert!(h.run(SEND, &Value::Null).is_err());
-        let on = h.run(SET, &json!({"enabled": true})).unwrap();
-        assert_eq!(on["enabled"], true);
-        let id = on["install_id"].as_str().unwrap().to_owned();
+        // the CLI cannot give the consent: nothing changes
         assert_eq!(
-            settings::read_consent(&paths.settings())
-                .install_id
-                .as_deref(),
-            Some(id.as_str())
+            h.run(SET, &json!({"enabled": true})),
+            Err(CONSENT_ONLY_IN_APP.to_owned())
         );
+        assert!(!h.diagnostics().enabled());
+        let c = settings::read_consent(&paths.settings());
+        assert_eq!((c.enabled, c.install_id), (None, None));
+        // the user ticks the box in the app
+        let id = h.diagnostics().set_enabled(true).unwrap();
+        settings::write_consent(
+            &paths.settings(),
+            &Consent {
+                enabled: Some(true),
+                install_id: Some(id.clone()),
+            },
+        )
+        .unwrap();
         // the next run reads it
         let again = Headless::new(paths.clone());
-        assert_eq!(again.run(STATUS, &json!({})).unwrap()["install_id"], id);
+        let st = again.run(STATUS, &json!({})).unwrap();
+        assert_eq!(
+            (st["enabled"].clone(), st["install_id"].clone()),
+            (json!(true), json!(id))
+        );
         assert_eq!(
             again.run(PREVIEW, &Value::Null).unwrap()["report"],
             Value::Null
@@ -283,6 +327,10 @@ mod tests {
         assert_eq!(
             (off["enabled"].clone(), off["install_id"].clone()),
             (json!(false), Value::Null)
+        );
+        assert_eq!(
+            settings::read_consent(&paths.settings()).enabled,
+            Some(false)
         );
         assert!(again.run(PREVIEW, &json!({"x": 1})).is_err());
         assert!(again.run("app.diagnostics.nope", &Value::Null).is_err());

@@ -19,13 +19,15 @@ struct Client {
 }
 
 impl Client {
+    /// Connects and proves the token of the bridge on `port` (its file is
+    /// where the app writes it).
     fn connect(port: u16) -> Self {
-        let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        Self {
-            r: BufReader::new(w.try_clone().unwrap()),
-            w,
-            id: 0,
-        }
+        use dc_app::control::auth;
+        let mut w = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r = BufReader::new(w.try_clone().unwrap());
+        let token = auth::read_token(&auth::token_file(&auth::token_dir().unwrap(), port)).unwrap();
+        auth::client_handshake(&mut r, &mut w, &token, port).unwrap();
+        Self { r, w, id: 0 }
     }
 
     fn raw(&mut self, line: &str) -> Value {
@@ -216,6 +218,9 @@ fn bridge_runs_commands_through_the_workspace() {
         assert!(e["message"].as_str().unwrap().contains("not available"));
         assert_eq!(c.call("nope", json!({})).unwrap_err()["code"], -32601);
         assert_eq!(c.raw("{not json")["error"]["code"], -32700);
+        // a line that is not JSON-RPC also ends the connection
+        let mut rest = String::new();
+        assert_eq!(c.r.read_line(&mut rest).unwrap(), 0, "{rest}");
     });
     drive(&mut h, client);
     assert_eq!(h.state().bridge().app.screen(), Screen::Workspace);

@@ -152,9 +152,11 @@ fn page(lang: Lang, title: &str, text: &str) -> String {
 }
 
 /// Waits for the redirect on `listener` (already bound to `127.0.0.1`), answers
-/// it with a small page and returns the validated code. Other requests get an
-/// error status and the wait goes on. Gives up when `cancel` is set
-/// ([`AuthErrorCode::Cancelled`]) or `deadline` passes ([`AuthErrorCode::Timeout`]).
+/// it with a small page and returns the validated code. Other requests, and
+/// redirects whose `state` is not ours (any web page or local program can
+/// reach the port), get an error status and the wait goes on. Gives up when
+/// `cancel` is set ([`AuthErrorCode::Cancelled`]) or `deadline` passes
+/// ([`AuthErrorCode::Timeout`]).
 pub fn wait_for_callback(
     listener: &TcpListener,
     lang: Lang,
@@ -189,6 +191,10 @@ pub fn wait_for_callback(
             continue;
         };
         match parse_request(&head, port) {
+            Request::Callback(params) if !params.get("state").is_some_and(|s| ct_eq(s, state)) => {
+                // not the answer to our request: it cannot end the sign-in
+                respond(&mut stream, 400, "Bad Request", &failure_page(lang));
+            }
             Request::Callback(params) => {
                 let result = validate_callback(&params, state, issuer);
                 match &result {
@@ -399,7 +405,49 @@ mod tests {
     }
 
     #[test]
-    fn bad_state_gets_the_failure_page() {
+    fn a_bad_state_gets_the_failure_page_and_the_wait_goes_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = AtomicBool::new(false);
+        let t = std::thread::scope(|sc| {
+            let h = sc.spawn(|| {
+                wait_for_callback(
+                    &listener,
+                    Lang::En,
+                    "s",
+                    ISS,
+                    &cancel,
+                    Instant::now() + Duration::from_secs(10),
+                )
+            });
+            // a forged redirect (another page, another program) cannot end it
+            let resp = fetch(
+                port,
+                &format!(
+                    "GET /callback?code=c&state=evil&iss=http%3A%2F%2F127.0.0.1%3A8787 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                ),
+            );
+            assert!(resp.starts_with("HTTP/1.1 400"));
+            let resp = fetch(
+                port,
+                &format!("GET /callback?code=c HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+            );
+            assert!(resp.starts_with("HTTP/1.1 400"));
+            assert!(!h.is_finished(), "still waiting for the real redirect");
+            let ok = fetch(
+                port,
+                &format!(
+                    "GET /callback?code=dcac_7&state=s&iss=http%3A%2F%2F127.0.0.1%3A8787 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                ),
+            );
+            assert!(ok.starts_with("HTTP/1.1 200"));
+            h.join().unwrap()
+        });
+        assert_eq!(t.unwrap().code, "dcac_7");
+    }
+
+    #[test]
+    fn a_wrong_iss_with_our_state_ends_the_wait() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let cancel = AtomicBool::new(false);
@@ -417,7 +465,7 @@ mod tests {
             let resp = fetch(
                 port,
                 &format!(
-                    "GET /callback?code=c&state=evil&iss=http%3A%2F%2F127.0.0.1%3A8787 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                    "GET /callback?code=c&state=s&iss=https%3A%2F%2Fevil.example HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
                 ),
             );
             assert!(resp.starts_with("HTTP/1.1 400"));

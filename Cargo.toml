@@ -53,6 +53,8 @@ ed25519-dalek = { version = "3.0.0", default-features = false }
 sha2 = "0.11.1"
 base64 = "0.23.1"
 getrandom = "0.4.3"
+# keyed hash of the `--control` bridge handshake (same build as dentalcraft-core)
+blake3 = { version = "1.8.7", default-features = false, features = ["std", "pure"] }  # "pure": no C/asm build step
 url = "2.5.8"
 serde = { version = "1.0.229", features = ["derive"] }
 # float_roundtrip: a project saved and opened again keeps every decimal number exactly

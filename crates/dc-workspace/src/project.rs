@@ -88,8 +88,9 @@ pub fn build(
     }
 }
 
-/// Saves `project` to `path` (atomic, see [`dc_project::save`]).
-pub fn save(path: &Path, project: &Project) -> Result<(), String> {
+/// Saves `project` to `path` (atomic, see [`dc_project::save`]). `Ok` holds
+/// the warnings of a save that succeeded (old backup kept, folder not synced).
+pub fn save(path: &Path, project: &Project) -> Result<Vec<dc_project::SaveWarning>, String> {
     dc_project::save(path, project).map_err(|e| e.to_string())
 }
 

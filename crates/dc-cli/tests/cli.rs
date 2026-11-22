@@ -673,12 +673,13 @@ fn the_diagnostics_commands_are_listed_and_described() {
         assert_eq!(entry["source"], "app");
     }
     let d = ok_json(&["describe", "app.diagnostics.set", "--json"]);
-    assert_eq!(d["label"], "Turn diagnostics on or off");
+    assert_eq!(d["label"], "Turn diagnostics off");
     assert_eq!(
         d["params_schema"]["properties"]["enabled"]["type"],
         "boolean"
     );
     assert!(d["doc"].as_str().unwrap().contains("installation number"));
+    assert!(d["doc"].as_str().unwrap().contains("consent-only-in-app"));
 }
 
 /// `dentalcraft-cli` with the app's folders under `root` (XDG) and the
@@ -758,18 +759,29 @@ fn diagnostics_from_the_command_line_follow_the_app_settings() {
     assert!(err.contains("diagnostics are off"), "{err}");
     let err = run_in(root, closed, r#"app.diagnostics.set={"enabled":"yes"}"#).unwrap_err();
     assert!(err.contains("true or false"), "{err}");
-    // on: the app's settings file says so
-    let on = run_in(root, closed, r#"app.diagnostics.set={"enabled":true}"#).unwrap();
-    let id = on["install_id"].as_str().unwrap().to_owned();
-    let settings: Value = serde_json::from_slice(
-        &std::fs::read(root.join("config/dentalcraft/settings.json")).unwrap(),
+    // the CLI cannot give the consent: only the user, with the app's checkbox
+    let err = run_in(root, closed, r#"app.diagnostics.set={"enabled":true}"#).unwrap_err();
+    assert!(err.contains("consent-only-in-app"), "{err}");
+    let settings_file = root.join("config/dentalcraft/settings.json");
+    let saved = || -> Value {
+        std::fs::read(&settings_file)
+            .ok()
+            .map_or(Value::Null, |b| serde_json::from_slice(&b).unwrap())
+    };
+    assert_eq!(saved()["diagnostics"], Value::Null);
+    let st = run_in(root, closed, "app.diagnostics.status").unwrap();
+    assert_eq!(st["enabled"], Value::Null);
+    // the user ticked the box in the app: its settings file says so
+    let id = "0b6f9c1e-2d3a-4b5c-8d7e-9f0a1b2c3d4e".to_owned();
+    std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_file,
+        json!({"diagnostics": true, "install_id": id}).to_string(),
     )
     .unwrap();
+    let on = run_in(root, closed, "app.diagnostics.status").unwrap();
     assert_eq!(
-        (
-            settings["diagnostics"].clone(),
-            settings["install_id"].clone()
-        ),
+        (on["enabled"].clone(), on["install_id"].clone()),
         (json!(true), json!(id))
     );
     // an event the app queued
@@ -811,6 +823,13 @@ fn diagnostics_from_the_command_line_follow_the_app_settings() {
     let off = run_in(root, closed, r#"app.diagnostics.set={"enabled":false}"#).unwrap();
     assert_eq!(
         (off["enabled"].clone(), off["install_id"].clone()),
+        (json!(false), Value::Null)
+    );
+    assert_eq!(
+        (
+            saved()["diagnostics"].clone(),
+            saved()["install_id"].clone()
+        ),
         (json!(false), Value::Null)
     );
 }

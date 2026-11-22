@@ -167,6 +167,7 @@ auth-error-access-denied = The sign-in was declined in the browser.
 auth-error-server-rejected = The sign-in service refused the request. Try again or contact support.
 auth-error-invalid-grant = The sign-in expired. Sign in again.
 auth-error-token-invalid = The sign-in could not be verified. Try again or contact support.
+auth-error-clock = The clock of this computer looks wrong, so the sign-in cannot be checked. Set the correct date and time, then try again.
 auth-error-cancelled = Sign-in cancelled.
 auth-error-storage-unavailable = Signed in, but the system keyring is not available: you will need to sign in again next time.
 auth-error-not-signed-in = You are not signed in.

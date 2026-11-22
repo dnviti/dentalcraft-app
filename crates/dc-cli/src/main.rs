@@ -138,7 +138,9 @@ const MCP_HELP: &str = "\
 Runs a Model Context Protocol server (JSON-RPC, one message per line) on stdin and stdout. It works
 on its own headless case with the Aligners module, or with --connect PORT (or host:port) on the
 DentalCraft app started with `dentalcraft --control PORT`, whose commands then run in the window
-and are undoable there.";
+and are undoable there. The connection proves the app's per-run token, read from the token file the
+app wrote for that port (it prints its path at start: control-PORT.token in $XDG_RUNTIME_DIR/dentalcraft
+on Linux, else in the `control` folder of the app's local data); DC_CONTROL_TOKEN_FILE names another file.";
 
 const APP_HELP: &str = "\
 Starts the DentalCraft app (`dentalcraft`), found next to dentalcraft-cli or on PATH, with ARGS.

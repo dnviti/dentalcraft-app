@@ -183,7 +183,7 @@ pub(crate) struct SaveTask {
     /// Asked for by the user (Save, Save as, leaving); `false`: the
     /// automatic save, which says nothing when it works.
     explicit: bool,
-    handle: JobHandle<Result<(), String>>,
+    handle: JobHandle<Result<Vec<dc_project::SaveWarning>, String>>,
 }
 
 /// A save asked for while another one runs: one save at a time, so it
@@ -1747,11 +1747,11 @@ impl Workspace {
             handle,
         } = save;
         let then = then.or(self.leave_after_save.take());
-        let failure = match handle.try_take() {
-            Some(Ok(Ok(()))) => None,
-            Some(Ok(Err(msg))) => Some(msg),
-            Some(Err(e)) => Some(e.to_string()),
-            None => Some(crate::t("ws-save-lost")),
+        let (failure, warnings) = match handle.try_take() {
+            Some(Ok(Ok(w))) => (None, w),
+            Some(Ok(Err(msg))) => (Some(msg), Vec::new()),
+            Some(Err(e)) => (Some(e.to_string()), Vec::new()),
+            None => (Some(crate::t("ws-save-lost")), Vec::new()),
         };
         match failure {
             None => {
@@ -1762,6 +1762,28 @@ impl Workspace {
                 self.read_only = false;
                 if explicit {
                     self.toast(Toast::new(ToastLevel::Success, "ws-toast-saved"));
+                }
+                // the file is saved, but the user must know its safety net
+                // (the backup, the disk sync) did not work: never silent
+                for w in &warnings {
+                    tracing::warn!(
+                        code = "save-warning",
+                        source = "save",
+                        module = self.module.id(),
+                        "{w}"
+                    );
+                    let (key, reason) = match w {
+                        dc_project::SaveWarning::Backup { reason, .. } => {
+                            ("ws-save-warning-backup", reason)
+                        }
+                        dc_project::SaveWarning::DirSync(reason) => {
+                            ("ws-save-warning-sync", reason)
+                        }
+                    };
+                    self.toast(
+                        Toast::new(ToastLevel::Warning, "ws-toast-save-warning")
+                            .with_detail(format!("{} ({reason})", crate::t(key))),
+                    );
                 }
                 self.actions.push_back(WorkspaceAction::Saved(path));
                 match then {
