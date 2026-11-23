@@ -1745,10 +1745,10 @@ impl Workspace {
                     self.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 }
                 Some(Ok(Err(e))) => {
-                    self.log_failure("command", None, &label, &e);
+                    self.log_failure("command", Some(command), &label, &e);
                     self.job_error("ws-toast-command-failed", error_text(e));
                 }
-                Some(Err(e)) => self.job_panic(None, &label, &e),
+                Some(Err(e)) => self.job_panic(Some(command), &label, &e),
                 None => {}
             },
             Task::Save(save) => self.finish_save(*save),
