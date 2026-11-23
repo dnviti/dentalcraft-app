@@ -30,6 +30,7 @@ use egui::{RichText, Ui};
 use serde_json::{Value, json};
 
 use crate::function::caption;
+use crate::plan_warnings::show_blocks;
 use crate::select::Component;
 use crate::setup::{
     Choice, Number, ResultLine, choice, flag, num, number, show_result_lines, slider, tr,
@@ -308,6 +309,7 @@ impl Workspace {
         };
         let advanced = dc_module_api::advanced_ui(ui.ctx());
         show_result_lines(ui, result_lines(data, Date::today(), advanced));
+        show_blocks(ui, self.plan_warnings.staging_blocks(data));
     }
 
     /// The parameters of the aligners and of their calendar, read from the
@@ -524,7 +526,8 @@ impl Workspace {
         }
         if let Some(p) = send {
             self.staging_ui.speed = None;
-            self.run_module_command(TOOTH_SPEED_CMD, p);
+            // its report holds the warnings of the aligners it computed again
+            self.run_manual(TOOTH_SPEED_CMD, p);
         }
     }
 }

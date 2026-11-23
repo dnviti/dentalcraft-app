@@ -318,7 +318,7 @@ fn base_report(out: &Value) -> Reported {
 }
 
 /// The output of the step `id` in the `steps` of a wrapper command.
-fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
+pub(crate) fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
     out["steps"]
         .as_array()?
         .iter()

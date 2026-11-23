@@ -320,3 +320,60 @@ fn the_periodontal_choices_wrap_in_the_narrowest_inspector() {
     }
     assert_eq!(l.inspector_overflow, 0.0, "{l:?}");
 }
+
+/// The errors of the project file that this release added reach an Italian
+/// screen in Italian: no English sentence of the core, the technical detail
+/// (entry, path) kept.
+#[test]
+fn italian_project_file_errors() {
+    use dc_project::{DcprjError, LoadIssue};
+    dc_i18n::set_language(dc_i18n::Lang::It).unwrap();
+    // the sentences of the core errors, in lower case
+    let english = [
+        "cannot",
+        "contains",
+        "invalid number",
+        "previous file",
+        "unchanged",
+        "differs",
+        "manifest",
+        "could not",
+        "duplicate",
+        "mesh",
+    ];
+    let clean = |text: &str| {
+        let low = text.to_lowercase();
+        for word in english {
+            assert!(!low.contains(word), "{word} in {text}");
+        }
+    };
+    let text = dc_workspace::error_text(&DcprjError::NonFinite {
+        entry: "modules/aligners/state.json".to_owned(),
+        path: "/setup/poses/11/t/0".to_owned(),
+    });
+    assert!(
+        text.contains("modules/aligners/state.json") && text.contains("/setup/poses/11/t/0"),
+        "{text}"
+    );
+    assert!(text.contains("Non salvato"), "{text}");
+    clean(&text);
+    clean(&dc_workspace::error_text(&DcprjError::Corrupt(
+        "duplicate archive entry names".to_owned(),
+    )));
+    let blob = dc_case::BlobRef::of_bytes(b"x");
+    clean(&dc_workspace::issue_text(&LoadIssue::MissingBlob(blob)));
+    clean(&dc_workspace::issue_text(&LoadIssue::UnreadableEntry {
+        path: dc_project::HISTORY_PATH.to_owned(),
+        reason: "x".to_owned(),
+    }));
+    clean(&dc_workspace::issue_text(&LoadIssue::UnreadableEntry {
+        path: "case.json".to_owned(),
+        reason: "size 12 differs from the manifest (10 bytes)".to_owned(),
+    }));
+    clean(&dc_workspace::blocking_issues_text(&[
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+    ]));
+}

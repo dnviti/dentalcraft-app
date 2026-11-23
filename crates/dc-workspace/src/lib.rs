@@ -56,6 +56,7 @@ mod manual;
 mod menu;
 mod overlay;
 mod panels;
+mod plan_warnings;
 mod print;
 mod production;
 mod project;
@@ -73,7 +74,7 @@ mod workspace;
 pub use dc_scan_ui::ScanTicket;
 pub use menu::filter_ids;
 pub use panels::{PanelWidths, WorkspaceLayout};
-pub use project::{now_rfc3339, project_codecs};
+pub use project::{blocking_issues_text, error_text, issue_text, now_rfc3339, project_codecs};
 pub use workspace::{Workspace, WorkspaceAction};
 
 dc_i18n::bundle!(pub(crate) fn loader);

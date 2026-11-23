@@ -1017,6 +1017,8 @@ struct FeedbackCommand {
     spec: CommandSpec,
     params: Value,
     sink: Arc<Mutex<Vec<(String, Value)>>>,
+    /// Told what the output warns about, with the case it produced.
+    warnings: crate::plan_warnings::PlanWarnings,
 }
 
 impl Command for FeedbackCommand {
@@ -1030,6 +1032,7 @@ impl Command for FeedbackCommand {
 
     fn apply(&self, state: &CaseState, ctx: &JobCtx) -> Result<CaseState, CommandError> {
         let (next, out) = self.spec.execute(state, &self.params, ctx)?;
+        self.warnings.record(self.spec.id, &out, &next);
         if let Ok(mut sink) = self.sink.lock() {
             sink.push((self.spec.id.to_owned(), out));
         }
@@ -1336,6 +1339,7 @@ impl Workspace {
             spec,
             params,
             sink: Arc::clone(&self.manual.sink),
+            warnings: self.plan_warnings.clone(),
         }));
     }
 

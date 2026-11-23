@@ -301,6 +301,8 @@ pub struct Workspace {
     /// The parameter of "Aligners" being dragged or typed, and the speed
     /// chosen for the selected tooth.
     pub(crate) staging_ui: crate::staging::StagingUi,
+    /// What the last runs of the aligners and of the tooth marks warned about.
+    pub(crate) plan_warnings: crate::plan_warnings::PlanWarnings,
     /// The production setting being dragged or typed.
     pub(crate) production_ui: crate::production::ProductionUi,
     /// The filter and the record chosen in "Clinical review".
@@ -455,6 +457,7 @@ impl Workspace {
             segment: leaf::SegmentUi::default(),
             setup_ui: crate::setup::SetupUi::default(),
             staging_ui: crate::staging::StagingUi::default(),
+            plan_warnings: crate::plan_warnings::PlanWarnings::default(),
             production_ui: crate::production::ProductionUi::default(),
             review_ui: crate::review::ReviewUi::default(),
             diagnosis_ui: leaf::DiagnosisUi::default(),
@@ -1939,6 +1942,13 @@ impl Workspace {
     fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
         // a leaf that lists parts to print opens the print popup with them
         self.open_print_from(out);
+        // the aligners it computed: what they warn about, for the inspector
+        if (id == leaf::ALIGNERS || id == leaf::AUTO)
+            && let Some(staging) = leaf::step_output(out, crate::plan_warnings::STAGING_STEP)
+        {
+            let state = self.undo.current().clone();
+            self.plan_warnings.record_staging(staging, &state);
+        }
         // an arch chosen by hand: what it cleared, as a role change says it
         if id == leaf::SET_ARCH {
             self.show_role_report(out);

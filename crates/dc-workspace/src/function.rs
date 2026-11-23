@@ -116,6 +116,7 @@ const IMPORT: Function = Function {
 static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::FIND_TEETH,
+        results: Some(Workspace::marks_results),
         params: Params::Module,
         corrections: Corrections::Tools(&[
             Tool::Seeds,
