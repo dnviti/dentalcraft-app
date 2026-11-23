@@ -778,6 +778,7 @@ ws-prod-trim-axis-per-tooth = Each tooth its own path
 ws-prod-group-shell = Shell
 ws-prod-shell-thickness = Shell thickness
 ws-prod-shell-clearance = Inner clearance
+ws-prod-shell-gum-clearance = Space over the gum
 ws-prod-group-stamp = Identification text
 ws-prod-stamp-enabled = Text inside every aligner (arch, number, date)
 ws-prod-stamp-off = The aligners have no text: they are told apart only by the name of their file.

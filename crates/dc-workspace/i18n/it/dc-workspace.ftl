@@ -778,6 +778,7 @@ ws-prod-trim-axis-per-tooth = Un asse per ogni dente
 ws-prod-group-shell = Guscio
 ws-prod-shell-thickness = Spessore del guscio
 ws-prod-shell-clearance = Gioco interno
+ws-prod-shell-gum-clearance = Spazio sopra la gengiva
 ws-prod-group-stamp = Scritta di riconoscimento
 ws-prod-stamp-enabled = Scritta dentro ogni allineatore (arcata, numero, data)
 ws-prod-stamp-off = Gli allineatori escono senza scritta: si riconoscono solo dal nome del file.

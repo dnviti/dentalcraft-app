@@ -239,6 +239,13 @@ const GROUPS: &[(&str, &str, &[Item])] = &[
                 2,
                 "mm",
             )),
+            Item::Number(number(
+                "gum_clearance_mm",
+                "ws-prod-shell-gum-clearance",
+                0.05,
+                2,
+                "mm",
+            )),
         ],
     ),
     (
