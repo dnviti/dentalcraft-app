@@ -421,23 +421,39 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
 }
 
 impl Workspace {
-    /// Why Bite does not apply to the case: it has one arch, so it has no
-    /// bite (`dca_model::bite_use`): nothing is registered or estimated, and
-    /// a bite an old project stores is not shown. `None` otherwise.
-    pub(crate) fn bite_not_applicable(&self) -> Option<String> {
-        let state = self.undo.current();
-        if !BiteUse::of(state).one_arch() {
-            return None;
+    /// The inspector of Bite when it does not apply to the case: one arch,
+    /// so no bite (`dca_model::bite_use`), nothing registered or estimated,
+    /// and a bite an old project stores not shown. It says so, and lists the
+    /// bite scans the case still holds with their bins; no run, no tools.
+    /// `false` (nothing drawn): Bite applies.
+    pub(crate) fn bite_not_applicable(&mut self, ui: &mut Ui) -> bool {
+        let state = self.undo.current().clone();
+        if !BiteUse::of(&state).one_arch() {
+            return false;
         }
         let role = if state.case.scan(ScanRole::Upper).is_some() {
             ScanRole::Upper
         } else {
             ScanRole::Lower
         };
-        Some(dc_i18n::tr_args(
-            "ws-bite-one-arch",
-            &[("arch", &t(arch_key(role)))],
-        ))
+        ui.add_space(10.0);
+        widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-applicable"));
+        ui.add_space(8.0);
+        crate::function::caption(
+            ui,
+            dc_i18n::tr_args("ws-bite-one-arch", &[("arch", &t(arch_key(role)))]),
+        );
+        let bites: Vec<&Scan> = state
+            .case
+            .scans
+            .iter()
+            .filter(|s| s.role == ScanRole::Bite)
+            .collect();
+        if !bites.is_empty() {
+            ui.add_space(8.0);
+            self.bite_scan_rows(ui, &bites);
+        }
+        true
     }
 
     /// The report of the last bite (the plugin's "Situazione" box).
@@ -524,6 +540,13 @@ impl Workspace {
                     .color(c.text_primary),
             );
         }
+        self.bite_scan_rows(ui, &bites);
+        self.bite_import_button(ui, &bites);
+    }
+
+    /// The rows of the bite scans `bites`, each with its bin (asks first).
+    fn bite_scan_rows(&mut self, ui: &mut Ui, bites: &[&Scan]) {
+        let c = *colors(ui);
         let busy = self.is_busy();
         let mut remove = None;
         for (k, s) in bites.iter().enumerate() {
@@ -549,6 +572,11 @@ impl Workspace {
         if let Some(id) = remove {
             self.ask_remove_scan(id);
         }
+    }
+
+    /// The button that imports the bite scans, and (advanced) what a run does
+    /// with or without them.
+    fn bite_import_button(&mut self, ui: &mut Ui, bites: &[&Scan]) {
         ui.add_space(6.0);
         if Button::secondary(t("ws-bite-import"))
             .enabled(!self.is_busy())

@@ -36,6 +36,8 @@ use crate::workspace::Workspace;
 
 /// A part of an inspector the workspace draws.
 type Draw = fn(&mut Workspace, &mut Ui);
+/// A part of an inspector the workspace draws when it applies (`true`).
+type Draw2 = fn(&mut Workspace, &mut Ui) -> bool;
 
 /// Who draws the parameters of a function.
 #[derive(Clone, Copy)]
@@ -84,10 +86,10 @@ struct Function {
     advanced_corrections: bool,
     /// [`Function::more`] is only advanced options.
     advanced_more: bool,
-    /// Why the function does not apply to the case, in the words of the app
-    /// (`None`: it applies). The inspector then says so in place of its
-    /// status, parameters, run button and corrections: nothing to run.
-    not_applicable: Option<fn(&Workspace) -> Option<String>>,
+    /// Draws, when the function does not apply to the case, what the
+    /// inspector shows in place of its status, parameters, run button and
+    /// corrections, and returns `true`; `false` (nothing drawn): it applies.
+    not_applicable: Option<Draw2>,
 }
 
 /// The tools shown only with the advanced options on (the region view of
@@ -297,11 +299,9 @@ impl Workspace {
             return;
         }
         let f = of(id);
-        if let Some(why) = f.not_applicable.and_then(|why| why(self)) {
-            ui.add_space(10.0);
-            widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-applicable"));
-            ui.add_space(8.0);
-            caption(ui, why);
+        if let Some(draw) = f.not_applicable
+            && draw(self, ui)
+        {
             return;
         }
         let done = self.is_done(id);

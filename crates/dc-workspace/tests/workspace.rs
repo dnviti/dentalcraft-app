@@ -216,8 +216,9 @@ fn renders_with_synthetic_project() {
         h.query_by_label_contains("Both jaws, occlusal view from below, stage 00")
             .is_some()
     );
-    // import counts as done once the case has scans
-    let label = format!("Treatment workflow 1/{}", leaf_count());
+    // import counts as done once the case has scans, and the bite with them:
+    // one arch has none
+    let label = format!("Treatment workflow 2/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
     // scrub to the last stage with End
     h.key_press(Key::End);
@@ -388,6 +389,15 @@ fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
     // the inspector is the panel on the right
     let inspector = 1920.0 - 360.0;
     for (function, tools) in TOOLS {
+        // one arch has no bite: its tools are tried on both arches
+        if function == "aligners.occlusion.align" {
+            h = harness(Workspace::new_headless(
+                module(),
+                Some(demo_project(&["lower", "upper"])),
+                None,
+            ));
+            h.run();
+        }
         h.state_mut().ws.select_item(function);
         h.run();
         assert!(
@@ -1062,7 +1072,8 @@ fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
     let label = format!("Treatment workflow 0/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
 
-    // confirming it settles the step, and one undo takes it back
+    // confirming it settles the step (and the bite, which one arch has not),
+    // and one undo takes it back
     h.get_by_label("Confirm").click();
     settle(&mut h);
     assert_eq!(
@@ -1070,7 +1081,7 @@ fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
         RoleSource::Explicit
     );
     assert!(h.query_by_label("Provisional").is_none());
-    let label = format!("Treatment workflow 1/{}", leaf_count());
+    let label = format!("Treatment workflow 2/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run();

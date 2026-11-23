@@ -1560,8 +1560,8 @@ fn a_history_the_cli_saved_with_results_the_case_no_longer_holds_marks_nothing_d
     let mut h = harness(ws);
     h.run();
     assert!(
-        h.query_by_label("Treatment workflow 2/9").is_some(),
-        "import and the colours only"
+        h.query_by_label("Treatment workflow 3/9").is_some(),
+        "import, the colours and the bite, which one arch has not"
     );
     // its next save writes the history as it is
     h.state_mut().ws.save();
