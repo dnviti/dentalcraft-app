@@ -50,6 +50,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     STUBBORN.store(false, Ordering::SeqCst);
     OTHER_DONE.store(false, Ordering::SeqCst);
     REFUSE.store(false, Ordering::SeqCst);
+    *METHOD.lock().unwrap() = "virtual_bite";
     g
 }
 
@@ -75,7 +76,10 @@ fn run_export(
         }
     }
     let out = json!({ "dir": params["dir"], "files": [{}, {}, {}] });
-    Ok((state.clone(), out))
+    // the export records its folder in the case
+    let mut exported = state.clone();
+    exported.case.patient_code.push('x');
+    Ok((exported, out))
 }
 
 fn run_visit(
@@ -84,7 +88,10 @@ fn run_visit(
     _ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((VISIT, params.clone()));
-    Ok((state.clone(), json!({ "teeth": 14, "on_track": 11 })))
+    // a visit is added to the case
+    let mut visited = state.clone();
+    visited.case.patient_code.push('v');
+    Ok((visited, json!({ "teeth": 14, "on_track": 11 })))
 }
 
 fn run_bite(
@@ -93,7 +100,18 @@ fn run_bite(
     _ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((BITE, params.clone()));
-    Ok((state.clone(), json!({ "method": *METHOD.lock().unwrap() })))
+    let method = *METHOD.lock().unwrap();
+    if method == "not_applicable" {
+        // one arch: no bite, the case is given back as it came
+        return Ok((
+            state.clone(),
+            json!({ "applies": false, "reason": "one_arch" }),
+        ));
+    }
+    // a bite moves an arch: the case changes
+    let mut moved = state.clone();
+    moved.case.patient_code.push('+');
+    Ok((moved, json!({ "method": method })))
 }
 
 fn run_other(
@@ -409,6 +427,21 @@ fn the_bite_says_which_method_ran() {
         // a bite is a change of the case: one undo step
         assert!(ws.undo());
     }
+}
+
+#[test]
+fn a_bite_that_does_not_apply_warns_of_no_estimate_and_changes_nothing() {
+    let _g = exclusive();
+    *METHOD.lock().unwrap() = "not_applicable";
+    let mut ws = fake();
+    ws.run_leaf(BITE);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(ws.sticky_toast_keys().is_empty());
+    // the case is as it was: not unsaved, no undo step, nothing recorded
+    assert!(!ws.is_dirty());
+    assert!(!ws.undo());
+    assert!(ws.history().records().is_empty());
 }
 
 #[test]

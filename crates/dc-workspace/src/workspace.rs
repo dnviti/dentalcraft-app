@@ -1829,7 +1829,12 @@ impl Workspace {
         match taken {
             Some(Ok(Ok((state, out)))) => {
                 self.clear_step_errors();
-                if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
+                // a leaf that only reads or reports (a listing, a bite that
+                // does not apply) gives the case back as it got it: no undo
+                // step, nothing to save
+                if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id))
+                    && !same_case(&state, self.undo.current())
+                {
                     let import = matches!(kind, SpecKind::Import | SpecKind::ScanImport(_));
                     let by = self.change_by(command, import);
                     self.push_state(Arc::new(state), label, by);

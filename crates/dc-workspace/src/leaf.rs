@@ -127,6 +127,12 @@ pub(crate) struct Reported {
 pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
     match id {
         BITE => {
+            // not applicable (one arch: there is no bite): nothing was put
+            // in occlusion, nothing was estimated, nothing to warn about;
+            // the inspector says why
+            if out["applies"] == false {
+                return None;
+            }
             let scan = out["method"] == "bite_scan";
             let (level, title, detail) = if scan {
                 (
@@ -1186,6 +1192,15 @@ mod tests {
                 && changes_case(BITE)
                 && changes_case(VISITS)
         );
+    }
+
+    #[test]
+    fn a_bite_that_does_not_apply_has_no_notification() {
+        let none = json!({ "applies": false, "reason": "one_arch" });
+        assert!(report(BITE, &none).is_none());
+        // an estimate still warns, a bite scan does not
+        assert!(report(BITE, &json!({ "method": "virtual_bite" })).is_some_and(|r| r.sticky));
+        assert!(report(BITE, &json!({ "method": "bite_scan" })).is_some_and(|r| !r.sticky));
     }
 
     #[test]
