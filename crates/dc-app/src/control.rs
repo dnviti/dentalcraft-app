@@ -1400,11 +1400,21 @@ impl Bridge {
         }
         Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
             Ok(Ok(v)) => Some(Ok(v)),
-            Ok(Err(e)) if e.is_invalid_call() => Some(Err(RpcError::new(
-                codes::INVALID_PARAMS,
-                format!("{id}: {e}"),
-            ))),
-            Ok(Err(e)) => Some(Err(RpcError::host(format!("{id}: {e}")))),
+            Ok(Err(e)) => {
+                // refused as the window's run is: in the log, with its code
+                tracing::warn!(
+                    diag = true,
+                    code = e.code(),
+                    source = "print",
+                    command = id,
+                    "{id}: {e}"
+                );
+                Some(Err(if e.is_invalid_call() {
+                    RpcError::new(codes::INVALID_PARAMS, format!("{id}: {e}"))
+                } else {
+                    RpcError::host(format!("{id}: {e}"))
+                }))
+            }
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => Some(Err(RpcError::host(format!(
                 "{id}: the print work stopped unexpectedly"

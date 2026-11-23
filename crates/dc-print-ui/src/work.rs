@@ -349,8 +349,9 @@ pub(crate) fn prepare(
 /// shell is refused (`print-model-mismatch`). Any other part is left to
 /// the pipeline's guess from its shape.
 fn read_part(s: &Source) -> Result<(PrintPart, FittingSource), Failure> {
+    // exact: welding the points of a thin wall would join its two faces
     let read = |p: &Path| {
-        dc_mesh::io::read(p)
+        dc_print::part::read_mesh(p)
             .map_err(|e| Failure::new("print-read", format!("{}: {e}", p.display())))
     };
     let mesh = read(&s.path)?;
