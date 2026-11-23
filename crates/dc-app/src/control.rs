@@ -1484,6 +1484,13 @@ impl Bridge {
                     )));
                 };
                 let target = dc_session::with_extension(target);
+                // as the session: the file opened read-only is never written over
+                if ws.is_read_only() && ws.path() == Some(target.as_path()) {
+                    return Step::Done(Err(RpcError::host(format!(
+                        "{} was opened read-only: save it to another path",
+                        target.display()
+                    ))));
+                }
                 ws.save_to(target.clone());
                 return Self::after_jobs(move |ws| {
                     if ws.path() == Some(target.as_path()) && !ws.is_dirty() {

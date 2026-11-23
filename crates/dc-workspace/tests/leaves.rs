@@ -483,3 +483,29 @@ fn after_the_cross_the_status_bar_says_it_is_stopping_until_the_job_ends() {
     assert!(h.state().toast_keys().contains(&"job-cancelled".to_owned()));
     assert!(h.query_by_label_contains("Stopping at the end").is_none());
 }
+
+#[test]
+fn an_export_is_done_on_the_case_it_exported_until_the_case_changes() {
+    let _g = exclusive();
+    let mut ws = fake();
+    ws.answer_leaf_input(EXPORT, Some(PathBuf::from("/tmp/dc-done")));
+    assert!(ws.wait_for_jobs(WAIT));
+    // its run is in the step history; the case shows nothing of the files
+    let record = ws.history().record(EXPORT).unwrap();
+    assert!(record.failed.is_none() && !record.by_hand);
+    let mut h = harness(ws);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_some());
+    // the bite moves an arch: the files no longer show the case
+    h.state_mut().run_leaf(BITE);
+    settle(&mut h);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_none());
+    assert!(h.state().history().record(EXPORT).is_none());
+    // undo: back to the case the export wrote, done again
+    assert!(h.state_mut().undo());
+    h.run();
+    assert!(h.query_by_label("Done").is_some());
+}

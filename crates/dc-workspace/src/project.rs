@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dc_case::CaseState;
+use dc_command::StepHistory;
 use dc_module_api::Module;
 use dc_project::{AppInfo, Manifest, ModuleCodecs, Project};
-use serde_json::Value;
 
 /// Writer information stored in new manifests.
 pub fn app_info() -> AppInfo {
@@ -64,13 +64,16 @@ pub fn with_extension(path: PathBuf) -> PathBuf {
 }
 
 /// The project to write: `manifest` (or a new one) with the modification
-/// time set to now, `state`, the step history JSON and the thumbnail.
+/// time set to now, `state`, its step history and the thumbnail. `Err`: the
+/// history could not be written as JSON (then nothing is saved).
 pub fn build(
     manifest: Option<&Manifest>,
     state: &Arc<CaseState>,
-    history: &Value,
+    history: &StepHistory,
     thumbnail: Option<&Vec<u8>>,
-) -> Project {
+) -> Result<Project, String> {
+    let history =
+        serde_json::to_value(history).map_err(|e| format!("{}: {e}", dc_project::HISTORY_PATH))?;
     let now = now_rfc3339();
     let manifest = match manifest {
         Some(m) => {
@@ -80,12 +83,12 @@ pub fn build(
         }
         None => Manifest::new(app_info(), now),
     };
-    Project {
+    Ok(Project {
         manifest,
         case_state: CaseState::clone(state),
-        history: history.clone(),
+        history,
         thumbnail: thumbnail.cloned(),
-    }
+    })
 }
 
 /// Saves `project` to `path` (atomic, see [`dc_project::save`]). `Ok` holds

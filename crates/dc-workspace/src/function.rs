@@ -223,6 +223,30 @@ pub(crate) fn owner(tool: Tool) -> Option<&'static str> {
         .map(|f| f.id)
 }
 
+/// The function a command corrects by hand: the tools of its inspector, and
+/// the corrections that are not tools (the numbering in order and the marks
+/// cleared, the interpenetration corrected, the values of the analysis, the
+/// final position taken back, a tooth slowed, the decisions of the review).
+/// The corrections of "Import scans" (an arch chosen by hand, a scan removed
+/// or closed) are not: the module itself clears what depended on a scan.
+/// A new correction that is not a tool is listed here.
+pub(crate) fn corrected(command: &str) -> Option<&'static str> {
+    if let Some(f) = Tool::from_command(command).and_then(owner) {
+        return Some(f);
+    }
+    match command {
+        crate::manual::SEQUENCE | crate::manual::CLEAR_SEEDS => Some(leaf::FIND_TEETH),
+        crate::bite::CORRECT => Some(leaf::BITE),
+        leaf::DIAGNOSIS_EDIT => Some(leaf::CASE_ANALYSIS),
+        crate::setup::RESET => Some(leaf::SETUP),
+        crate::staging::TOOTH_SPEED_CMD => Some(leaf::ALIGNERS),
+        crate::review::DECIDE | crate::review::SET_VALUE | crate::review::BULK => {
+            Some(leaf::REVIEW)
+        }
+        _ => None,
+    }
+}
+
 /// The title of a section of the inspector, under a hairline.
 fn section(ui: &mut Ui, key: &str) {
     let c = *colors(ui);
@@ -470,6 +494,28 @@ mod tests {
         assert_eq!(owner(Tool::Adjust), Some(leaf::SETUP));
         assert_eq!(owner(Tool::ThreePoints), Some(leaf::BITE));
         assert_eq!(owner(Tool::ArchLine), Some(leaf::SETUP));
+    }
+
+    #[test]
+    fn a_correction_names_the_function_it_corrects() {
+        // the tools, by their command
+        assert_eq!(corrected(crate::manual::SEEDS), Some(leaf::FIND_TEETH));
+        assert_eq!(corrected(crate::manual::BRUSH), Some(leaf::SEGMENT));
+        assert_eq!(corrected(crate::archline::LINE), Some(leaf::SETUP));
+        // the corrections that are buttons
+        assert_eq!(corrected(crate::manual::SEQUENCE), Some(leaf::FIND_TEETH));
+        assert_eq!(corrected(crate::bite::CORRECT), Some(leaf::BITE));
+        assert_eq!(corrected(crate::review::BULK), Some(leaf::REVIEW));
+        // no correction: a setting, a run, the corrections of the import
+        for id in [
+            crate::setup::SETTINGS,
+            leaf::SEGMENT,
+            leaf::SET_ARCH,
+            leaf::MAKE_BASE,
+            "case.remove-scan",
+        ] {
+            assert_eq!(corrected(id), None, "{id}");
+        }
     }
 
     #[test]

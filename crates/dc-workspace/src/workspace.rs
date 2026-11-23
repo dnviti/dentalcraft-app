@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::autosave::{self, Autosave};
+use crate::history::{By, Steps};
 use crate::menu::MenuView;
 use crate::timeline::TimelineState;
 use crate::view::ViewState;
@@ -169,6 +170,8 @@ pub(crate) enum Task {
         handle: JobHandle<Result<CommandOutput, CommandError>>,
     },
     Command {
+        /// The command id, for the step history.
+        command: &'static str,
         label: String,
         handle: JobHandle<Result<CaseState, CommandError>>,
     },
@@ -270,8 +273,8 @@ pub struct Workspace {
     queued_save: Option<SaveRequest>,
     /// Where to go once the save that runs ends (nothing else to save).
     leave_after_save: Option<Exit>,
-    pub(crate) history: StepHistory,
-    history_json: Value,
+    /// The step history of each version of the case (`history/steps.json`).
+    pub(crate) steps: Steps,
     manifest: Option<Manifest>,
     thumbnail: Option<Vec<u8>>,
     pub(crate) path: Option<PathBuf>,
@@ -381,7 +384,7 @@ impl Workspace {
 
     fn build(module: Box<dyn Module>, project: Option<Project>, path: Option<PathBuf>) -> Self {
         crate::loader();
-        let (state, history_json, manifest, thumbnail) = match project {
+        let (state, history, manifest, thumbnail) = match project {
             Some(p) => (p.case_state, p.history, Some(p.manifest), p.thumbnail),
             None => (
                 CaseState::new(Case::new("")),
@@ -390,10 +393,10 @@ impl Workspace {
                 None,
             ),
         };
-        let history =
-            serde_json::from_value::<StepHistory>(history_json.clone()).unwrap_or_default();
         let state = Arc::new(state);
         let menu = module.menu();
+        let steps = Steps::open(&menu, history, &state, |id| module.leaf_done(&state, id));
+        let unreadable = steps.unreadable().map(str::to_owned);
         let commands = module.commands();
         let specs = module.command_specs();
         let mut shortcuts = Vec::new();
@@ -419,7 +422,7 @@ impl Workspace {
         let jobs = JobSystem::new(0)
             .or_else(|_| JobSystem::new(1))
             .expect("cannot start the background job threads");
-        Self {
+        let mut ws = Self {
             menu_view: MenuView::new(&menu),
             panels: crate::panels::Panels::default(),
             module,
@@ -433,12 +436,11 @@ impl Workspace {
             autosave: Autosave::default(),
             queued_save: None,
             leave_after_save: None,
-            history,
-            history_json,
+            steps,
             manifest,
             thumbnail,
             path,
-            read_only: false,
+            read_only: unreadable.is_some(),
             jobs,
             running: Vec::new(),
             dialog: None,
@@ -476,7 +478,22 @@ impl Workspace {
             print_marks: VecDeque::new(),
             agent_leaf: None,
             actions: VecDeque::new(),
+        };
+        if let Some(why) = unreadable {
+            // never written over with a history that lost its records
+            tracing::warn!(
+                code = "history-unreadable",
+                source = "project",
+                module = ws.module.id(),
+                "the step history of the project cannot be read: {why}"
+            );
+            ws.toast_sticky(
+                Toast::new(ToastLevel::Warning, "ws-toast-history-unreadable").with_detail(
+                    dc_i18n::tr_args("ws-history-unreadable-detail", &[("reason", &why)]),
+                ),
+            );
         }
+        ws
     }
 
     // ------------------------------------------------------------ accessors
@@ -530,9 +547,24 @@ impl Workspace {
     }
 
     /// Marks the project as read-only (opened from a damaged or newer
-    /// file): saving then always asks for a new path.
+    /// file): saving then always asks for a new path. A project whose step
+    /// history could not be read stays read-only: its file is never written
+    /// over with a history that lost its records.
     pub fn set_read_only(&mut self, read_only: bool) {
-        self.read_only = read_only;
+        self.read_only = read_only || self.steps.unreadable().is_some();
+    }
+
+    /// `true` when the file of the project must not be written over
+    /// ([`Workspace::set_read_only`]): saving asks for another file.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// The step history of the case as it is now, saved as
+    /// `history/steps.json`: the functions that ran, automatically or by
+    /// hand, whose results the case still holds.
+    pub fn history(&self) -> &StepHistory {
+        self.steps.history()
     }
 
     /// Tells the workspace whether a dialog of the shell (Settings) is on
@@ -631,20 +663,31 @@ impl Workspace {
 
     // ------------------------------------------------------------ actions
 
-    /// Undoes the last change (no-op while a command runs).
+    /// Undoes the last change (no-op while a command runs); the step history
+    /// goes back with it.
     pub fn undo(&mut self) -> bool {
-        if self.command_running() {
+        if self.command_running() || self.undo.undo().is_none() {
             return false;
         }
-        self.undo.undo().is_some()
+        self.follow_history();
+        true
     }
 
-    /// Redoes the last undone change (no-op while a command runs).
+    /// Redoes the last undone change (no-op while a command runs); the step
+    /// history comes back with it.
     pub fn redo(&mut self) -> bool {
-        if self.command_running() {
+        if self.command_running() || self.undo.redo().is_none() {
             return false;
         }
-        self.undo.redo().is_some()
+        self.follow_history();
+        true
+    }
+
+    /// The step history of the version of the case the undo stack is on.
+    fn follow_history(&mut self) {
+        let state = Arc::clone(self.undo.current());
+        let module = &self.module;
+        self.steps.follow(&state, |id| module.leaf_done(&state, id));
     }
 
     /// `true` while an import or a command changes the case in the
@@ -1260,6 +1303,7 @@ impl Workspace {
             self.toast(Toast::new(ToastLevel::Warning, "ws-toast-busy"));
             return;
         }
+        let command = cmd.id();
         let label = cmd.label_key().to_owned();
         let state = self.undo.current().clone();
         let handle = self
@@ -1267,7 +1311,11 @@ impl Workspace {
             .spawn(label.clone(), move |ctx| cmd.apply(&state, ctx));
         self.running.push(Running {
             name_key: "ws-job-command",
-            task: Task::Command { label, handle },
+            task: Task::Command {
+                command,
+                label,
+                handle,
+            },
         });
     }
 
@@ -1298,10 +1346,21 @@ impl Workspace {
     /// Saves the case as it is now to `path`, then goes to `then`. One save
     /// runs at a time: a save asked for while another runs joins it when
     /// that one writes this same case to the same file, else it starts when
-    /// that one ends (and saves the case as it is then).
+    /// that one ends (and saves the case as it is then). The file opened
+    /// read-only is never written over: the user is told to save to another
+    /// file, and an exit waiting for the save asks again.
     fn save_to_then(&mut self, path: PathBuf, then: Option<Exit>, explicit: bool) {
         let path = project::with_extension(path);
         let current = Arc::clone(self.undo.current());
+        // damaged, newer, or with a step history that cannot be read: the
+        // user's situation, not a failure to report
+        if self.read_only && self.path.as_deref() == Some(path.as_path()) {
+            self.job_error("ws-toast-save-failed", crate::t("ws-save-read-only"));
+            if let Some(exit) = then {
+                self.confirm_exit = Some(exit);
+            }
+            return;
+        }
         let queued = self.queued_save.is_some();
         let running = self.running.iter_mut().find_map(|r| match &mut r.task {
             Task::Save(s) => Some(s),
@@ -1321,12 +1380,21 @@ impl Workspace {
             }
             return;
         }
-        let proj = project::build(
+        // the history of the case saved, whatever put it on the undo stack
+        self.follow_history();
+        let built = project::build(
             self.manifest.as_ref(),
             &current,
-            &self.history_json,
+            self.steps.history(),
             self.thumbnail.as_ref(),
         );
+        let proj = match built {
+            Ok(p) => p,
+            Err(detail) => {
+                self.save_failed(&current, then, explicit, detail);
+                return;
+            }
+        };
         let manifest = proj.manifest.clone();
         let p = path.clone();
         let handle = self.jobs.spawn("ws-job-save", move |ctx| {
@@ -1505,8 +1573,9 @@ impl Workspace {
 
     /// `true` when command `id` counts as done: the case holds its result
     /// ([`Module::leaf_done`]), it is "Import scans" and the case has scans
-    /// none of which is still a guess to check, or its step has a successful
-    /// record in the step history.
+    /// none of which is still a guess to check, or it is a function that is
+    /// not a step of the workflow and whose run, in the step history, worked
+    /// on the case as it is (an export leaves nothing in the case).
     pub(crate) fn is_done(&self, id: &str) -> bool {
         if is_import_scans_command(id) {
             let scans = &self.undo.current().case.scans;
@@ -1519,7 +1588,7 @@ impl Workspace {
             }
         }
         self.module.leaf_done(self.undo.current(), id)
-            || self.history.record(id).is_some_and(|r| r.failed.is_none())
+            || self.steps.done_by_record(self.undo.current(), id)
     }
 
     // ------------------------------------------------------------ dialogs
@@ -1656,10 +1725,15 @@ impl Workspace {
                 }
                 self.finish_spec(kind, command, label, taken);
             }
-            Task::Command { label, handle } => match handle.try_take() {
+            Task::Command {
+                command,
+                label,
+                handle,
+            } => match handle.try_take() {
                 Some(Ok(Ok(state))) => {
                     self.clear_step_errors();
-                    self.undo.push(Arc::new(state), label);
+                    let by = self.change_by(command, false);
+                    self.push_state(Arc::new(state), label, by);
                 }
                 Some(Ok(Err(CommandError::Cancelled))) => {
                     self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
@@ -1676,6 +1750,30 @@ impl Workspace {
             },
             Task::Save(save) => self.finish_save(*save),
         }
+    }
+
+    /// What command `command` did to the case, for the step history: a run
+    /// of a function of the menu (`import`: of the function that imports
+    /// scans), a correction by hand of the function it corrects, or neither.
+    fn change_by(&self, command: &'static str, import: bool) -> Option<By> {
+        if import {
+            return self.steps.import().map(By::Run);
+        }
+        if let Some(f) = self.steps.function(command) {
+            return Some(By::Run(f));
+        }
+        crate::function::corrected(command)
+            .and_then(|f| self.steps.function(f))
+            .map(By::Hand)
+    }
+
+    /// Puts the version `state` of the case on the undo stack as the change
+    /// `label`, made by `by`, with its step history.
+    fn push_state(&mut self, state: Arc<CaseState>, label: String, by: Option<By>) {
+        let module = &self.module;
+        self.steps
+            .changed(&state, by, |id| module.leaf_done(&state, id));
+        self.undo.push(state, label);
     }
 
     /// A registered command run as a job ended: its state lands as one undo
@@ -1704,7 +1802,9 @@ impl Workspace {
             Some(Ok(Ok((state, out)))) => {
                 self.clear_step_errors();
                 if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
-                    self.undo.push(Arc::new(state), label);
+                    let import = matches!(kind, SpecKind::Import | SpecKind::ScanImport(_));
+                    let by = self.change_by(command, import);
+                    self.push_state(Arc::new(state), label, by);
                 }
                 match kind {
                     SpecKind::Import | SpecKind::ScanImport(_) => {
@@ -1760,6 +1860,7 @@ impl Workspace {
                 self.manifest = Some(manifest);
                 self.path = Some(path.clone());
                 self.read_only = false;
+                self.steps.saved();
                 if explicit {
                     self.toast(Toast::new(ToastLevel::Success, "ws-toast-saved"));
                 }
@@ -1793,31 +1894,43 @@ impl Workspace {
                     None => {}
                 }
             }
-            Some(detail) => {
-                self.autosave.failed(&state);
-                let key = if explicit {
-                    "ws-toast-save-failed"
-                } else {
-                    "ws-toast-autosave-failed"
-                };
-                tracing::error!(
-                    code = if explicit {
-                        "save-failed"
-                    } else {
-                        "autosave-failed"
-                    },
-                    source = "save",
-                    module = self.module.id(),
-                    "the project was not saved: {detail}"
-                );
-                self.job_error(key, detail);
-                if let Some(exit) = then {
-                    self.confirm_exit = Some(exit);
-                }
-            }
+            Some(detail) => self.save_failed(&state, then, explicit, detail),
         }
         if let Some(q) = self.queued_save.take() {
             self.save_to_then(q.path, q.then, q.explicit);
+        }
+    }
+
+    /// A save of `state` did not happen (`detail` says why): never silent,
+    /// the error stays on screen and the automatic save waits for the next
+    /// change; an exit waiting for it asks the user (save again, or leave
+    /// without saving).
+    fn save_failed(
+        &mut self,
+        state: &Arc<CaseState>,
+        then: Option<Exit>,
+        explicit: bool,
+        detail: String,
+    ) {
+        self.autosave.failed(state);
+        let key = if explicit {
+            "ws-toast-save-failed"
+        } else {
+            "ws-toast-autosave-failed"
+        };
+        tracing::error!(
+            code = if explicit {
+                "save-failed"
+            } else {
+                "autosave-failed"
+            },
+            source = "save",
+            module = self.module.id(),
+            "the project was not saved: {detail}"
+        );
+        self.job_error(key, detail);
+        if let Some(exit) = then {
+            self.confirm_exit = Some(exit);
         }
     }
 
