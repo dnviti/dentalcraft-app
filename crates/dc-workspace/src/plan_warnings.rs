@@ -281,6 +281,51 @@ fn over_line(o: &OverStep) -> String {
     )
 }
 
+/// The collisions between neighbouring crowns that the staging left in the
+/// aligners, for the inspector of "Aligners". Unlike the other warnings they
+/// are read from the case (`staging_collisions`), so a reopened project shows
+/// them too: each one with its arch (when both have a result), its aligner,
+/// its two teeth, how far the crowns penetrate and by how much that is over
+/// what the plan allows. Nothing when the case holds none.
+pub(crate) fn collision_blocks(data: &AlignersState) -> Vec<Block> {
+    let both = data.staging_results.len() > 1 || data.staging_collisions.len() > 1;
+    let mut lines = Vec::new();
+    for (role, list) in &data.staging_collisions {
+        for c in list {
+            let text = tr(
+                "ws-warn-collision",
+                &[
+                    ("stage", &c.stage.to_string()),
+                    ("a", &c.a.to_string()),
+                    ("b", &c.b.to_string()),
+                    ("penetration", &num(c.penetration_mm, 3)),
+                    ("excess", &num(c.penetration_mm - c.allowed_mm, 3)),
+                    ("allowed", &num(c.allowed_mm, 3)),
+                ],
+            );
+            lines.push(if both {
+                let key = match role {
+                    ScanRole::Upper => "ws-setup-result-upper",
+                    _ => "ws-setup-result-lower",
+                };
+                tr("ws-warn-arch-line", &[("arch", &t(key)), ("text", &text)])
+            } else {
+                text
+            });
+        }
+    }
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    vec![Block {
+        title: tr(
+            "ws-warn-collision-title",
+            &[("n", &lines.len().to_string())],
+        ),
+        lines,
+    }]
+}
+
 impl Workspace {
     /// Under the status of "Find the teeth": the warning of the last tooth
     /// mark placed (two marks too close), while the marks are as it left them.
@@ -313,6 +358,7 @@ pub(crate) fn show_blocks(ui: &mut Ui, blocks: Vec<Block>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dca_model::CollisionLeft;
     use serde_json::json;
 
     fn fdi(n: u8) -> Fdi {
@@ -457,5 +503,53 @@ mod tests {
         // a placement without warnings clears them
         w.record(SEEDS, &json!({ "warnings": [] }), &state);
         assert!(w.seeds_blocks(&data).is_empty());
+    }
+
+    fn collision(stage: u32, a: u8, b: u8, penetration_mm: f64, allowed_mm: f64) -> CollisionLeft {
+        CollisionLeft {
+            stage,
+            a: fdi(a),
+            b: fdi(b),
+            penetration_mm,
+            allowed_mm,
+        }
+    }
+
+    #[test]
+    fn each_collision_left_is_a_line_with_its_aligner_teeth_and_excess() {
+        assert_eq!(dc_i18n::current(), dc_i18n::Lang::En);
+        let mut data = AlignersState::default();
+        // nothing left: nothing shown
+        assert!(collision_blocks(&data).is_empty());
+        data.staging_collisions.insert(ScanRole::Lower, Vec::new());
+        assert!(collision_blocks(&data).is_empty());
+        data.staging_collisions
+            .insert(ScanRole::Lower, vec![collision(7, 41, 31, 0.35, 0.23)]);
+        let blocks = collision_blocks(&data);
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert_eq!(blocks[0].title, "Collisions left in the plan: 1");
+        assert_eq!(
+            blocks[0].lines,
+            [
+                "Aligner 7: teeth 41 and 31 penetrate 0.350 mm, 0.120 mm over the 0.230 mm the plan allows."
+            ]
+        );
+        // both arches: each line names its arch
+        data.staging_collisions.insert(
+            ScanRole::Upper,
+            vec![
+                collision(2, 11, 21, 0.5, 0.25),
+                collision(3, 12, 11, 0.4, 0.3),
+            ],
+        );
+        let blocks = collision_blocks(&data);
+        assert_eq!(blocks[0].title, "Collisions left in the plan: 3");
+        assert_eq!(blocks[0].lines.len(), 3);
+        assert!(
+            blocks[0].lines[0].starts_with("Upper arch: Aligner 2:"),
+            "{:?}",
+            blocks[0].lines
+        );
+        assert!(blocks[0].lines[2].starts_with("Lower arch: Aligner 7:"));
     }
 }

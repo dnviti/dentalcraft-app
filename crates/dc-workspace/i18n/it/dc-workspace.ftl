@@ -870,6 +870,8 @@ ws-warn-comp-rotation = la rotazione
 ws-warn-comp-crown = il punto più lontano della corona
 ws-warn-ipr-unscheduled-title = IPR che nessun allineatore porta
 ws-warn-ipr-unscheduled = L'IPR tra i denti { $a } e { $b } non è in nessun allineatore: va fatto a mano.
+ws-warn-collision-title = Collisioni rimaste nel piano: { $n }
+ws-warn-collision = Allineatore { $stage }: i denti { $a } e { $b } si compenetrano di { $penetration } mm, { $excess } mm oltre i { $allowed } mm che il piano consente.
 ws-warn-seeds-title = Due punti dente sono molto vicini
 
 # Una funzione che non si applica al caso (Morso con una sola arcata).

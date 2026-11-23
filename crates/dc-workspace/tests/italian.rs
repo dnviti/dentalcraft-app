@@ -378,3 +378,95 @@ fn italian_project_file_errors() {
         LoadIssue::MissingBlob(blob),
     ]));
 }
+
+/// The collisions the plan leaves, in Italian with the decimal comma, from
+/// the case: a reopened project shows them too; none left, nothing shown.
+#[test]
+fn the_italian_inspector_lists_the_collisions_left_also_after_reopening() {
+    italian();
+    const ALIGNERS: &str = "aligners.planning.aligners";
+    const LINE: &str = "Allineatore 5: i denti 41 e 31 si compenetrano di 0,350 mm, \
+                        0,120 mm oltre i 0,230 mm che il piano consente.";
+    let mut project = demo_project(&["lower"]);
+    let mut al = project
+        .case_state
+        .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.staging_results.insert(
+        dc_case::ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 8,
+            collisions_left: 1,
+            ..Default::default()
+        },
+    );
+    al.staging_collisions.insert(
+        dc_case::ScanRole::Lower,
+        vec![dca_model::CollisionLeft {
+            stage: 5,
+            a: dc_case::Fdi::new(41).unwrap(),
+            b: dc_case::Fdi::new(31).unwrap(),
+            penetration_mm: 0.35,
+            allowed_mm: 0.23,
+        }],
+    );
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+
+    // saved, then opened again as Home opens it
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("collisioni.dcprj");
+    let mut ws = Workspace::new_headless(
+        Box::new(AlignersModule::new()),
+        Some(project),
+        Some(path.clone()),
+    );
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(&path, &codecs).unwrap();
+    assert!(!loaded.read_only, "{:?}", loaded.issues);
+    let mut ws = Workspace::new_headless(
+        Box::new(AlignersModule::new()),
+        Some(loaded.project),
+        Some(path),
+    );
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    assert!(h.query_by_label(LINE).is_some(), "the collision line");
+    assert!(
+        h.query_by_label("Collisioni rimaste nel piano: 1")
+            .is_some(),
+        "its title"
+    );
+    // the count line is not repeated, and no English is left
+    assert!(h.query_by_label_contains("vedi la relazione").is_none());
+    assert!(h.query_by_label_contains("Collisions").is_none());
+
+    // nothing left: nothing shown
+    let mut project = demo_project(&["lower"]);
+    let mut al = project
+        .case_state
+        .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.staging_results.insert(
+        dc_case::ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 8,
+            ..Default::default()
+        },
+    );
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+    let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), Some(project), None);
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    assert!(h.query_by_label_contains("Collisioni").is_none());
+    assert!(h.query_by_label_contains("compenetrano").is_none());
+}

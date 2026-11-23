@@ -870,6 +870,8 @@ ws-warn-comp-rotation = the rotation
 ws-warn-comp-crown = the farthest point of the crown
 ws-warn-ipr-unscheduled-title = IPR that no aligner carries
 ws-warn-ipr-unscheduled = The IPR between teeth { $a } and { $b } is in no aligner: do it by hand.
+ws-warn-collision-title = Collisions left in the plan: { $n }
+ws-warn-collision = Aligner { $stage }: teeth { $a } and { $b } penetrate { $penetration } mm, { $excess } mm over the { $allowed } mm the plan allows.
 ws-warn-seeds-title = Two tooth marks are very close
 
 # A function that does not apply to the case (Bite with one arch).
