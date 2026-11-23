@@ -1493,13 +1493,13 @@ fn a_run_that_fails_records_nothing_and_a_step_run_is_recorded() {
 }
 
 #[test]
-fn a_function_that_leaves_nothing_in_the_case_is_done_on_the_case_its_run_left() {
+fn a_function_that_is_not_a_step_stays_recorded_and_done_while_the_case_holds_its_result() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.dcprj");
     // the history read with the case: the marks found and the colours by hand
     let mut ws = saved(demo_state(&["lower"]), &path);
     assert_eq!(recorded(&ws), sorted(&[FIND_TEETH, SEGMENT]));
-    // the study models: their run is recorded, the case shows nothing of it
+    // the study models: their run is recorded, and the case holds them
     run(
         &mut ws,
         STUDY_MODELS,
@@ -1515,10 +1515,13 @@ fn a_function_that_leaves_nothing_in_the_case_is_done_on_the_case_its_run_left()
     let mut h = harness(reopened);
     assert_eq!(history(&h.state().ws), history(&ws));
     assert!(says_done(&mut h, STUDY_MODELS));
-    // any change of the case: no longer done, and no longer recorded
+    // a change that leaves them in the case: still done, still recorded
     rename(&mut h.state_mut().ws, "R");
-    assert!(!says_done(&mut h, STUDY_MODELS));
-    assert_eq!(recorded(&h.state().ws), sorted(&[FIND_TEETH, SEGMENT]));
+    assert!(says_done(&mut h, STUDY_MODELS));
+    assert_eq!(
+        recorded(&h.state().ws),
+        sorted(&[FIND_TEETH, SEGMENT, STUDY_MODELS])
+    );
     // undo: the case their run left, done again
     assert!(h.state_mut().ws.undo());
     assert!(says_done(&mut h, STUDY_MODELS));

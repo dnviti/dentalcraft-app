@@ -19,7 +19,10 @@
 //!   result of its function ([`dc_module_api::Module::leaf_done`]), and a
 //!   failure (another front end may record one) goes once it does. So a
 //!   function that leaves nothing in the case, such as an export, counts as
-//!   done only on the case its run left, until the next change. A run is
+//!   done only on the case its run left, until a change that recomputes it
+//!   (a step run again or corrected, the whole pipeline, a setting; not the
+//!   run of another such function that only adds its own result, nor the
+//!   aligner of the view built or hidden: [`By::Add`], [`By::Look`]). A run is
 //!   recorded only when the case holds its result, or when the function
 //!   leaves nothing in the case to check;
 //! * undo and redo bring back the history of their version;
@@ -53,13 +56,28 @@ pub(crate) enum By {
     Run(&'static str),
     /// A correction by hand of the function with this command id.
     Hand(&'static str),
+    /// A run of a function that is not a step and adds its own result to
+    /// the case, or leaves a trace of it there (an export, the study
+    /// models), without recomputing what the other such functions are made
+    /// of: their records stay.
+    Add(&'static str),
+    /// A change of how the case is shown (the aligner of the view built or
+    /// hidden) that leaves every result as it was: no function ran, no
+    /// record goes because of it.
+    Look,
 }
 
 impl By {
-    fn function(self) -> &'static str {
+    fn function(self) -> Option<&'static str> {
         match self {
-            Self::Run(id) | Self::Hand(id) => id,
+            Self::Run(id) | Self::Hand(id) | Self::Add(id) => Some(id),
+            Self::Look => None,
         }
+    }
+
+    /// `true` when the records of the functions that are not steps stay.
+    fn keeps_outputs(self) -> bool {
+        matches!(self, Self::Add(_) | Self::Look)
     }
 }
 
@@ -161,7 +179,7 @@ impl Steps {
             .find(|f| is_import_scans_command(f))
     }
 
-    fn is_step(&self, id: &str) -> bool {
+    pub(crate) fn is_step(&self, id: &str) -> bool {
         self.functions.iter().any(|(f, step)| *f == id && *step)
     }
 
@@ -189,7 +207,7 @@ impl Steps {
         shows: impl Fn(&str) -> bool,
     ) {
         let mut records = self.current.records().clone();
-        if let Some(f) = by.map(By::function)
+        if let Some(f) = by.and_then(By::function)
             && self.is_step(f)
             && !is_import_scans_command(f)
             && let Some(k) = self.functions.iter().position(|(id, _)| *id == f)
@@ -199,12 +217,19 @@ impl Steps {
             }
         }
         // a result the case no longer holds, a failure it now has a result
-        // for; a function this menu does not have cannot be checked
-        records.retain(|id, r| self.function(id).is_none() || r.failed.is_some() != shows(id));
+        // for; a function this menu does not have cannot be checked; what a
+        // function that is not a step left stays through a change that does
+        // not recompute it (the case holds no trace of it to check)
+        let keeps = by.is_some_and(By::keeps_outputs);
+        records.retain(|id, r| {
+            self.function(id).is_none()
+                || r.failed.is_some() != shows(id)
+                || (keeps && r.failed.is_none() && !self.is_step(id))
+        });
         let mut history = rebuilt(self.current.rev(), records);
         if let Some(g) = &self.graph {
             let recorded = match by {
-                Some(By::Run(id)) if !self.is_step(id) || shows(id) => {
+                Some(By::Run(id) | By::Add(id)) if !self.is_step(id) || shows(id) => {
                     history.checkpoint(g, id, StepOutcome::default())
                 }
                 Some(By::Hand(id)) if shows(id) => {
@@ -430,6 +455,37 @@ mod tests {
         s.changed(&state("c"), Some(By::Run(IMPORT)), case.shows());
         s.changed(&state("d"), Some(By::Run(FIND)), case.shows());
         assert_eq!(ids(&s), sorted(&[IMPORT, FIND, NEWER]));
+    }
+
+    #[test]
+    fn what_a_function_that_is_not_a_step_left_stays_through_a_change_that_does_not_recompute_it() {
+        let case = Holds::new(&[IMPORT, FIND]);
+        let file = written(&[(IMPORT, None), (FIND, None), (EXPORT, None), (AUTO, None)]);
+        let a = state("a");
+        let mut s = Steps::open(&menu(), file, &a, case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, EXPORT, AUTO]));
+        // the study models added: the export and the pipeline are not made
+        // of them
+        let b = state("b");
+        s.changed(&b, Some(By::Add(STUDY)), case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, EXPORT, AUTO, STUDY]));
+        assert!(s.done_by_record(&b, EXPORT) && s.done_by_record(&b, AUTO));
+        // the aligner of the view built: no function ran, nothing goes
+        let c = state("c");
+        s.changed(&c, Some(By::Look), case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, EXPORT, AUTO, STUDY]));
+        assert!(s.done_by_record(&c, EXPORT));
+        // a change that is nothing of this (a setting), or the whole
+        // pipeline, or a step, leaves them out of date
+        let d = state("d");
+        s.changed(&d, None, case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND]));
+        s.changed(&state("e"), Some(By::Add(EXPORT)), case.shows());
+        s.changed(&state("f"), Some(By::Run(AUTO)), case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, AUTO]));
+        s.changed(&state("g"), Some(By::Add(EXPORT)), case.shows());
+        s.changed(&state("h"), Some(By::Run(FIND)), case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND]));
     }
 
     #[test]

@@ -543,3 +543,63 @@ fn an_export_is_done_on_the_case_it_exported_until_the_case_changes() {
     h.run();
     assert!(h.query_by_label("Done").is_some());
 }
+
+/// The project at `path` opened again as Home opens it, in the fake module.
+fn reopened(path: &std::path::Path) -> Workspace {
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(path, &codecs).unwrap();
+    assert!(!loaded.read_only, "{:?}", loaded.issues);
+    Workspace::new_headless(
+        Box::new(Fake {
+            inner: AlignersModule::new(),
+        }),
+        Some(loaded.project),
+        Some(path.to_path_buf()),
+    )
+}
+
+#[test]
+fn an_export_is_still_done_after_save_and_reopen_until_the_case_changes() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("exported.dcprj");
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("out")));
+    assert!(ws.wait_for_jobs(WAIT));
+    ws.save_to(file.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.history().record(EXPORT).is_some());
+    // opened again: the record came back with the case it was saved with
+    let mut h = harness(reopened(&file));
+    assert!(h.state().history().record(EXPORT).is_some());
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_some(), "done after reopening");
+    // the case changes afterwards: no longer done
+    h.state_mut().run_leaf(BITE);
+    settle(&mut h);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_none());
+}
+
+#[test]
+fn an_export_stays_done_through_a_function_that_only_adds_its_own_result() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let dir = tempfile::tempdir().unwrap();
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("out")));
+    assert!(ws.wait_for_jobs(WAIT));
+    // a control visit (not a step, it adds its own result): the export is
+    // not made of it, the two are done
+    ws.answer_leaf_input(VISIT, Some(dir.path().join("scan.stl")));
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.history().record(EXPORT).is_some());
+    assert!(ws.history().record(VISIT).is_some());
+    let mut h = harness(ws);
+    for id in [EXPORT, VISIT] {
+        h.state_mut().select_item(id);
+        h.run();
+        assert!(h.query_by_label("Done").is_some(), "{id}");
+    }
+}

@@ -1787,8 +1787,19 @@ impl Workspace {
         if import {
             return self.steps.import().map(By::Run);
         }
+        // the aligner of the view is how the case is shown: no result of
+        // the case depends on it
+        if command == crate::aligner::SHOW || command == crate::aligner::EXACT {
+            return Some(By::Look);
+        }
         if let Some(f) = self.steps.function(command) {
-            return Some(By::Run(f));
+            // a function that is not a step adds its own result; the whole
+            // pipeline recomputes the others
+            return Some(if self.steps.is_step(f) || f == leaf::AUTO {
+                By::Run(f)
+            } else {
+                By::Add(f)
+            });
         }
         crate::function::corrected(command)
             .and_then(|f| self.steps.function(f))
@@ -1829,15 +1840,22 @@ impl Workspace {
         match taken {
             Some(Ok(Ok((state, out)))) => {
                 self.clear_step_errors();
-                // a leaf that only reads or reports (a listing, a bite that
-                // does not apply) gives the case back as it got it: no undo
-                // step, nothing to save
-                if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id))
-                    && !same_case(&state, self.undo.current())
-                {
+                if !matches!(kind, SpecKind::Leaf(id) if !leaf::changes_case(id)) {
                     let import = matches!(kind, SpecKind::Import | SpecKind::ScanImport(_));
                     let by = self.change_by(command, import);
-                    self.push_state(Arc::new(state), label, by);
+                    // a leaf that only reads or reports (a listing, a bite
+                    // that does not apply) gives the case back as it got it:
+                    // no undo step, nothing to save. The run of a function
+                    // that leaves no trace in the case (an export) is
+                    // recorded all the same: its step is the record.
+                    let recorded = match by {
+                        Some(By::Add(_)) => true,
+                        Some(By::Run(f)) => !self.steps.is_step(f),
+                        _ => false,
+                    };
+                    if recorded || !same_case(&state, self.undo.current()) {
+                        self.push_state(Arc::new(state), label, by);
+                    }
                 }
                 match kind {
                     SpecKind::Import | SpecKind::ScanImport(_) => {
