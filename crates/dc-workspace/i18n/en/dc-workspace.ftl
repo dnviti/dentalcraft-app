@@ -54,6 +54,7 @@ ws-toast-warn-replaced = Scan replaced
 ws-toast-warn-arch-conflict = Arch already taken
 ws-toast-warn-provisional = Check the arch
 ws-toast-warn-bite-limit = Bite limit
+ws-toast-warn-not-closed = Scan not closed
 ws-toast-import-replaced = Scan replaced
 ws-toast-import-cleared = Results cleared
 ws-toast-role-changed = Scan role changed

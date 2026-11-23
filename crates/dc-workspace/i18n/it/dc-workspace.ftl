@@ -54,6 +54,7 @@ ws-toast-warn-replaced = Scansione sostituita
 ws-toast-warn-arch-conflict = Arcata già occupata
 ws-toast-warn-provisional = Verifica l'arcata
 ws-toast-warn-bite-limit = Limite dei morsi
+ws-toast-warn-not-closed = Scansione non chiusa
 ws-toast-import-replaced = Scansione sostituita
 ws-toast-import-cleared = Risultati cancellati
 ws-toast-role-changed = Ruolo della scansione cambiato

@@ -2042,8 +2042,9 @@ impl Workspace {
             self.timeline.current = 0;
             self.timeline.playing = false;
         }
-        // what to check before delivery (the doubts the separation left)
-        if id == leaf::AUTO || id == leaf::EXPORT_ALL {
+        // what to check before delivery (the doubts the separation left, and
+        // a study model that is not a clean solid)
+        if id == leaf::AUTO || id == leaf::EXPORT_ALL || id == leaf::STUDY_MODELS {
             for toast in leaf::warning_toasts(out) {
                 self.toast_sticky(toast);
             }
