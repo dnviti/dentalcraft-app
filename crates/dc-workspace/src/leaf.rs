@@ -448,6 +448,19 @@ pub(crate) fn warning_toasts(out: &Value) -> Vec<Toast> {
         .collect()
 }
 
+/// [`warning_toasts`] of every step of a leaf that runs several commands
+/// (`steps`, each with its `output`): what "Find the teeth" left in doubt on
+/// the teeth it found (the base of a model, a stretch with no crown, a low
+/// stretch), said as soon as it ends.
+pub(crate) fn step_warning_toasts(out: &Value) -> Vec<Toast> {
+    out["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| warning_toasts(&s["output"]))
+        .collect()
+}
+
 /// What "3D teeth" built: the teeth built per arch and the gingivas. Read
 /// from `arches` (per arch: `rebuilt` the tooth numbers built this time,
 /// else `teeth` their count, and `gingiva`), so a partial rebuild counts the
@@ -1378,6 +1391,24 @@ mod tests {
         );
         assert!(warning_toasts(&json!({ "warnings": [] })).is_empty());
         assert!(warning_toasts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn what_find_the_teeth_left_in_doubt_is_a_notice() {
+        let out = json!({ "steps": [
+            { "id": "aligners.preparation.numbering.automatic",
+              "output": { "arches": [], "failed": [],
+                          "warnings": ["Check the teeth of the upper arch: no crown between 11 and 22"] } },
+            { "id": "aligners.preparation.orientation.automatic", "output": {} },
+        ] });
+        let toasts = step_warning_toasts(&out);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].message_key, "ws-toast-to-check");
+        assert_eq!(toasts[0].level, ToastLevel::Warning);
+        assert!(toasts[0].detail.as_deref().unwrap().contains("11 and 22"));
+        // an older module, or a numbering with no doubt: nothing
+        assert!(step_warning_toasts(&json!({ "steps": [{ "output": {} }] })).is_empty());
+        assert!(step_warning_toasts(&json!({})).is_empty());
     }
 
     #[test]

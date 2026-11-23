@@ -1978,10 +1978,15 @@ impl Workspace {
         if id == leaf::SET_ARCH {
             self.show_role_report(out);
         }
-        // new tooth marks: what they dropped, and the arches not numbered
+        // new tooth marks: what they dropped, the arches not numbered, and
+        // what the numbering left in doubt on the teeth it found (to check
+        // now, it stays until the marks change)
         if id == leaf::FIND_TEETH {
             for toast in crate::manual::marks_toasts(out) {
                 self.toast(toast);
+            }
+            for toast in leaf::step_warning_toasts(out) {
+                self.toast_sticky(toast);
             }
         }
         if id == leaf::AUTO {
