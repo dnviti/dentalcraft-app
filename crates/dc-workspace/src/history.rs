@@ -19,14 +19,19 @@
 //!   result of its function ([`dc_module_api::Module::leaf_done`]), and a
 //!   failure (another front end may record one) goes once it does. So a
 //!   function that leaves nothing in the case, such as an export, counts as
-//!   done only on the case its run left, until the next change;
-//! * undo and redo bring back the history of the version they go to;
+//!   done only on the case its run left, until the next change. A run is
+//!   recorded only when the case holds its result, or when the function
+//!   leaves nothing in the case to check;
+//! * undo and redo bring back the history of their version;
 //! * a history read from a file keeps a record of a step of the workflow only
 //!   when the case holds its result (another front end may have changed the
-//!   case without its history), and every record of the other functions,
-//!   which nothing in the case can check. `[]` is the empty history
+//!   case without its history), and every record of the other functions of
+//!   the menu until the first change, as above. `[]` is the empty history
 //!   ([`dc_project::Project::history`]); a history that cannot be read is
-//!   reported ([`Steps::unreadable`]) and the file stays read-only.
+//!   reported ([`Steps::unreadable`]) and the file stays read-only;
+//! * a record of a function this menu does not have (written by a newer
+//!   version of the module) is never dropped: nothing here can check it, and
+//!   it goes back to the file with the others.
 //!
 //! A failed run records nothing: the commands of the workspace change the
 //! case all or nothing, so after a failure the case and its records are the
@@ -193,12 +198,15 @@ impl Steps {
                 records.remove(*id);
             }
         }
-        // a result the case no longer holds, a failure it now has a result for
-        records.retain(|id, r| r.failed.is_some() != shows(id));
+        // a result the case no longer holds, a failure it now has a result
+        // for; a function this menu does not have cannot be checked
+        records.retain(|id, r| self.function(id).is_none() || r.failed.is_some() != shows(id));
         let mut history = rebuilt(self.current.rev(), records);
         if let Some(g) = &self.graph {
             let recorded = match by {
-                Some(By::Run(id)) => history.checkpoint(g, id, StepOutcome::default()),
+                Some(By::Run(id)) if !self.is_step(id) || shows(id) => {
+                    history.checkpoint(g, id, StepOutcome::default())
+                }
                 Some(By::Hand(id)) if shows(id) => {
                     history.mark_manual(g, id, StepOutcome::default())
                 }
@@ -401,7 +409,7 @@ mod tests {
             (NEWER, None),
         ]);
         let a = state("a");
-        let s = Steps::open(&menu(), file, &a, case.shows());
+        let mut s = Steps::open(&menu(), file, &a, case.shows());
         // the colours the case no longer holds go; the export and the
         // function this version does not know stay
         assert_eq!(ids(&s), sorted(&[IMPORT, FIND, EXPORT, NEWER]));
@@ -414,6 +422,35 @@ mod tests {
         );
         // the revisions go on from the file's
         assert_eq!(s.history().rev(), 5);
+        // a change: the export is done on its version only, the record of
+        // the function this version does not know stays; a step run again
+        // keeps it too
+        s.changed(&state("b"), None, case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, NEWER]));
+        s.changed(&state("c"), Some(By::Run(IMPORT)), case.shows());
+        s.changed(&state("d"), Some(By::Run(FIND)), case.shows());
+        assert_eq!(ids(&s), sorted(&[IMPORT, FIND, NEWER]));
+    }
+
+    #[test]
+    fn a_run_whose_result_the_case_does_not_hold_is_not_recorded() {
+        let case = Holds::new(&[IMPORT]);
+        let mut s = Steps::open(
+            &menu(),
+            written(&[(IMPORT, None)]),
+            &state("a"),
+            case.shows(),
+        );
+        // the marks ran on the other arch only, say: the case shows no result
+        s.changed(&state("b"), Some(By::Run(FIND)), case.shows());
+        assert_eq!(ids(&s), [IMPORT]);
+        // a scan left provisional by the import: no record of the import
+        let mut s = Steps::open(&menu(), json!([]), &state("c"), |_| false);
+        s.changed(&state("d"), Some(By::Run(IMPORT)), |_| false);
+        assert!(s.history().records().is_empty());
+        // a function that leaves nothing in the case is recorded all the same
+        s.changed(&state("e"), Some(By::Run(EXPORT)), |_| false);
+        assert_eq!(ids(&s), [EXPORT]);
     }
 
     #[test]

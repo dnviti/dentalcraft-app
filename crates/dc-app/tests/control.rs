@@ -227,6 +227,63 @@ fn bridge_runs_commands_through_the_workspace() {
     assert!(project.is_file());
 }
 
+/// A project opened read-only (its step history cannot be read): the bridge
+/// never saves over its file, however the path is written, and saves it to
+/// another file.
+#[test]
+fn bridge_never_saves_over_a_file_opened_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("read-only.dcprj");
+    let mut p = dc_project::Project::new(
+        dc_project::AppInfo {
+            version: "0.1.0".into(),
+            commit: "test".into(),
+        },
+        dc_workspace::now_rfc3339(),
+        dc_case::CaseState::new(dc_case::Case::new("RO")),
+    );
+    p.history = json!("not a step history");
+    dc_project::save(&project, &p).unwrap();
+    let before = std::fs::read(&project).unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+    let project_s = project.to_string_lossy().into_owned();
+    let spelled = dir.path().join("sub").join("..").join("read-only.dcprj");
+    let spelled = spelled.to_string_lossy().into_owned();
+    let other = dir.path().join("other.dcprj");
+    let other_s = other.to_string_lossy().into_owned();
+
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        c.call("open", json!({"path": project_s})).unwrap();
+        let summary = c.call("inspect", json!({})).unwrap();
+        assert_eq!(summary["project"]["read_only"], true, "{summary}");
+        for path in [
+            json!({}),
+            json!({"path": project_s}),
+            json!({"path": spelled}),
+        ] {
+            let e = c.call("save", path.clone()).unwrap_err();
+            let m = e["message"].as_str().unwrap();
+            assert!(m.contains("opened read-only"), "{path}: {e}");
+        }
+        let saved = c.call("save", json!({"path": other_s})).unwrap();
+        assert!(saved["bytes"].as_u64().unwrap() > 0, "{saved}");
+    });
+    drive(&mut h, client);
+    assert_eq!(std::fs::read(&project).unwrap(), before);
+    assert!(other.is_file());
+}
+
 #[test]
 fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
     let dir = tempfile::tempdir().unwrap();

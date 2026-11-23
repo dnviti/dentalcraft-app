@@ -1496,8 +1496,9 @@ impl Bridge {
                     )));
                 };
                 let target = dc_session::with_extension(target);
-                // as the session: the file opened read-only is never written over
-                if ws.is_read_only() && ws.path() == Some(target.as_path()) {
+                // as the session: the file opened read-only is never written
+                // over, however its path is written
+                if ws.writes_over_read_only(&target) {
                     return Step::Done(Err(RpcError::host(format!(
                         "{} was opened read-only: save it to another path",
                         target.display()
@@ -1771,6 +1772,7 @@ impl Bridge {
             tree["project"] = json!({
                 "path": ws.path().map(|p| p.display().to_string()),
                 "dirty": ws.is_dirty(),
+                "read_only": ws.is_read_only(),
             });
             tree["case"] = case;
             tree["scans"] = Value::Array(scans);

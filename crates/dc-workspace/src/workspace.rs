@@ -563,6 +563,14 @@ impl Workspace {
         self.read_only
     }
 
+    /// `true` when saving to `path` would write over the file opened
+    /// read-only ([`Workspace::is_read_only`]): the same file however it is
+    /// written (a relative path, `..`, a folder reached through a link, the
+    /// letter case on Windows), as long as both exist.
+    pub fn writes_over_read_only(&self, path: &Path) -> bool {
+        self.read_only && self.path.as_deref().is_some_and(|p| same_file(p, path))
+    }
+
     /// The step history of the case as it is now, saved as
     /// `history/steps.json`: the functions that ran, automatically or by
     /// hand, whose results the case still holds.
@@ -1357,11 +1365,8 @@ impl Workspace {
         let current = Arc::clone(self.undo.current());
         // damaged, newer, or with a step history that cannot be read: the
         // user's situation, not a failure to report
-        if self.read_only && self.path.as_deref() == Some(path.as_path()) {
-            self.job_error("ws-toast-save-failed", crate::t("ws-save-read-only"));
-            if let Some(exit) = then {
-                self.confirm_exit = Some(exit);
-            }
+        if self.writes_over_read_only(&path) {
+            self.refuse_read_only("ws-save-read-only", then);
             return;
         }
         let queued = self.queued_save.is_some();
@@ -1415,6 +1420,15 @@ impl Workspace {
                 handle,
             })),
         });
+    }
+
+    /// A save to the file opened read-only did not happen: the user is told
+    /// why (`key`), and an exit waiting for the save asks again.
+    fn refuse_read_only(&mut self, key: &str, then: Option<Exit>) {
+        self.job_error("ws-toast-save-failed", crate::t(key));
+        if let Some(exit) = then {
+            self.confirm_exit = Some(exit);
+        }
     }
 
     /// The automatic save, called every frame ([`Workspace::show`] does)
@@ -1688,6 +1702,12 @@ impl Workspace {
                                 self.import_role = role;
                             }
                             self.import_files(files);
+                        }
+                        // Save as on the very file opened read-only
+                        DialogAnswer::SaveAs(Some(p), then)
+                            if self.writes_over_read_only(&project::with_extension(p.clone())) =>
+                        {
+                            self.refuse_read_only("ws-save-as-read-only", then);
                         }
                         DialogAnswer::SaveAs(Some(p), then) => self.save_to_then(p, then, true),
                         DialogAnswer::SaveAs(None, _) => {}
@@ -2096,6 +2116,16 @@ impl Workspace {
     }
 }
 
+/// `a` and `b` are the same file: written the same, or both exist and lead
+/// to the same place on disk.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 /// The message of a failed command: the sentence the command wrote, without
 /// the "failed:" or "invalid:" the error type puts in front.
 fn error_text(e: CommandError) -> String {
@@ -2149,5 +2179,53 @@ mod tests {
         // below the bound everything is drawn
         assert_eq!(visible_toasts(&list[..2], 4), [0, 1]);
         assert!(visible_toasts(&[], 4).is_empty());
+    }
+
+    /// The file opened read-only (damaged or newer) is never written over:
+    /// a save to it is refused, and Save as on that same file says so.
+    #[test]
+    fn save_as_on_the_file_opened_read_only_writes_nothing_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newer.dcprj");
+        let project = dc_project::Project::new(
+            dc_project::AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            CaseState::new(Case::new("A")),
+        );
+        dc_project::save(&path, &project).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut ws = Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            Some(path.clone()),
+        );
+        ws.set_read_only(true);
+        let wait = Duration::from_secs(120);
+        let said = |ws: &Workspace| ws.toast_details().last().and_then(|(_, d)| d.clone());
+        let answer = |ws: &mut Workspace, p: PathBuf| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(DialogAnswer::SaveAs(Some(p), None)).unwrap();
+            ws.dialog = Some(rx);
+            ws.poll();
+        };
+        // a save to the file itself (an agent, a shortcut of the shell)
+        ws.save_to(path.clone());
+        assert!(ws.wait_for_jobs(wait));
+        assert_eq!(said(&ws), Some(crate::t("ws-save-read-only")));
+        // Save as on that file (the extension added as the save adds it)
+        answer(&mut ws, dir.path().join("newer"));
+        assert!(ws.wait_for_jobs(wait));
+        assert_eq!(said(&ws), Some(crate::t("ws-save-as-read-only")));
+        assert!(ws.is_read_only());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // Save as another file: written, and that file is not read-only
+        let other = dir.path().join("other.dcprj");
+        answer(&mut ws, other.clone());
+        assert!(ws.wait_for_jobs(wait));
+        assert!(other.is_file() && !ws.is_read_only());
+        assert_eq!(ws.path(), Some(other.as_path()));
     }
 }

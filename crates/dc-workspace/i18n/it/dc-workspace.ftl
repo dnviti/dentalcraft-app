@@ -20,6 +20,7 @@ ws-project-entry-size = { $path } è di { $found } byte, ma il file ne dichiara 
 ws-project-more-issues = (e altri { $n } problemi)
 ws-read-only = Sola lettura
 ws-save-read-only = Questo file è stato aperto in sola lettura e non viene sovrascritto: usa Salva con nome per salvare il progetto in un altro file.
+ws-save-as-read-only = Questo è il file aperto in sola lettura e non viene sovrascritto: in Salva con nome scegli un altro file.
 ws-toast-history-unreadable = Aperto in sola lettura: la cronologia dei passaggi non è leggibile
 ws-history-unreadable-detail = Non è stato possibile leggere la registrazione dei passaggi eseguiti in questo progetto ({ $reason }). Il file non viene sovrascritto: usa Salva con nome per continuare a lavorare in un altro file.
 ws-help = Guida

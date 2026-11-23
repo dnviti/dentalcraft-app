@@ -20,6 +20,7 @@ ws-project-entry-size = { $path } is { $found } bytes, but the file declares { $
 ws-project-more-issues = (and { $n } more problems)
 ws-read-only = Read-only
 ws-save-read-only = This file was opened read-only and is not written over: use Save as to save the project to another file.
+ws-save-as-read-only = This is the file that was opened read-only, and it is not written over: in Save as, choose another file.
 ws-toast-history-unreadable = Opened read-only: the step history cannot be read
 ws-history-unreadable-detail = The record of the steps done in this project could not be read ({ $reason }). The file is not written over: use Save as to keep working in another file.
 ws-help = Help

@@ -16,8 +16,10 @@
 //!   are recorded, what they leave out of date goes, undo and redo bring back
 //!   the history of their version, a function that leaves nothing in the case
 //!   is done on the case its run left, a history the CLI saved with records
-//!   of results the case no longer holds marks nothing done, and one that
-//!   cannot be read keeps the file read-only.
+//!   of results the case no longer holds marks nothing done, one that
+//!   cannot be read keeps the file read-only (never written over, however
+//!   its path is written), and the empty one of a released app opens and
+//!   saves writable in the app and in the CLI.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -172,7 +174,8 @@ fn assert_same(file: &CaseState, mem: &CaseState, what: &str) {
 }
 
 /// Saves with Save (Ctrl+S), opens the file again and checks that it holds
-/// the case of the workspace and its step history.
+/// the case of the workspace and its step history, and that the workspace
+/// opened on it (as Home opens it) has that same history.
 fn save_and_compare(ws: &mut Workspace, path: &Path, what: &str) {
     ws.save();
     assert!(ws.wait_for_jobs(WAIT), "{what}: save");
@@ -182,7 +185,14 @@ fn save_and_compare(ws: &mut Workspace, path: &Path, what: &str) {
     assert!(errors.is_empty(), "{what}: {:?}", ws.toast_details());
     let p = reopen(path);
     assert_same(&p.case_state, ws.state(), what);
-    assert_eq!(p.history, history(ws), "{what}: step history");
+    assert_eq!(p.history, history(ws), "{what}: step history in the file");
+    let reopened = Workspace::new_headless(module(), Some(p), Some(path.to_path_buf()));
+    assert!(!reopened.is_read_only(), "{what}: read-only");
+    assert_eq!(
+        history(&reopened),
+        history(ws),
+        "{what}: step history reopened"
+    );
 }
 
 /// The step history of `ws` as its file holds it.
@@ -1596,6 +1606,26 @@ fn a_history_that_cannot_be_read_keeps_the_file_read_only() {
     assert!(ws.toast_keys().contains(&"ws-toast-save-failed".to_owned()));
     assert!(ws.is_dirty());
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    // nor by a save to that same file written another way
+    let name = path.file_name().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut spellings = vec![sub.join("..").join(name)];
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        spellings.push(link.join(name));
+    }
+    #[cfg(windows)]
+    spellings.push(PathBuf::from(path.to_string_lossy().to_uppercase()));
+    for p in spellings {
+        assert!(ws.writes_over_read_only(&p), "{}", p.display());
+        ws.save_to(p);
+        assert!(ws.wait_for_jobs(WAIT));
+    }
+    assert!(ws.is_dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     // Save as another file: written, with a history that can be read
     let other = dir.path().join("other.dcprj");
     ws.save_to(other.clone());
@@ -1605,4 +1635,31 @@ fn a_history_that_cannot_be_read_keeps_the_file_read_only() {
     assert_eq!(q.case_state.case.patient_code, "X");
     assert_eq!(q.history, history(&ws));
     assert!(serde_json::from_value::<StepHistory>(q.history).is_ok());
+}
+
+#[test]
+fn a_file_with_the_empty_history_of_a_released_app_opens_and_saves_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("released.dcprj");
+    // the history every released app wrote
+    let mut p = project(demo_state(&["lower"]));
+    p.history = json!([]);
+    dc_project::save(&path, &p).unwrap();
+    let cli_opens_writable = |path: &Path| {
+        let mut s = dc_session::Session::new();
+        s.register_module(module()).unwrap();
+        let out = s
+            .execute("project.open", json!({ "path": path.to_string_lossy() }))
+            .unwrap();
+        assert_eq!(out["read_only"], false, "{out}");
+    };
+    cli_opens_writable(&path);
+    // the app opens it writable with an empty history, saves, opens again
+    let mut ws = Workspace::new_headless(module(), Some(reopen(&path)), Some(path.clone()));
+    assert!(!ws.is_read_only() && ws.autosaves());
+    assert!(ws.history().records().is_empty());
+    rename(&mut ws, "R");
+    save_and_compare(&mut ws, &path, "released");
+    // and the CLI opens what the app wrote
+    cli_opens_writable(&path);
 }

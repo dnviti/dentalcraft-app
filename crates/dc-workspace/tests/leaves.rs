@@ -488,7 +488,8 @@ fn after_the_cross_the_status_bar_says_it_is_stopping_until_the_job_ends() {
 fn an_export_is_done_on_the_case_it_exported_until_the_case_changes() {
     let _g = exclusive();
     let mut ws = fake();
-    ws.answer_leaf_input(EXPORT, Some(PathBuf::from("/tmp/dc-done")));
+    let dir = tempfile::tempdir().unwrap();
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("done")));
     assert!(ws.wait_for_jobs(WAIT));
     // its run is in the step history; the case shows nothing of the files
     let record = ws.history().record(EXPORT).unwrap();
