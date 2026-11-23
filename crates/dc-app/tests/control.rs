@@ -333,10 +333,15 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
             )
             .unwrap();
         assert!(out["teeth"].as_u64().is_some_and(|n| n > 0), "{out}");
+        // the models are built at a coarser voxel than the default 0.25 mm:
+        // the solid of one arch takes about 205 s at the default in a debug
+        // build (about 20 s in release), 22 s at 0.5 mm, so the test does not
+        // depend on the speed of heavy geometry in the profile CI uses; the
+        // test checks the leaf and the bridge, not the detail of the solid
         let out = c
             .call(
                 "execute",
-                json!({"id": "aligners.output.study-models", "params": {}}),
+                json!({"id": "aligners.output.study-models", "params": {"voxel_mm": 0.5}}),
             )
             .unwrap();
         assert!(
