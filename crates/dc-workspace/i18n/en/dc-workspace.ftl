@@ -826,6 +826,7 @@ ws-prod-bite-equilibrate = Equilibrate the contacts (virtual grinding)
 ws-prod-bite-equilibrate-teeth = Teeth in contact per side
 ws-prod-bite-equilibrate-max = Largest grinding
 ws-prod-group-ramps = Bite ramps
+ws-prod-one-arch = The project has only one arch: there is no bite, so these settings are ignored.
 ws-prod-ramps-enabled = Ramps on the aligners
 ws-prod-ramps-width = Ramp width
 ws-prod-ramps-depth = Ramp depth

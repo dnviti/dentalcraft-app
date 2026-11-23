@@ -826,6 +826,7 @@ ws-prod-bite-equilibrate = Equilibra i contatti (molatura virtuale)
 ws-prod-bite-equilibrate-teeth = Denti in contatto per lato
 ws-prod-bite-equilibrate-max = Molatura massima
 ws-prod-group-ramps = Rampe di rialzo
+ws-prod-one-arch = Il progetto ha una sola arcata: non c'è un morso, quindi queste impostazioni sono ignorate.
 ws-prod-ramps-enabled = Rampe sugli allineatori
 ws-prod-ramps-width = Larghezza della rampa
 ws-prod-ramps-depth = Profondità della rampa
