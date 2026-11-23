@@ -304,10 +304,20 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
         assert_eq!(set["view"], "front", "{set}");
         assert_eq!(set["stage"], set["last_stage"], "{set}");
         assert_eq!(set["study_shown"], false, "{set}");
+        // the Scan / 3D teeth choice of the toolbar
+        for (model, teeth) in [("teeth", true), ("scan", false)] {
+            let set = view(&mut c, json!({ "model": model })).unwrap();
+            assert_eq!(
+                (&set["model"], &set["teeth_shown"]),
+                (&json!(model), &json!(teeth)),
+                "{set}"
+            );
+        }
         for bad in [
             json!({"view": "top"}),
             json!({"stage": -1}),
             json!({"zoom": 2}),
+            json!({"model": "gums"}),
         ] {
             let e = view(&mut c, bad).unwrap_err();
             assert_eq!(e["code"], -32602, "{e}");

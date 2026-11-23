@@ -110,6 +110,16 @@ pub(crate) enum Model {
     Teeth,
 }
 
+impl Model {
+    /// Name of the choice for agents (`app.window.view`).
+    fn name(self) -> &'static str {
+        match self {
+            Model::Scan => "scan",
+            Model::Teeth => "teeth",
+        }
+    }
+}
+
 /// What the meshes were last built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneKey {
@@ -282,7 +292,8 @@ pub(crate) struct SceneInput<'a> {
     pub contacts: Option<&'a ContactColors>,
     /// Draw the module's entries that replace the scan of their arch (the
     /// built teeth and gingiva) instead of it; `false`: the scan, and none of
-    /// the entries of its arch.
+    /// the entries of its arch but the aligner of the view, which replaces
+    /// nothing.
     pub teeth: bool,
     /// Wait for the slow part of the module entries (the deformed gingiva at
     /// a stage); `false` (the UI thread): draw them at rest meanwhile and
@@ -503,8 +514,14 @@ fn crowns_only(mut mesh: dc_mesh::TriMesh, labels: &[u16]) -> dc_mesh::TriMesh {
 /// - The module's entries at a later stage are only asked for when something
 ///   of them is drawn: with the scans shown, the entries of an arch they
 ///   replace are left out, so the stage (and the deformation it costs) is
-///   skipped when no other entry exists. `hides_scan` and `arch` of an entry
-///   do not depend on the stage.
+///   skipped when no other entry exists and no aligner is shown. `hides_scan`
+///   and `arch` of an entry do not depend on the stage.
+/// - The aligner of the view (`aligners.view.aligner`, while the case shows
+///   it) replaces nothing: it is drawn over whatever its arch shows, the
+///   scan, the 3D teeth or the study model, at the stage shown, translucent
+///   and never picked (`crate::aligner`). Only a hidden arch, a scan shown
+///   alone ([`SceneInput::focus`]) or the region of a tooth
+///   ([`SceneInput::region`], at the initial position) leaves it out.
 /// - With the target layer and a final position, whatever the stage, a
 ///   translucent ghost in [`SceneInput::target`] shows the teeth at their
 ///   final pose (the plugin's `ghost_final`): the built teeth that are
@@ -570,8 +587,16 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             .is_some_and(|a| al.is_some_and(|d| d.study_models.get(&a) == Some(blob))),
         _ => false,
     };
+    // the aligner of the view, drawn whatever the arch shows
+    let is_aligner = |e: &SceneEntry| match &e.item {
+        SceneItem::Mesh { blob, .. } => crate::aligner::is_view_aligner(al, blob),
+        _ => false,
+    };
+    let aligner_shown =
+        al.is_some_and(|a| a.aligner_view.shown && !a.aligner_view.bases.is_empty());
     let mut complete = true;
-    let entries = if input.stage == 0 || !rest.iter().any(|e| keep(e) && !is_study(e)) {
+    let staged = aligner_shown || rest.iter().any(|e| keep(e) && !is_study(e));
+    let entries = if input.stage == 0 || !staged {
         rest.clone()
     } else if input.wait {
         input.module.scene_at(state, Some(input.stage))
@@ -766,6 +791,8 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     for (i, e) in entries.iter().enumerate().filter(|(_, e)| {
         if is_study(e) {
             e.arch.is_some_and(|a| study.contains(&a))
+        } else if is_aligner(e) {
+            input.region.is_none()
         } else {
             keep(e) && e.arch.is_none_or(|a| !study.contains(&a))
         }
@@ -1448,17 +1475,20 @@ impl Workspace {
     /// view (`occlusal`, `front`, `left`, `right`, `back`), `stage` the
     /// stage shown (at most the last one; the playback stops), `study` and
     /// `target` the "Study models" and "Final position" layers (the final
-    /// position stays off, with its notice, in a case without one). What is
-    /// `None` stays. Answers what the view shows then.
+    /// position stays off, with its notice, in a case without one), `model`
+    /// the "Scan" or "3D teeth" choice (`scan`, `teeth`; a tool that works on
+    /// the scan still shows the scan, see `teeth_shown`). What is `None`
+    /// stays. Answers what the view shows then.
     ///
     /// # Errors
-    /// An unknown view; nothing changes.
+    /// An unknown view or model; nothing changes.
     pub fn set_window_view(
         &mut self,
         view: Option<&str>,
         stage: Option<u32>,
         study: Option<bool>,
         target: Option<bool>,
+        model: Option<&str>,
     ) -> Result<serde_json::Value, String> {
         let choice = match view {
             None => None,
@@ -1471,8 +1501,20 @@ impl Workspace {
                     })?,
             ),
         };
+        let model = match model {
+            None => None,
+            Some(m) => Some(
+                [Model::Scan, Model::Teeth]
+                    .into_iter()
+                    .find(|c| c.name() == m)
+                    .ok_or_else(|| format!("unknown model {m}: scan or teeth"))?,
+            ),
+        };
         if let Some(c) = choice {
             self.set_view(c);
+        }
+        if let Some(m) = model {
+            self.view.model = m;
         }
         let last = TimelineModel::from_state(self.undo.current()).last();
         if let Some(s) = stage {
@@ -1491,6 +1533,7 @@ impl Workspace {
             "last_stage": last,
             "study": self.view.layers.study,
             "target": self.view.layers.target,
+            "model": self.view.model.name(),
             "study_shown": self.study_shown(),
             "teeth_shown": self.teeth_shown(),
         }))
@@ -2983,6 +3026,151 @@ mod built_teeth_tests {
         assert_eq!(ws.toasts.len(), toasts + 1);
         ws.sync_scene_with(Color::TOOTH);
         assert!(study_meshes(&ws).is_empty());
+    }
+
+    /// [`built_case`] (tooth 31 built: its 3D tooth replaces the lower scan)
+    /// with a study model of the lower arch and, shown in the view, the
+    /// aligner of the lower arch built at stages 0, 1 and 2 for the case as
+    /// it is; with the meshes of those three aligners.
+    fn aligner_case() -> (CaseState, Vec<dc_case::BlobRef>) {
+        let mut state = built_case();
+        let mut al = state
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        let cast = TriMesh::new(
+            vec![-Vec3::Z, Vec3::X - Vec3::Z, Vec3::Y - Vec3::Z],
+            vec![[0, 1, 2]],
+        );
+        al.study_models
+            .insert(ScanRole::Lower, state.blobs.insert(cast));
+        let key = dca_model::view_key(&state, &al);
+        // a closed shell over the teeth, one higher at every stage
+        let shells: Vec<dc_case::BlobRef> = (0..3u8)
+            .map(|k| {
+                let z = 0.5 + f32::from(k);
+                state.blobs.insert(TriMesh::new(
+                    vec![
+                        Vec3::new(-1.0, -1.0, z),
+                        Vec3::new(2.0, -1.0, z),
+                        Vec3::new(0.0, 2.0, z),
+                        Vec3::new(0.0, 0.0, z + 1.0),
+                    ],
+                    vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+                ))
+            })
+            .collect();
+        al.aligner_view.shown = true;
+        al.aligner_view.bases = shells
+            .iter()
+            .zip(0u32..)
+            .map(|(mesh, stage)| dca_model::AlignerBase {
+                arch: ScanRole::Lower,
+                stage,
+                mesh: *mesh,
+                exact: false,
+                voxel_mm: 0.4,
+                tolerance_mm: 0.08,
+                key: key.clone(),
+                seconds: 1.0,
+            })
+            .collect();
+        state.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        (state, shells)
+    }
+
+    /// The aligners drawn: for each, the stage of the one of `shells` it is
+    /// and its mesh.
+    fn aligners_drawn<'a>(
+        ws: &'a Workspace,
+        shells: &[dc_case::BlobRef],
+    ) -> Vec<(usize, &'a ViewMesh)> {
+        let state = ws.undo.current();
+        ws.view
+            .meshes
+            .iter()
+            .filter_map(|m| {
+                shells
+                    .iter()
+                    .position(|b| state.mesh(b).is_some_and(|s| Arc::ptr_eq(s, &m.mesh)))
+                    .map(|k| (k, m))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_aligner_shown_is_drawn_over_whatever_its_arch_shows_at_the_stage_shown() {
+        let (state, shells) = aligner_case();
+        let world = state.case.world_frame.from_case.to_mat4().as_mat4();
+        let color = scene_color(dc_ui::tokens::tokens().dark.model_aligner);
+        let mut ws = workspace(state);
+        assert!(ws.aligner_shown());
+        // the stage drawn, translucent in its colour, where it was built, the
+        // only aligner of the arch, never picked
+        let drawn_at = |ws: &mut Workspace, model: Model, stage: u32| {
+            ws.view.model = model;
+            ws.timeline.current = stage;
+            ws.sync_scene_with(Color::TOOTH);
+            let drawn = aligners_drawn(ws, &shells);
+            assert_eq!(drawn.len(), 1, "{model:?} at {stage}");
+            let (k, vm) = drawn[0];
+            assert!(vm.visible && !vm.pickable, "{model:?} at {stage}");
+            assert_eq!(vm.coloring, MeshColoring::Uniform(color));
+            assert!((vm.opacity - crate::aligner::ALIGNER_OPACITY).abs() < 1e-6);
+            assert!(close_mats(vm.xform, world), "{model:?} at {stage}");
+            k
+        };
+        // over the 3D teeth, the aligner of the stage the timeline shows
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 1), 1);
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_some());
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        // over the scan, as after "Separate teeth and gum": the same aligners
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 2), 2);
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_none());
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 1), 1);
+        // a tool on the scan keeps it
+        ws.manual.tool = Some(manual::Tool::Brush);
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        ws.manual.tool = None;
+        // the region of a tooth shows the scan at the initial position alone
+        // (the aligner of the stage shown would hide what it shows); after
+        // it, the aligner is back
+        ws.view.model = Model::Teeth;
+        ws.timeline.current = 2;
+        region_on(&mut ws, 31);
+        assert_eq!(ws.region_tooth(), Some(31));
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(aligners_drawn(&ws, &shells).is_empty());
+        ws.set_region_view(false);
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        // at the initial position the arch is its study model, under it
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 0), 0);
+        assert_eq!(study_meshes(&ws).len(), 1);
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 0), 0);
+        // a hidden arch hides its aligner
+        ws.timeline.current = 2;
+        ws.view.arches.lower = false;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(aligners_drawn(&ws, &shells).iter().all(|(_, m)| !m.visible));
+        ws.view.arches.lower = true;
+        // hidden (the layer of the toolbar, the button of the inspector): gone
+        ws.toggle_aligner_layer();
+        assert!(ws.wait_for_jobs(std::time::Duration::from_secs(60)));
+        assert!(!ws.aligner_shown());
+        for (model, stage) in [(Model::Teeth, 2), (Model::Scan, 2), (Model::Teeth, 0)] {
+            ws.view.model = model;
+            ws.timeline.current = stage;
+            ws.sync_scene_with(Color::TOOTH);
+            assert!(
+                ws.view
+                    .meshes
+                    .iter()
+                    .all(|m| m.opacity != crate::aligner::ALIGNER_OPACITY
+                        && m.coloring != MeshColoring::Uniform(color)),
+                "{model:?} at {stage}"
+            );
+        }
     }
 
     #[test]

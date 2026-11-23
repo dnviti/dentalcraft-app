@@ -14,9 +14,11 @@
 //! function builds nothing (menu law). The module draws the aligner at every
 //! stage, moved with the teeth from the nearest one built (`dca-module`
 //! `aligner_scene`); the view draws it translucent in the `model_aligner`
-//! colour, never picked. After a change of the design, the teeth or the plan
-//! the aligner built before is out of date: it is not drawn and the inspector
-//! says so, with the button that builds it again.
+//! colour, never picked, over whatever its arch shows: the scan, the 3D
+//! teeth or the study model (`view::scene_meshes`). After a change of the
+//! design, the teeth or the plan the aligner built before is out of date: it
+//! is not drawn and the inspector says so, with the button that builds it
+//! again.
 
 use std::sync::Arc;
 

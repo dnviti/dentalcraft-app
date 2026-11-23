@@ -799,6 +799,11 @@ fn window_view_params() -> Value {
             "target": {
                 "description": "The \"Final position\" layer (the ghost of the teeth at their final position).",
                 "type": "boolean"
+            },
+            "model": {
+                "description": "What an arch whose teeth were built shows: its scan or its 3D teeth (\"Scan\" and \"3D teeth\" of the toolbar).",
+                "type": "string",
+                "enum": ["scan", "teeth"]
             }
         },
         "additionalProperties": false
@@ -834,11 +839,17 @@ fn opt_u32_param(params: &Value, key: &str) -> Result<Option<u32>, RpcError> {
     }
 }
 
-/// The parameters of `app.window.view`: view, stage, study, target.
-type WindowViewArgs = (Option<String>, Option<u32>, Option<bool>, Option<bool>);
+/// The parameters of `app.window.view`: view, stage, study, target, model.
+type WindowViewArgs = (
+    Option<String>,
+    Option<u32>,
+    Option<bool>,
+    Option<bool>,
+    Option<String>,
+);
 
 fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
-    let known = ["view", "stage", "study", "target"];
+    let known = ["view", "stage", "study", "target", "model"];
     if let Some(k) = params
         .as_object()
         .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
@@ -853,6 +864,7 @@ fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
         opt_u32_param(params, "stage")?,
         opt_bool_param(params, "study")?,
         opt_bool_param(params, "target")?,
+        opt_str_param(params, "model")?.map(str::to_owned),
     ))
 }
 
@@ -1542,12 +1554,12 @@ impl Bridge {
             }
             // the toolbar and the timeline of the 3D view
             WINDOW_VIEW => {
-                let (view, stage, study, target) = match window_view_args(params) {
+                let (view, stage, study, target, model) = match window_view_args(params) {
                     Ok(p) => p,
                     Err(e) => return Step::Done(Err(e)),
                 };
                 self.workspace().and_then(|ws| {
-                    ws.set_window_view(view.as_deref(), stage, study, target)
+                    ws.set_window_view(view.as_deref(), stage, study, target, model.as_deref())
                         .map_err(invalid)
                 })
             }
@@ -1814,15 +1826,22 @@ impl Bridge {
         // `model` / `stage` / `study` say otherwise
         let entries = match ws {
             Some(ws) => {
+                let over = |e: &SceneEntry| is_view_aligner(state, e);
                 let (entries, study) = render_entries(
                     &[&self.view, call],
                     ws.teeth_shown(),
                     Some(ws.stage_shown()),
                     ws.study_shown(),
                     |stage| ws.module().scene_at(state, stage),
+                    over,
                 )
                 .map_err(|e| RpcError::new(codes::INVALID_PARAMS, e))?;
-                dca_module::study_models_drawn(state, entries, study)
+                // the aligner of the view replaces nothing: over the study
+                // model too
+                let (aligner, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(over);
+                let mut drawn = dca_module::study_models_drawn(state, entries, study);
+                drawn.extend(aligner);
+                drawn
             }
             None => Vec::new(),
         };
@@ -1843,7 +1862,8 @@ impl Bridge {
 ///
 /// - `model`: `"teeth"` draws the entries (they replace the scan of their
 ///   arch), `"scan"` draws the scans and none of the entries of an arch
-///   they replace.
+///   they replace, but those `over` names: they replace nothing and go over
+///   whatever the arch shows (the aligner of the view).
 /// - `stage`: the treatment stage that poses the 3D teeth and moves the
 ///   gingiva (`0` or absent: the initial position). The scans are drawn at
 ///   rest whatever the stage.
@@ -1858,6 +1878,7 @@ fn render_entries(
     default_stage: Option<u32>,
     default_study: bool,
     at: impl Fn(Option<u32>) -> Vec<SceneEntry>,
+    over: impl Fn(&SceneEntry) -> bool,
 ) -> Result<(Vec<SceneEntry>, bool), String> {
     let get = |key: &str| {
         layers
@@ -1900,9 +1921,21 @@ fn render_entries(
         .collect();
     let entries = rest
         .into_iter()
-        .filter(|e| !e.arch.is_some_and(|a| replaced.contains(&a)))
+        .filter(|e| over(e) || !e.arch.is_some_and(|a| replaced.contains(&a)))
         .collect();
     Ok((entries, study))
+}
+
+/// `e` is the aligner of the 3D view (`aligners.view.aligner`, while the
+/// case shows it), drawn over whatever its arch shows, as the viewport
+/// draws it.
+fn is_view_aligner(state: &CaseState, e: &SceneEntry) -> bool {
+    let dc_scene::SceneItem::Mesh { blob, .. } = &e.item else {
+        return false;
+    };
+    state
+        .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+        .is_some_and(|d| d.aligner_view.bases.iter().any(|b| b.mesh == *blob))
 }
 
 /// The app with the bridge: pumps the control requests before each frame.
