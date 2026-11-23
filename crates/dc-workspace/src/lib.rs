@@ -75,6 +75,7 @@ pub use dc_scan_ui::ScanTicket;
 pub use menu::filter_ids;
 pub use panels::{PanelWidths, WorkspaceLayout};
 pub use project::{blocking_issues_text, error_text, issue_text, now_rfc3339, project_codecs};
+pub use view::WindowOverlays;
 pub use workspace::{Workspace, WorkspaceAction};
 
 dc_i18n::bundle!(pub(crate) fn loader);

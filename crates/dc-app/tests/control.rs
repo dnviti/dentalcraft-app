@@ -370,7 +370,32 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
                 "{set}"
             );
         }
+        // the four toggles of the toolbar: off when the project opens, set
+        // one by one (the others stay), and the answer says them
+        let four = |v: &Value| {
+            [&v["colours"], &v["marks"], &v["numbers"], &v["contacts"]].map(Value::as_bool)
+        };
+        assert_eq!(four(&now), [Some(false); 4], "{now}");
+        let set = view(&mut c, json!({"colours": true, "numbers": true})).unwrap();
+        assert_eq!(
+            four(&set),
+            [Some(true), Some(false), Some(true), Some(false)],
+            "{set}"
+        );
+        let set = view(&mut c, json!({"marks": true})).unwrap();
+        assert_eq!(
+            four(&set),
+            [Some(true), Some(true), Some(true), Some(false)],
+            "{set}"
+        );
+        let set = view(
+            &mut c,
+            json!({"colours": false, "marks": false, "numbers": false}),
+        )
+        .unwrap();
+        assert_eq!(four(&set), [Some(false); 4], "{set}");
         for bad in [
+            json!({"colours": "yes"}),
             json!({"view": "top"}),
             json!({"stage": -1}),
             json!({"zoom": 2}),

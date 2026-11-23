@@ -109,7 +109,7 @@ use dc_module_api::{CommandOutput, CommandSpec};
 use dc_raster::RenderRequest;
 use dc_scene::SceneEntry;
 use dc_session::builtins;
-use dc_workspace::{PanelWidths, ScanTicket, Workspace};
+use dc_workspace::{PanelWidths, ScanTicket, WindowOverlays, Workspace};
 use egui::{Rect, Ui, Vec2};
 use serde_json::{Map, Value, json};
 
@@ -804,6 +804,22 @@ fn window_view_params() -> Value {
                 "description": "What an arch whose teeth were built shows: its scan or its 3D teeth (\"Scan\" and \"3D teeth\" of the toolbar).",
                 "type": "string",
                 "enum": ["scan", "teeth"]
+            },
+            "colours": {
+                "description": "The tooth colours toggle of the toolbar. Off when a project opens; the tooth brush turns it on while it is open and puts it back when it closes.",
+                "type": "boolean"
+            },
+            "marks": {
+                "description": "The tooth marks toggle of the toolbar. Off when a project opens.",
+                "type": "boolean"
+            },
+            "numbers": {
+                "description": "The tooth numbers toggle of the toolbar. Off when a project opens; the tooth brush turns it on while it is open and puts it back when it closes.",
+                "type": "boolean"
+            },
+            "contacts": {
+                "description": "The contact map toggle of the toolbar. Off when a project opens.",
+                "type": "boolean"
             }
         },
         "additionalProperties": false
@@ -839,17 +855,21 @@ fn opt_u32_param(params: &Value, key: &str) -> Result<Option<u32>, RpcError> {
     }
 }
 
-/// The parameters of `app.window.view`: view, stage, study, target, model.
+/// The parameters of `app.window.view`: view, stage, study, target, model
+/// and the four toggles of the toolbar.
 type WindowViewArgs = (
     Option<String>,
     Option<u32>,
     Option<bool>,
     Option<bool>,
     Option<String>,
+    WindowOverlays,
 );
 
 fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
-    let known = ["view", "stage", "study", "target", "model"];
+    let known = [
+        "view", "stage", "study", "target", "model", "colours", "marks", "numbers", "contacts",
+    ];
     if let Some(k) = params
         .as_object()
         .and_then(|o| o.keys().find(|k| !known.contains(&k.as_str())))
@@ -865,6 +885,12 @@ fn window_view_args(params: &Value) -> Result<WindowViewArgs, RpcError> {
         opt_bool_param(params, "study")?,
         opt_bool_param(params, "target")?,
         opt_str_param(params, "model")?.map(str::to_owned),
+        WindowOverlays {
+            colours: opt_bool_param(params, "colours")?,
+            marks: opt_bool_param(params, "marks")?,
+            numbers: opt_bool_param(params, "numbers")?,
+            contacts: opt_bool_param(params, "contacts")?,
+        },
     ))
 }
 
@@ -1565,13 +1591,20 @@ impl Bridge {
             }
             // the toolbar and the timeline of the 3D view
             WINDOW_VIEW => {
-                let (view, stage, study, target, model) = match window_view_args(params) {
+                let (view, stage, study, target, model, overlays) = match window_view_args(params) {
                     Ok(p) => p,
                     Err(e) => return Step::Done(Err(e)),
                 };
                 self.workspace().and_then(|ws| {
-                    ws.set_window_view(view.as_deref(), stage, study, target, model.as_deref())
-                        .map_err(invalid)
+                    ws.set_window_view(
+                        view.as_deref(),
+                        stage,
+                        study,
+                        target,
+                        model.as_deref(),
+                        overlays,
+                    )
+                    .map_err(invalid)
                 })
             }
             // the window and its side panels, as the user sizes them

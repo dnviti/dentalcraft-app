@@ -1200,6 +1200,7 @@ impl Workspace {
         self.manual.seq_base = None;
         self.manual.bite = crate::bite::BitePicks::default();
         self.manual.bite_base = Some(Arc::clone(self.undo.current()));
+        self.sync_brush_overlays();
         // the numbering in order searches the third molars as Find the teeth does
         if tool == Tool::Seeds {
             self.manual.third_molars = overlay::aligners(self.undo.current())
@@ -1214,6 +1215,7 @@ impl Workspace {
         self.manual.sequence = None;
         self.manual.seq_base = None;
         self.manual.bite = crate::bite::BitePicks::default();
+        self.sync_brush_overlays();
     }
 
     /// Stops the numbering in order when the case is no longer the one it

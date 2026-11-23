@@ -146,6 +146,19 @@ type ContactCache = Option<(usize, Result<Arc<ContactColors>, String>)>;
 /// and for the 3D teeth or the scan.
 type AnchorCache = Option<(usize, bool, Arc<Vec<Anchor>>)>;
 
+/// The four toggles of the toolbar `app.window.view` sets (`None`: stays).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowOverlays {
+    /// The tooth colours on the scans.
+    pub colours: Option<bool>,
+    /// The marks of the teeth.
+    pub marks: Option<bool>,
+    /// The tooth numbers.
+    pub numbers: Option<bool>,
+    /// The occlusal contact map.
+    pub contacts: Option<bool>,
+}
+
 /// Viewport and view options.
 #[derive(Default)]
 pub(crate) struct ViewState {
@@ -163,6 +176,10 @@ pub(crate) struct ViewState {
     pub mesh_count: usize,
     /// Layers over the scans (labels, seeds, contact map).
     pub layers: Layers,
+    /// What the tooth colours and the tooth numbers showed when the tooth
+    /// brush opened (`None` while it is closed): they go back to it when
+    /// the brush closes ([`overlay::follow_brush`]).
+    pub brush_before: Option<overlay::BrushOverlays>,
     /// Scan or 3D teeth, as the user chose (see [`Workspace::teeth_shown`]).
     pub model: Model,
     /// Contact map of the last state it was asked for.
@@ -862,6 +879,25 @@ impl Workspace {
         self.sync_scene_mode(enamel, target, true);
     }
 
+    /// The tooth brush opened or closed since the last look: while it is
+    /// open the tooth colours and the tooth numbers are on, and when it
+    /// closes each goes back to what it was before it opened (a toggle by
+    /// hand inside wins until then). The marks and the contact map are the
+    /// user's alone. It is tied to the brush being the open tool, never to
+    /// selecting the menu entry.
+    pub(crate) fn sync_brush_overlays(&mut self) {
+        let layers = &mut self.view.layers;
+        let shown = overlay::BrushOverlays {
+            labels: layers.labels,
+            numbers: layers.numbers,
+        };
+        let in_brush = self.manual.tool == Some(manual::Tool::Brush);
+        let (now, before) = overlay::follow_brush(shown, self.view.brush_before, in_brush);
+        layers.labels = now.labels;
+        layers.numbers = now.numbers;
+        self.view.brush_before = before;
+    }
+
     /// The layers drawn: the user's, with the final position ghosted while
     /// the arch line is shown (the plugin shows the teeth at their final
     /// position with it).
@@ -1084,6 +1120,7 @@ impl Workspace {
     /// Draws the centre area.
     pub(crate) fn center_ui(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
+        self.sync_brush_overlays();
         self.sync_scene(ui);
         // the selection: outline, tint, gizmo, and the change being dragged
         self.selection_follow_case();
@@ -1477,8 +1514,11 @@ impl Workspace {
     /// `target` the "Study models" and "Final position" layers (the final
     /// position stays off, with its notice, in a case without one), `model`
     /// the "Scan" or "3D teeth" choice (`scan`, `teeth`; a tool that works on
-    /// the scan still shows the scan, see `teeth_shown`). What is `None`
-    /// stays. Answers what the view shows then.
+    /// the scan still shows the scan, see `teeth_shown`), `overlays` the four
+    /// toggles after the arches (`colours`, `marks`, `numbers`, `contacts`: all
+    /// off when a project opens; the tooth brush turns the colours and the
+    /// numbers on while it is open and puts them back when it closes). What
+    /// is `None` stays. Answers what the view shows then.
     ///
     /// # Errors
     /// An unknown view or model; nothing changes.
@@ -1489,6 +1529,7 @@ impl Workspace {
         study: Option<bool>,
         target: Option<bool>,
         model: Option<&str>,
+        overlays: WindowOverlays,
     ) -> Result<serde_json::Value, String> {
         let choice = match view {
             None => None,
@@ -1527,6 +1568,19 @@ impl Workspace {
         if target.is_some_and(|on| on != self.view.layers.target) {
             self.toggle_target_layer();
         }
+        // the four toggles of the toolbar: set as a click on them sets them
+        // (inside the tooth brush the choice wins, as a click does)
+        let layers = &mut self.view.layers;
+        for (value, on) in [
+            (overlays.colours, &mut layers.labels),
+            (overlays.marks, &mut layers.seeds),
+            (overlays.numbers, &mut layers.numbers),
+            (overlays.contacts, &mut layers.contacts),
+        ] {
+            if let Some(v) = value {
+                *on = v;
+            }
+        }
         Ok(serde_json::json!({
             "view": self.view.view.name(),
             "stage": self.timeline.current,
@@ -1534,6 +1588,10 @@ impl Workspace {
             "study": self.view.layers.study,
             "target": self.view.layers.target,
             "model": self.view.model.name(),
+            "colours": self.view.layers.labels,
+            "marks": self.view.layers.seeds,
+            "numbers": self.view.layers.numbers,
+            "contacts": self.view.layers.contacts,
             "study_shown": self.study_shown(),
             "teeth_shown": self.teeth_shown(),
         }))
@@ -1915,8 +1973,9 @@ pub(crate) enum ToolbarItem {
 
 impl ToolbarItem {
     /// Every item, in the order of the toolbar; without `advanced` (the
-    /// advanced options off) not the measuring tools nor the layers of the
-    /// marks.
+    /// advanced options off) not the measuring tools. The four layers
+    /// (tooth colours, marks, tooth numbers, contact map) are always there,
+    /// whatever the project, the view, the step or the options.
     fn all(advanced: bool) -> Vec<ToolbarItem> {
         let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
         let groups = [
@@ -1930,7 +1989,7 @@ impl ToolbarItem {
             ToolbarGroup::Fit,
         ]
         .into_iter()
-        .filter(|g| advanced || !matches!(g, ToolbarGroup::Tools | ToolbarGroup::Layers))
+        .filter(|g| advanced || !matches!(g, ToolbarGroup::Tools))
         .map(ToolbarItem::Group);
         views.chain(groups).collect()
     }
@@ -2432,10 +2491,12 @@ mod tests {
     }
 
     #[test]
-    fn the_advanced_options_off_leave_the_tools_and_the_marks_out_of_the_toolbar() {
+    fn the_advanced_options_off_leave_the_tools_out_of_the_toolbar_and_never_the_layers() {
         let simple = ToolbarItem::all(false);
         assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Tools)));
-        assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
+        // the four layers: tooth colours, marks, tooth numbers, contact map
+        assert!(simple.contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
+        assert!(ToolbarItem::all(true).contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
         // the rest, in the same order
         let full: Vec<ToolbarItem> = ToolbarItem::all(true)
             .into_iter()
@@ -2478,11 +2539,17 @@ mod tests {
             crate::now_rfc3339(),
             state,
         );
-        Workspace::new_headless(
+        let mut ws = Workspace::new_headless(
             Box::new(dca_module::AlignersModule::new()),
             Some(project),
             None,
-        )
+        );
+        // these tests are about what the layers draw: they are on (a project
+        // opens with them off, see `the_four_toggles_start_off...`)
+        ws.view.layers.labels = true;
+        ws.view.layers.seeds = true;
+        ws.view.layers.numbers = true;
+        ws
     }
 
     /// Two segmented demo arches in virtual occlusion with tooth frames and
@@ -2888,11 +2955,17 @@ mod built_teeth_tests {
             crate::now_rfc3339(),
             state,
         );
-        Workspace::new_headless(
+        let mut ws = Workspace::new_headless(
             Box::new(dca_module::AlignersModule::new()),
             Some(project),
             None,
-        )
+        );
+        // these tests are about what the layers draw: they are on (a project
+        // opens with them off, see `the_four_toggles_start_off...`)
+        ws.view.layers.labels = true;
+        ws.view.layers.seeds = true;
+        ws.view.layers.numbers = true;
+        ws
     }
 
     fn mesh(ws: &Workspace, id: u64) -> Option<&ViewMesh> {
@@ -3823,5 +3896,144 @@ mod built_teeth_tests {
             assert!(a.follow_scans(has.0, has.1), "{arches:?}");
             assert_eq!(a, Arches::default());
         }
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// The four toolbar toggles, as the layers hold them: tooth colours,
+    /// tooth marks, tooth numbers, contact map.
+    fn four(ws: &Workspace) -> [bool; 4] {
+        let l = ws.view.layers;
+        [l.labels, l.seeds, l.numbers, l.contacts]
+    }
+
+    fn set_four(ws: &mut Workspace, on: [bool; 4]) {
+        let l = &mut ws.view.layers;
+        [l.labels, l.seeds, l.numbers, l.contacts] = on;
+    }
+
+    /// A project with the segmented demo arch, opened as it is from a file.
+    fn opened() -> Workspace {
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(Project::new(
+                AppInfo {
+                    version: "0.1.0".into(),
+                    commit: "test".into(),
+                },
+                crate::now_rfc3339(),
+                lower_demo(),
+            )),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_four_toggles_start_off_in_a_new_and_in_an_opened_project() {
+        let new = Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        assert_eq!(four(&new), [false; 4]);
+        // a project whose teeth are already found and segmented
+        let ws = opened();
+        assert_eq!(four(&ws), [false; 4]);
+        assert!(overlay::aligners(ws.state()).is_some_and(|a| !a.seeds.is_empty()));
+        // the rest of the layers keep their own defaults
+        assert!(ws.view.layers.study && !ws.view.layers.target && !ws.view.layers.ipr);
+        // selecting the function of the separation only selects it
+        let mut ws = opened();
+        ws.select_item(crate::leaf::SEGMENT);
+        ws.select_item(crate::leaf::FIND_TEETH);
+        assert_eq!(four(&ws), [false; 4]);
+        // the bridge says so
+        let out = ws
+            .set_window_view(None, None, None, None, None, WindowOverlays::default())
+            .unwrap();
+        for k in ["colours", "marks", "numbers", "contacts"] {
+            assert_eq!(out[k], false, "{k}");
+        }
+    }
+
+    #[test]
+    fn find_the_teeth_and_the_separation_switch_no_toggle_on() {
+        let mut ws = opened();
+        for id in [crate::leaf::FIND_TEETH, crate::leaf::SEGMENT] {
+            assert!(ws.run_leaf_command(id, Value::Null), "{id}");
+            assert!(ws.wait_for_jobs(WAIT), "{id}");
+            assert!(ws.take_leaf_answer().is_some_and(|a| a.is_ok()), "{id}");
+            assert_eq!(four(&ws), [false; 4], "{id}");
+        }
+    }
+
+    #[test]
+    fn the_brush_turns_the_colours_and_the_numbers_on_and_gives_them_back() {
+        // every combination of the four before the brush opens
+        for bits in 0..16u8 {
+            let before = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0];
+            let mut ws = opened();
+            set_four(&mut ws, before);
+            assert!(ws.open_tool(manual::Tool::Brush));
+            // colours and numbers on; the marks and the contact map as they were
+            assert_eq!(
+                four(&ws),
+                [true, before[1], true, before[3]],
+                "inside {before:?}"
+            );
+            ws.close_tool();
+            assert_eq!(four(&ws), before, "after {before:?}");
+        }
+    }
+
+    #[test]
+    fn a_toggle_by_hand_inside_the_brush_wins_and_the_exit_restores_the_entry() {
+        let mut ws = opened();
+        set_four(&mut ws, [true, false, false, false]);
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, false, true, false]);
+        // the user turns the colours off and the marks on inside the brush
+        ws.view.layers.labels = false;
+        ws.view.layers.seeds = true;
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, true, false], "the choice wins");
+        // a frame while the brush is open changes nothing
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, true, false]);
+        // the bridge sets one inside the brush: it wins too
+        ws.set_window_view(
+            None,
+            None,
+            None,
+            None,
+            None,
+            WindowOverlays {
+                numbers: Some(false),
+                ..WindowOverlays::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(four(&ws), [false, true, false, false]);
+        // out of the brush: the two go back to the entry; the marks stay as
+        // the user left them
+        ws.close_tool();
+        assert_eq!(four(&ws), [true, true, false, false]);
+    }
+
+    #[test]
+    fn leaving_the_brush_by_another_tool_or_a_state_change_restores_the_toggles() {
+        let mut ws = opened();
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, false, true, false]);
+        // another tool of the same function opens: the brush is left
+        assert!(ws.open_tool(manual::Tool::Seeds));
+        assert_eq!(four(&ws), [false; 4]);
+        // back in the brush, then the tool goes by the state alone (an undo
+        // that closes it, a project change): the next look restores them
+        set_four(&mut ws, [false, true, false, true]);
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, true, true, true]);
+        ws.manual.tool = None;
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, false, true]);
+        // selecting the entry of the separation never turns them on
+        ws.select_item(crate::leaf::SEGMENT);
+        assert_eq!(four(&ws), [false, true, false, true]);
     }
 }
