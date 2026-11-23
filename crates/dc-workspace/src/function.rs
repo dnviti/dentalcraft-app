@@ -84,6 +84,10 @@ struct Function {
     advanced_corrections: bool,
     /// [`Function::more`] is only advanced options.
     advanced_more: bool,
+    /// Why the function does not apply to the case, in the words of the app
+    /// (`None`: it applies). The inspector then says so in place of its
+    /// status, parameters, run button and corrections: nothing to run.
+    not_applicable: Option<fn(&Workspace) -> Option<String>>,
 }
 
 /// The tools shown only with the advanced options on (the region view of
@@ -102,6 +106,7 @@ const PLAIN: Function = Function {
     advanced_params: false,
     advanced_corrections: false,
     advanced_more: false,
+    not_applicable: None,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -204,6 +209,8 @@ static FUNCTIONS: &[Function] = &[
         more: Some(Workspace::bite_corrections),
         // "Correct the interpenetration"
         advanced_more: true,
+        // one arch has no bite: nothing to register or estimate
+        not_applicable: Some(Workspace::bite_not_applicable),
         ..PLAIN
     },
 ];
@@ -290,6 +297,13 @@ impl Workspace {
             return;
         }
         let f = of(id);
+        if let Some(why) = f.not_applicable.and_then(|why| why(self)) {
+            ui.add_space(10.0);
+            widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-applicable"));
+            ui.add_space(8.0);
+            caption(ui, why);
+            return;
+        }
         let done = self.is_done(id);
         let next = self.next_step() == Some(id);
         let advanced = dc_module_api::advanced_ui(ui.ctx());

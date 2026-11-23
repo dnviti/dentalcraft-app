@@ -251,17 +251,22 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
             .unwrap();
         };
         demo(&mut c, "lower");
-        // a leaf that fails answers with its error, as before
-        let e = c
-            .call("execute", json!({"id": "aligners.occlusion.align"}))
-            .unwrap_err();
+        // a leaf that fails answers with its error, as before (the case
+        // analysis needs the 3D teeth, which the demo arch has not yet)
+        let analysis = "aligners.diagnosis.space-analysis";
+        let e = c.call("execute", json!({ "id": analysis })).unwrap_err();
         assert!(
             e["message"]
                 .as_str()
                 .unwrap()
-                .starts_with("aligners.occlusion.align: "),
+                .starts_with(&format!("{analysis}: ")),
             "{e}"
         );
+        // Bite with one arch is no failure: it does not apply, and says so
+        let out = c
+            .call("execute", json!({"id": "aligners.occlusion.align"}))
+            .unwrap();
+        assert_eq!(out["applies"], false, "{out}");
         demo(&mut c, "upper");
         let out = c
             .call(

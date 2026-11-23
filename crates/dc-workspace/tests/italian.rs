@@ -204,7 +204,8 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     );
     let mut h = harness(ws);
     h.run();
-    assert!(h.query_by_label("Flusso di trattamento 3/9").is_some());
+    // import, find the teeth, separate teeth and gum, and the bite, which one arch has not
+    assert!(h.query_by_label("Flusso di trattamento 4/9").is_some());
     h.state_mut()
         .select_item("aligners.diagnosis.space-analysis");
     h.run();

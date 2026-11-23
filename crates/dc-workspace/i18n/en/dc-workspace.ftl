@@ -867,3 +867,7 @@ ws-warn-comp-crown = the farthest point of the crown
 ws-warn-ipr-unscheduled-title = IPR that no aligner carries
 ws-warn-ipr-unscheduled = The IPR between teeth { $a } and { $b } is in no aligner: do it by hand.
 ws-warn-seeds-title = Two tooth marks are very close
+
+# A function that does not apply to the case (Bite with one arch).
+ws-fn-not-applicable = Does not apply
+ws-bite-one-arch = The project has only the { $arch } arch: there is no bite. Nothing is estimated, and the aligners are made from this arch alone.

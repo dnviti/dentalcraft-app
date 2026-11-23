@@ -26,7 +26,7 @@ use dc_ui::fonts;
 use dc_ui::theme::colors;
 use dc_ui::widgets::{self, BadgeKind, Button};
 use dc_viewport::Pick;
-use dca_model::{AlignersState, BiteMethod, BiteRegistration, BiteVerdict, MODULE_ID};
+use dca_model::{AlignersState, BiteMethod, BiteRegistration, BiteUse, BiteVerdict, MODULE_ID};
 use egui::{RichText, Ui};
 use glam::{DVec3, Vec3};
 use serde_json::{Value, json};
@@ -421,6 +421,25 @@ pub(crate) fn feedback_toast(id: &str, out: &Value) -> Option<Toast> {
 }
 
 impl Workspace {
+    /// Why Bite does not apply to the case: it has one arch, so it has no
+    /// bite (`dca_model::bite_use`): nothing is registered or estimated, and
+    /// a bite an old project stores is not shown. `None` otherwise.
+    pub(crate) fn bite_not_applicable(&self) -> Option<String> {
+        let state = self.undo.current();
+        if !BiteUse::of(state).one_arch() {
+            return None;
+        }
+        let role = if state.case.scan(ScanRole::Upper).is_some() {
+            ScanRole::Upper
+        } else {
+            ScanRole::Lower
+        };
+        Some(dc_i18n::tr_args(
+            "ws-bite-one-arch",
+            &[("arch", &t(arch_key(role)))],
+        ))
+    }
+
     /// The report of the last bite (the plugin's "Situazione" box).
     pub(crate) fn bite_results(&mut self, ui: &mut Ui) {
         let state = self.undo.current().clone();

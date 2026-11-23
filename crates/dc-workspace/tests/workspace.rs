@@ -1538,8 +1538,8 @@ fn the_footer_counts_the_nine_steps_that_have_their_result() {
     let mut h = harness(ws);
     h.run();
     assert!(
-        footer(&h, 3),
-        "import, find the teeth, separate teeth and gum"
+        footer(&h, 4),
+        "import, find the teeth, separate teeth and gum, and the bite, which one arch has not"
     );
 }
 
@@ -1585,7 +1585,31 @@ fn a_project_reopened_shows_the_ticks_of_what_it_holds() {
         Some(path),
     ));
     h.run();
-    assert!(footer(&h, 3));
+    // the bite counts: one arch has none to do
+    assert!(footer(&h, 4));
+}
+
+#[test]
+fn the_bite_of_one_arch_does_not_apply_and_has_nothing_to_run() {
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.run();
+    assert!(h.query_by_label("Does not apply").is_some());
+    assert!(
+        h.query_by_label_contains("only the lower arch: there is no bite")
+            .is_some()
+    );
+    // nothing to run, to correct or to do next
+    for label in [
+        "Run",
+        "Run again",
+        "Next step",
+        "Not done yet",
+        "Three points",
+    ] {
+        assert!(h.query_by_label(label).is_none(), "{label}");
+    }
 }
 
 #[test]

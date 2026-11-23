@@ -867,3 +867,7 @@ ws-warn-comp-crown = il punto più lontano della corona
 ws-warn-ipr-unscheduled-title = IPR che nessun allineatore porta
 ws-warn-ipr-unscheduled = L'IPR tra i denti { $a } e { $b } non è in nessun allineatore: va fatto a mano.
 ws-warn-seeds-title = Due punti dente sono molto vicini
+
+# Una funzione che non si applica al caso (Morso con una sola arcata).
+ws-fn-not-applicable = Non si applica
+ws-bite-one-arch = Il progetto ha solo l'arcata { $arch }: non c'è un morso. Non si stima nulla e gli allineatori sono fatti solo da questa arcata.
