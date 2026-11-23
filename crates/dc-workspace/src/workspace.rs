@@ -496,6 +496,11 @@ impl Workspace {
                 ),
             );
         }
+        // the doubts the automatic numbering left on the marks the case
+        // holds: said again, they stay until the marks change
+        for toast in leaf::numbering_doubt_toasts(ws.undo.current()) {
+            ws.toast_sticky(toast);
+        }
         ws
     }
 
@@ -1987,7 +1992,7 @@ impl Workspace {
 
     /// What a leaf's command says when it ends: the sentence of its output,
     /// and for the whole pipeline the summary and the next leaf.
-    fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
+    pub(crate) fn show_leaf_report(&mut self, id: &'static str, out: &Value) {
         // a leaf that lists parts to print opens the print popup with them
         self.open_print_from(out);
         // the aligners it computed: what they warn about, for the inspector

@@ -467,6 +467,20 @@ pub(crate) fn step_warning_toasts(out: &Value) -> Vec<Toast> {
         .collect()
 }
 
+/// One notice per doubt the automatic numbering left on the tooth marks the
+/// case holds (`numbering_doubts`, by arch, in words): the notices "to
+/// check" that Find the teeth said when it ended, said again when a project
+/// is opened with its marks still in doubt (they go when the marks change).
+pub(crate) fn numbering_doubt_toasts(state: &CaseState) -> Vec<Toast> {
+    state
+        .module_data::<AlignersState>(MODULE_ID)
+        .into_iter()
+        .flat_map(|d| d.numbering_doubts.values().flatten())
+        .filter(|w| !w.is_empty())
+        .map(|w| Toast::new(ToastLevel::Warning, "ws-toast-to-check").with_detail(w.as_str()))
+        .collect()
+}
+
 /// What "3D teeth" built: the teeth built per arch and the gingivas. Read
 /// from `arches` (per arch: `rebuilt` the tooth numbers built this time,
 /// else `teeth` their count, and `gingiva`), so a partial rebuild counts the
@@ -1192,6 +1206,78 @@ mod tests {
                 && changes_case(BITE)
                 && changes_case(VISITS)
         );
+    }
+
+    #[test]
+    fn the_doubts_of_the_numbering_the_case_holds_are_notices_to_check() {
+        let mut state = CaseState::default();
+        assert!(numbering_doubt_toasts(&state).is_empty());
+        let mut data = AlignersState::default();
+        data.numbering_doubts.insert(
+            ScanRole::Upper,
+            vec!["Check the teeth of the upper arch: no crown between 11 and 22".into()],
+        );
+        state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let toasts = numbering_doubt_toasts(&state);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].message_key, "ws-toast-to-check");
+        assert_eq!(toasts[0].level, ToastLevel::Warning);
+        assert!(toasts[0].detail.as_deref().unwrap().contains("11 and 22"));
+    }
+
+    /// A workspace on a case whose upper arch is in doubt, as opened.
+    fn opened_in_doubt() -> Workspace {
+        let mut state = CaseState::default();
+        let mut data = AlignersState::default();
+        data.numbering_doubts
+            .insert(ScanRole::Upper, vec!["no crown between 11 and 22".into()]);
+        state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let project = dc_project::Project::new(
+            dc_project::AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            state,
+        );
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            None,
+        )
+    }
+
+    fn to_check(ws: &Workspace) -> Vec<String> {
+        ws.sticky_toast_keys()
+            .into_iter()
+            .filter(|k| k == "ws-toast-to-check")
+            .collect()
+    }
+
+    #[test]
+    fn the_doubts_of_find_the_teeth_stay_on_screen_from_the_leaf_the_pipeline_and_a_reopened_project()
+     {
+        // the inspector's button: the warnings of the numbering step
+        let mut ws =
+            Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        let numbering = json!({ "steps": [
+            { "id": "aligners.preparation.numbering.automatic",
+              "output": { "warnings": ["no crown between 11 and 22"] } },
+        ] });
+        ws.show_leaf_report(FIND_TEETH, &numbering);
+        assert_eq!(to_check(&ws).len(), 1);
+        // the whole pipeline: the doubts are in its warnings, once
+        let mut ws =
+            Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        let auto = json!({ "steps": [], "seconds": 1.0,
+                           "warnings": ["no crown between 11 and 22"] });
+        ws.show_leaf_report(AUTO, &auto);
+        assert_eq!(to_check(&ws).len(), 1);
+        // the project opened again with the marks still in doubt: said again
+        assert_eq!(to_check(&opened_in_doubt()).len(), 1);
+        // a new case, or marks without doubt: nothing
+        let none = Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        assert!(to_check(&none).is_empty());
     }
 
     #[test]
