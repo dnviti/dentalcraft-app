@@ -767,6 +767,7 @@ ws-prod-trim-mode-scalloped = Festonato, lungo il margine gengivale
 ws-prod-trim-mode-smooth = Margine gengivale, liscio
 ws-prod-trim-margin-gap = Bordo sopra il margine
 ws-prod-trim-scallop = Altezza dei festoni
+ws-prod-trim-papilla = Bordo lontano dalle papille
 ws-prod-trim-recess = Rientranza tra i denti
 ws-prod-trim-extension = Estensione del bordo
 ws-prod-trim-equator-offset = Bordo oltre l'equatore

@@ -767,6 +767,7 @@ ws-prod-trim-mode-scalloped = Scalloped, along the gingival margin
 ws-prod-trim-mode-smooth = Gingival margin, smooth
 ws-prod-trim-margin-gap = Edge above the margin
 ws-prod-trim-scallop = Height of the scallops
+ws-prod-trim-papilla = Edge clear of the papillae
 ws-prod-trim-recess = Recess between the teeth
 ws-prod-trim-extension = Edge extension
 ws-prod-trim-equator-offset = Edge beyond the equator

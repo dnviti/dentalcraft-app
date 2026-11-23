@@ -196,6 +196,13 @@ const GROUPS: &[(&str, &str, &[Item])] = &[
                 "mm",
             )),
             Item::Number(number("scallop_mm", "ws-prod-trim-scallop", 0.1, 1, "mm")),
+            Item::Number(number(
+                "papilla_relief_mm",
+                "ws-prod-trim-papilla",
+                0.1,
+                1,
+                "mm",
+            )),
             Item::Number(number("recess_mm", "ws-prod-trim-recess", 0.1, 1, "mm")),
             Item::Number(number(
                 "extension_mm",
