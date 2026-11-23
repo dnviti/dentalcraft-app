@@ -5,8 +5,10 @@
 //!   workspace as the window runs it, the project is saved with Save (Ctrl+S)
 //!   and opened again as Home opens it, and the case, the data of the module,
 //!   every mesh they use and the step history come back equal; undo after an
-//!   edit too. Every registered command must be listed, so a new one cannot
-//!   be left out of the round trip without a reason.
+//!   edit too. A command that gives the case back as it got it adds no undo
+//!   step, leaves nothing to save and records nothing. Every registered
+//!   command must be listed, so a new one cannot be left out of the round
+//!   trip without a reason.
 //! - The automatic save on a simulated clock: two quiet seconds, restarted by
 //!   each change, never while a job changes the case (it follows the job),
 //!   never for a project without a file, a failed save is shown.
@@ -214,17 +216,26 @@ fn spec(ws: &Workspace, id: &str) -> CommandSpec {
 /// Runs `id` with `params` in the background as the window does and waits:
 /// it lands as one step on the undo stack, without an error.
 fn run(ws: &mut Workspace, id: &str, params: Value) {
+    let landed = ran(ws, id, params.clone());
+    assert!(
+        landed,
+        "{id} {params}: nothing landed {:?}",
+        ws.toast_details()
+    );
+}
+
+/// Runs `id` with `params` as [`run`] does: `true` when it landed as a step
+/// on the undo stack (a command that gives the case back as it got it adds
+/// none).
+fn ran(ws: &mut Workspace, id: &str, params: Value) -> bool {
     let before = Arc::clone(ws.state());
     let shown = ws.toast_keys().len();
     let spec = spec(ws, id);
     ws.run_command(Box::new(spec.command(params.clone())));
     assert!(ws.wait_for_jobs(WAIT), "{id}");
     let new: Vec<_> = ws.toast_details().split_off(shown);
-    assert!(
-        !Arc::ptr_eq(&before, ws.state()),
-        "{id} {params}: nothing landed {new:?}"
-    );
     assert!(ws.sticky_toast_keys().is_empty(), "{id} {params}: {new:?}");
+    !Arc::ptr_eq(&before, ws.state())
 }
 
 fn aligners(ws: &Workspace) -> AlignersState {
@@ -310,6 +321,10 @@ enum Plan {
     /// Runs it with these parameters through the workspace, then saves,
     /// opens the file again and compares.
     Run(Params),
+    /// Runs it with these parameters through the workspace: it gives the
+    /// case back as it got it, so nothing lands on the undo stack, nothing
+    /// is left to save and the step history is the same.
+    Same(Params),
     /// Not run here, and why.
     Skip(&'static str),
 }
@@ -358,7 +373,7 @@ fn null(_: &Workspace, _: &Path) -> Value {
 /// Every command that can change the case, in the order the round trip runs
 /// them (each on the case the previous ones left), or why it is not run.
 fn plan() -> Vec<(&'static str, Plan)> {
-    use Plan::{Run, Skip};
+    use Plan::{Run, Same, Skip};
     vec![
         // the settings of the case
         (
@@ -406,17 +421,21 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.demo",
             Run(|_, _| json!({ "arch": "lower", "seed": 5 })),
         ),
-        // the steps, one by one
-        ("aligners.case.detect-arch", Run(null)),
+        // the steps, one by one. `Same`: on this case the run gives back the
+        // case it got (the demo arch is already detected, numbered, oriented
+        // and checked; the diagnoses, the schedule and the occlusion reports
+        // are there; the tooth rebuilt comes out the same; a query): no undo
+        // step, nothing to save
+        ("aligners.case.detect-arch", Same(null)),
         ("aligners.frame", Run(|_, _| json!({}))),
         ("aligners.teeth.find", Run(|_, _| json!({}))),
         (
             "aligners.preparation.numbering.automatic",
-            Run(|_, _| json!({ "arch": "lower" })),
+            Same(|_, _| json!({ "arch": "lower" })),
         ),
         (
             "aligners.preparation.orientation.automatic",
-            Run(|_, _| json!({})),
+            Same(|_, _| json!({})),
         ),
         // both arches: the new tooth marks left their colours out of date
         (
@@ -425,7 +444,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ),
         (
             "aligners.preparation.segmentation.check",
-            Run(|_, _| json!({ "arch": "lower" })),
+            Same(|_, _| json!({ "arch": "lower" })),
         ),
         ("aligners.teeth.frames", Run(|_, _| json!({}))),
         (
@@ -437,10 +456,10 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Run(|_, _| json!({ "arch": "lower" })),
         ),
         ("aligners.teeth.build", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.space-analysis", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.little-index", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.bolton", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.complexity", Run(|_, _| json!({}))),
+        ("aligners.diagnosis.space-analysis", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.little-index", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.bolton", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.complexity", Same(|_, _| json!({}))),
         // the clinician's own values over the computed ones: the complexity follows
         (
             "aligners.diagnosis.edit-values",
@@ -489,9 +508,9 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (
             "aligners.planning.schedule",
-            Run(|_, _| json!({ "start_date": "2026-11-16" })),
+            Same(|_, _| json!({ "start_date": "2026-11-16" })),
         ),
-        ("aligners.planning.aligners", Run(|_, _| json!({}))),
+        ("aligners.planning.aligners", Same(|_, _| json!({}))),
         // a tooth slowed: the aligners of its arch computed again with it
         (
             "aligners.planning.tooth-speed",
@@ -526,12 +545,12 @@ fn plan() -> Vec<(&'static str, Plan)> {
             }),
         ),
         ("aligners.review.bulk", Run(|_, _| json!({}))),
-        ("aligners.occlusion.contact-map", Run(null)),
+        ("aligners.occlusion.contact-map", Same(null)),
         (
             "aligners.occlusion.bite-with-aligners",
-            Run(|_, _| json!({})),
+            Same(|_, _| json!({})),
         ),
-        ("aligners.occlusion.bite-ramps", Run(|_, _| json!({}))),
+        ("aligners.occlusion.bite-ramps", Same(|_, _| json!({}))),
         ("aligners.occlusion.bite-registration.icp", Skip(BITE_SCANS)),
         (
             "aligners.occlusion.bite-registration.three-points",
@@ -556,7 +575,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         // corrections of the built teeth and of the plan
         (
             "aligners.preparation.reconstruction.rebuild-tooth",
-            Run(|ws, _| json!({ "fdi": lower_crown(ws, 1) })),
+            Same(|ws, _| json!({ "fdi": lower_crown(ws, 1) })),
         ),
         (
             "aligners.manual.rebuild-tooth",
@@ -565,7 +584,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         // a query of the region and margin line of a tooth: the case is not touched
         (
             "aligners.manual.tooth-region",
-            Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
+            Same(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
         ),
         (
             "aligners.planning.movements",
@@ -711,7 +730,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.case.make-base",
             // the upper scan now: the old lower one, with all its tooth marks
             // (the swapped upper had its marks cleared: no arch frame)
-            Run(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
+            Same(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
         ),
         // the scans
         (
@@ -850,8 +869,9 @@ fn every_change_comes_back_after_save_and_reopen() {
     let path = dir.path().join("round-trip.dcprj");
     let mut ws = saved(demo_state(&["lower", "upper"]), &path);
     for (id, step) in plan() {
-        let params = match step {
-            Plan::Run(params) => params,
+        let (params, same) = match step {
+            Plan::Run(params) => (params, false),
+            Plan::Same(params) => (params, true),
             Plan::Skip(why) => {
                 eprintln!("{id:<52} not run: {why}");
                 continue;
@@ -859,7 +879,24 @@ fn every_change_comes_back_after_save_and_reopen() {
         };
         let start = Instant::now();
         let params = params(&ws, dir.path());
-        run(&mut ws, id, params);
+        let history_before = history(&ws);
+        let landed = ran(&mut ws, id, params.clone());
+        if same {
+            // nothing to save: no undo step, no change, the same history
+            assert!(!landed, "{id} {params}: an unchanged case landed");
+            assert!(!ws.is_dirty(), "{id}: unsaved");
+            assert_eq!(history(&ws), history_before, "{id}: step history");
+            eprintln!(
+                "{id:<52} {:>6.2} s run, case unchanged",
+                start.elapsed().as_secs_f64()
+            );
+            continue;
+        }
+        assert!(
+            landed,
+            "{id} {params}: nothing landed {:?}",
+            ws.toast_details()
+        );
         let ran = start.elapsed();
         save_and_compare(&mut ws, &path, id);
         eprintln!(

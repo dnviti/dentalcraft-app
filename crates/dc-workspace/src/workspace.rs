@@ -1755,8 +1755,13 @@ impl Workspace {
             } => match handle.try_take() {
                 Some(Ok(Ok(state))) => {
                     self.clear_step_errors();
-                    let by = self.change_by(command, false);
-                    self.push_state(Arc::new(state), label, by);
+                    // a command that only reads (a region, a listing) gives
+                    // the case back as it got it: no undo step, nothing to
+                    // save, nothing in the step history
+                    if !same_case(&state, self.undo.current()) {
+                        let by = self.change_by(command, false);
+                        self.push_state(Arc::new(state), label, by);
+                    }
                 }
                 Some(Ok(Err(CommandError::Cancelled))) => {
                     self.toast(Toast::new(ToastLevel::Info, "job-cancelled"));
@@ -2114,6 +2119,24 @@ impl Workspace {
     pub(crate) fn next_action(&mut self) -> WorkspaceAction {
         self.take_action()
     }
+}
+
+/// `a` holds the same case as `b`: the case, the same meshes (a mesh is
+/// keyed by the hash of its content) and the same data of every module. Data
+/// that cannot be written as JSON counts as changed.
+fn same_case(a: &CaseState, b: &CaseState) -> bool {
+    a.case == b.case
+        && a.blobs.len() == b.blobs.len()
+        && a.blobs.iter().all(|(r, _)| b.blobs.contains(r))
+        && a.modules.len() == b.modules.len()
+        && a.modules.iter().all(|(id, m)| {
+            b.modules
+                .get(id)
+                .is_some_and(|n| match (m.to_json(), n.to_json()) {
+                    (Ok(x), Ok(y)) => x == y,
+                    _ => false,
+                })
+        })
 }
 
 /// `a` and `b` are the same file: written the same, or both exist and lead
