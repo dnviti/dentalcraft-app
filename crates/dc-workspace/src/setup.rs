@@ -181,6 +181,13 @@ const GROUPS: &[(&str, &[Item])] = &[
                 1,
                 "mm",
             )),
+            Item::Number(number(
+                "distal_max_mm",
+                "ws-setup-distal-max",
+                0.05,
+                2,
+                "mm",
+            )),
             Item::Flag("close_spaces", "ws-setup-close-spaces"),
         ],
     ),

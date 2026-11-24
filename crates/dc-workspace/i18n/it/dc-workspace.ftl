@@ -412,6 +412,7 @@ ws-setup-expansion-lower-posterior = Espansione inf. posteriore (mm per lato)
 ws-setup-expansion-lower-canine = Espansione intercanina inf. (mm per lato)
 ws-setup-advance-max = Avanzamento incisivi max (mm)
 ws-setup-retract-max = Retrazione incisivi max (mm)
+ws-setup-distal-max = Distalizzazione max dell'ultimo dente di ogni lato (mm)
 ws-setup-close-spaces = Chiudi diastemi
 ws-setup-ipr-zone = Zona
 ws-setup-ipr-zone-none = Nessuna

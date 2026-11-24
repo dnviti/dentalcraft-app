@@ -415,6 +415,7 @@ ws-setup-expansion-lower-posterior = Lower posterior expansion (mm per side)
 ws-setup-expansion-lower-canine = Lower intercanine expansion (mm per side)
 ws-setup-advance-max = Largest incisor advancement (mm)
 ws-setup-retract-max = Largest incisor retraction (mm)
+ws-setup-distal-max = Largest distal movement of the last tooth of each side (mm)
 ws-setup-close-spaces = Close the gaps
 ws-setup-ipr-zone = Zone
 ws-setup-ipr-zone-none = None
