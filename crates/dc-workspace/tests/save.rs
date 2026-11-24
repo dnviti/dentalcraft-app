@@ -1157,6 +1157,69 @@ fn the_case_saves_itself_two_quiet_seconds_after_the_last_change() {
     assert_eq!(reopen(&path).case_state.case.patient_code, "A");
 }
 
+/// The aligner of the 3D view shown or hidden is how the case is looked at:
+/// it must not mark the project unsaved, so the automatic save never fires
+/// for it. It is hidden by default and shown only when asked for; the flag
+/// goes to the file with the next real save.
+#[test]
+fn showing_or_hiding_the_aligner_in_the_view_leaves_the_project_saved() {
+    const VIEW: &str = "aligners.view.aligner";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("view.dcprj");
+    let mut ws = saved(demo_state(&["lower", "upper"]), &path);
+    run(&mut ws, "aligners.auto", Value::Null);
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.take_action(), WorkspaceAction::Saved(path.clone()));
+    assert!(!ws.is_dirty());
+    assert!(
+        !aligners(&ws).aligner_view.shown,
+        "not shown unless the user asks"
+    );
+
+    let quiet = |ws: &mut Workspace, what: &str| {
+        assert!(!ws.is_dirty(), "{what}: marked unsaved");
+        ws.tick(0.0);
+        assert_eq!(ws.tick(DELAY_S + 60.0), None, "{what}");
+        assert!(!ws.is_saving(), "{what}: the automatic save started");
+        assert_eq!(ws.take_action(), WorkspaceAction::None, "{what}");
+    };
+    // shown, hidden, shown again, then undone and redone
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    assert!(aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "shown");
+    assert!(ran(&mut ws, VIEW, json!({ "show": false })));
+    assert!(!aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "hidden");
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    quiet(&mut ws, "shown again");
+    assert!(ws.undo());
+    quiet(&mut ws, "undone");
+    assert!(ws.redo());
+    assert!(aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "redone");
+
+    // a real change is unsaved, and a toggle on top of it does not hide that
+    rename(&mut ws, "V");
+    assert!(ws.is_dirty());
+    assert!(ran(&mut ws, VIEW, json!({ "show": false })));
+    assert!(ws.is_dirty(), "the change is still unsaved");
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    // the save writes the change and the flag with it
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(!ws.is_dirty());
+    let file = reopen(&path);
+    assert_eq!(file.case_state.case.patient_code, "V");
+    assert!(
+        file.case_state
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .aligner_view
+            .shown
+    );
+}
+
 #[test]
 fn nothing_saves_itself_while_a_job_runs_and_it_saves_once_the_job_ends() {
     let dir = tempfile::tempdir().unwrap();

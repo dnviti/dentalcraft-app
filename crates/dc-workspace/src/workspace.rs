@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use dc_case::{Case, CaseState, RoleSource, ScanRole};
@@ -267,6 +267,12 @@ pub struct Workspace {
     pub(crate) undo: UndoStack,
     /// The state the file holds (as saved or opened).
     saved: Arc<CaseState>,
+    /// The versions of the case that differ from `saved` only in how the
+    /// case is shown (the aligner of the view shown or hidden): they count
+    /// as saved, so a pure view toggle neither marks the project unsaved
+    /// nor starts the automatic save. The next save writes the flag with
+    /// everything else.
+    look_of_saved: Vec<Weak<CaseState>>,
     /// The timer of the automatic save ([`Workspace::tick`]).
     autosave: Autosave,
     /// A save asked for while another one runs.
@@ -435,6 +441,7 @@ impl Workspace {
             shortcut_text,
             undo: UndoStack::new(state.clone(), UndoStack::DEFAULT_BUDGET),
             saved: state,
+            look_of_saved: Vec::new(),
             autosave: Autosave::default(),
             queued_save: None,
             leave_after_save: None,
@@ -521,9 +528,16 @@ impl Workspace {
         self.path.as_deref()
     }
 
-    /// `true` when the case differs from the saved (or opened) version.
+    /// `true` when the case differs from the saved (or opened) version. A
+    /// version that only differs by the aligner of the view shown or hidden
+    /// is not a difference.
     pub fn is_dirty(&self) -> bool {
-        !Arc::ptr_eq(self.undo.current(), &self.saved)
+        let current = self.undo.current();
+        !Arc::ptr_eq(current, &self.saved)
+            && !self
+                .look_of_saved
+                .iter()
+                .any(|w| w.upgrade().is_some_and(|s| Arc::ptr_eq(&s, current)))
     }
 
     /// `true` when the changes are saved by themselves ([`Workspace::tick`]):
@@ -1765,7 +1779,7 @@ impl Workspace {
                     // save, nothing in the step history
                     if !same_case(&state, self.undo.current()) {
                         let by = self.change_by(command, false);
-                        self.push_state(Arc::new(state), label, by);
+                        self.land_state(command, Arc::new(state), label, by);
                     }
                 }
                 Some(Ok(Err(CommandError::Cancelled))) => {
@@ -1820,6 +1834,26 @@ impl Workspace {
         self.undo.push(state, label);
     }
 
+    /// [`Workspace::push_state`] for the result of command `command`. The
+    /// aligner of the view shown or hidden (`aligners.view.aligner`) is how
+    /// the case is looked at, not a change of it: on a case that was saved
+    /// it leaves the case saved ([`Workspace::is_dirty`]), also after undo
+    /// and redo of it.
+    fn land_state(
+        &mut self,
+        command: &'static str,
+        state: Arc<CaseState>,
+        label: String,
+        by: Option<By>,
+    ) {
+        let saved = !self.is_dirty();
+        self.push_state(Arc::clone(&state), label, by);
+        if saved && command == crate::aligner::SHOW {
+            self.look_of_saved.retain(|w| w.strong_count() > 0);
+            self.look_of_saved.push(Arc::downgrade(&state));
+        }
+    }
+
     /// A registered command run as a job ended: its state lands as one undo
     /// step and its output is reported, or its failure is shown. The leaf an
     /// agent runs keeps its answer ([`Workspace::take_leaf_answer`]).
@@ -1859,7 +1893,7 @@ impl Workspace {
                         _ => false,
                     };
                     if recorded || !same_case(&state, self.undo.current()) {
-                        self.push_state(Arc::new(state), label, by);
+                        self.land_state(command, Arc::new(state), label, by);
                     }
                 }
                 match kind {
@@ -1912,6 +1946,7 @@ impl Workspace {
         match failure {
             None => {
                 self.saved = state;
+                self.look_of_saved.clear();
                 self.autosave.succeeded();
                 self.manifest = Some(manifest);
                 self.path = Some(path.clone());
