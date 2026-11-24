@@ -1425,7 +1425,10 @@ impl Bridge {
             return Step::Done(Err(RpcError::host(format!("{id}: {e}"))));
         }
         Step::Wait(Box::new(move |_: &mut Bridge| match rx.try_recv() {
-            Ok(Ok(v)) => Some(Ok(v)),
+            Ok(Ok(mut v)) => {
+                localise_print_warnings(&mut v);
+                Some(Ok(v))
+            }
             Ok(Err(e)) => {
                 // refused as the window's run is: in the log, with its code
                 tracing::warn!(
@@ -2036,6 +2039,48 @@ impl eframe::App for ControlledApp {
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.bridge.app.pace_frame(raw_input);
+    }
+}
+
+/// The i18n key of the sentence for the `print.prepare` warning `code`
+/// (`dc_print`'s own message is in English), when the app has one.
+fn print_warning_key(code: &str) -> Option<&'static str> {
+    match code {
+        dc_print::profile::PROFILE_NOT_VALIDATED => Some(PRINT_WARNING_NOT_VALIDATED),
+        _ => None,
+    }
+}
+
+/// The sentence of the warning that the profile of the printer is not yet
+/// checked against the printer (argument: `profile`).
+const PRINT_WARNING_NOT_VALIDATED: &str = "app-print-warning-profile-not-validated";
+
+/// Runtime i18n keys of [`localise_print_warnings`], listed so a test can
+/// check that each one exists in every language.
+pub(crate) fn print_warning_keys() -> [&'static str; 1] {
+    [PRINT_WARNING_NOT_VALIDATED]
+}
+
+/// The warnings of a `print.prepare` result in the language of the app: the
+/// `message` of each is the sentence of its `code`, as the print window words
+/// it. The codes stay as the command gives them, and so does a warning the app
+/// has no sentence for. (The `summary.json` the command wrote keeps the
+/// message of the command.)
+pub fn localise_print_warnings(summary: &mut Value) {
+    let profile = summary["profile"].as_str().unwrap_or_default().to_owned();
+    let Some(warnings) = summary.get_mut("warnings").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for w in warnings {
+        let Some(w) = w.as_object_mut() else { continue };
+        if let Some(key) = w
+            .get("code")
+            .and_then(Value::as_str)
+            .and_then(print_warning_key)
+        {
+            let message = dc_i18n::tr_args(key, &[("profile", &profile)]);
+            w.insert("message".to_owned(), Value::String(message));
+        }
     }
 }
 
