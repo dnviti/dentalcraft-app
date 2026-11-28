@@ -64,6 +64,7 @@ pub fn runtime_keys() -> Vec<&'static str> {
         E::ServerRejected,
         E::InvalidGrant,
         E::TokenInvalid,
+        E::Clock,
         E::Cancelled,
         E::StorageUnavailable,
         E::NotSignedIn,
@@ -93,5 +94,6 @@ pub fn runtime_keys() -> Vec<&'static str> {
     keys.extend(app::WEEKDAY_KEYS);
     keys.extend(consent::runtime_keys());
     keys.extend(app::MONTH_KEYS);
+    keys.extend(control::print_warning_keys());
     keys
 }

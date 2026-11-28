@@ -204,7 +204,8 @@ fn the_italian_menu_counts_steps_and_the_inspector_speaks_italian() {
     );
     let mut h = harness(ws);
     h.run();
-    assert!(h.query_by_label("Flusso di trattamento 3/9").is_some());
+    // import, find the teeth, separate teeth and gum, and the bite, which one arch has not
+    assert!(h.query_by_label("Flusso di trattamento 4/9").is_some());
     h.state_mut()
         .select_item("aligners.diagnosis.space-analysis");
     h.run();
@@ -319,4 +320,153 @@ fn the_periodontal_choices_wrap_in_the_narrowest_inspector() {
         assert!(h.query_by_label(label).is_some(), "{label}");
     }
     assert_eq!(l.inspector_overflow, 0.0, "{l:?}");
+}
+
+/// The errors of the project file that this release added reach an Italian
+/// screen in Italian: no English sentence of the core, the technical detail
+/// (entry, path) kept.
+#[test]
+fn italian_project_file_errors() {
+    use dc_project::{DcprjError, LoadIssue};
+    dc_i18n::set_language(dc_i18n::Lang::It).unwrap();
+    // the sentences of the core errors, in lower case
+    let english = [
+        "cannot",
+        "contains",
+        "invalid number",
+        "previous file",
+        "unchanged",
+        "differs",
+        "manifest",
+        "could not",
+        "duplicate",
+        "mesh",
+    ];
+    let clean = |text: &str| {
+        let low = text.to_lowercase();
+        for word in english {
+            assert!(!low.contains(word), "{word} in {text}");
+        }
+    };
+    let text = dc_workspace::error_text(&DcprjError::NonFinite {
+        entry: "modules/aligners/state.json".to_owned(),
+        path: "/setup/poses/11/t/0".to_owned(),
+    });
+    assert!(
+        text.contains("modules/aligners/state.json") && text.contains("/setup/poses/11/t/0"),
+        "{text}"
+    );
+    assert!(text.contains("Non salvato"), "{text}");
+    clean(&text);
+    clean(&dc_workspace::error_text(&DcprjError::Corrupt(
+        "duplicate archive entry names".to_owned(),
+    )));
+    let blob = dc_case::BlobRef::of_bytes(b"x");
+    clean(&dc_workspace::issue_text(&LoadIssue::MissingBlob(blob)));
+    clean(&dc_workspace::issue_text(&LoadIssue::UnreadableEntry {
+        path: dc_project::HISTORY_PATH.to_owned(),
+        reason: "x".to_owned(),
+    }));
+    clean(&dc_workspace::issue_text(&LoadIssue::UnreadableEntry {
+        path: "case.json".to_owned(),
+        reason: "size 12 differs from the manifest (10 bytes)".to_owned(),
+    }));
+    clean(&dc_workspace::blocking_issues_text(&[
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+        LoadIssue::MissingBlob(blob),
+    ]));
+}
+
+/// The collisions the plan leaves, in Italian with the decimal comma, from
+/// the case: a reopened project shows them too; none left, nothing shown.
+#[test]
+fn the_italian_inspector_lists_the_collisions_left_also_after_reopening() {
+    italian();
+    const ALIGNERS: &str = "aligners.planning.aligners";
+    const LINE: &str = "Allineatore 5: i denti 41 e 31 si compenetrano di 0,350 mm, \
+                        0,120 mm oltre i 0,230 mm che il piano consente.";
+    let mut project = demo_project(&["lower"]);
+    let mut al = project
+        .case_state
+        .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.staging_results.insert(
+        dc_case::ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 8,
+            collisions_left: 1,
+            ..Default::default()
+        },
+    );
+    al.staging_collisions.insert(
+        dc_case::ScanRole::Lower,
+        vec![dca_model::CollisionLeft {
+            stage: 5,
+            a: dc_case::Fdi::new(41).unwrap(),
+            b: dc_case::Fdi::new(31).unwrap(),
+            penetration_mm: 0.35,
+            allowed_mm: 0.23,
+        }],
+    );
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+
+    // saved, then opened again as Home opens it
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("collisioni.dcprj");
+    let mut ws = Workspace::new_headless(
+        Box::new(AlignersModule::new()),
+        Some(project),
+        Some(path.clone()),
+    );
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(&path, &codecs).unwrap();
+    assert!(!loaded.read_only, "{:?}", loaded.issues);
+    let mut ws = Workspace::new_headless(
+        Box::new(AlignersModule::new()),
+        Some(loaded.project),
+        Some(path),
+    );
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    assert!(h.query_by_label(LINE).is_some(), "the collision line");
+    assert!(
+        h.query_by_label("Collisioni rimaste nel piano: 1")
+            .is_some(),
+        "its title"
+    );
+    // the count line is not repeated, and no English is left
+    assert!(h.query_by_label_contains("vedi la relazione").is_none());
+    assert!(h.query_by_label_contains("Collisions").is_none());
+
+    // nothing left: nothing shown
+    let mut project = demo_project(&["lower"]);
+    let mut al = project
+        .case_state
+        .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+        .unwrap()
+        .clone();
+    al.staging_results.insert(
+        dc_case::ScanRole::Lower,
+        dca_model::StagingSummary {
+            aligners: 8,
+            ..Default::default()
+        },
+    );
+    project
+        .case_state
+        .set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+    let mut ws = Workspace::new_headless(Box::new(AlignersModule::new()), Some(project), None);
+    ws.select_item(ALIGNERS);
+    let mut h = harness(ws);
+    h.run();
+    assert!(h.query_by_label_contains("Collisioni").is_none());
+    assert!(h.query_by_label_contains("compenetrano").is_none());
 }

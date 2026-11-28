@@ -41,16 +41,62 @@ pub(crate) struct Layers {
 }
 
 impl Default for Layers {
+    /// The four overlays of the toolbar (the tooth colours, the marks, the
+    /// tooth numbers, the contact map) start off: nothing is switched on
+    /// but by the user, or by the tooth brush while it is open
+    /// ([`follow_brush`]).
     fn default() -> Self {
         Self {
-            labels: true,
-            seeds: true,
-            numbers: true,
+            labels: false,
+            seeds: false,
+            numbers: false,
             contacts: false,
             target: false,
             ipr: false,
             study: true,
         }
+    }
+}
+
+/// The two overlays the tooth brush turns on while it is open: the tooth
+/// colours and the tooth numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrushOverlays {
+    pub labels: bool,
+    pub numbers: bool,
+}
+
+impl BrushOverlays {
+    /// Both on: what the brush shows.
+    pub(crate) const ON: Self = Self {
+        labels: true,
+        numbers: true,
+    };
+}
+
+/// What the tooth colours and the tooth numbers show once the tooth brush is
+/// open (`in_brush`) or closed, and what to remember for the way out.
+///
+/// `shown`: what they show now. `before`: what they showed when the brush
+/// opened (`None` while it is closed).
+///
+/// * the brush opens (`in_brush`, nothing remembered): both go on, and what
+///   they showed is remembered;
+/// * while it stays open nothing changes: a toggle by hand wins;
+/// * the brush closes (not `in_brush`, something remembered): each goes back
+///   to what it showed before the brush opened, whatever was done inside;
+/// * otherwise nothing changes.
+///
+/// The marks and the contact map are not touched by the brush.
+pub(crate) fn follow_brush(
+    shown: BrushOverlays,
+    before: Option<BrushOverlays>,
+    in_brush: bool,
+) -> (BrushOverlays, Option<BrushOverlays>) {
+    match (in_brush, before) {
+        (true, None) => (BrushOverlays::ON, Some(shown)),
+        (false, Some(before)) => (before, None),
+        (_, same) => (shown, same),
     }
 }
 
@@ -543,5 +589,81 @@ pub(crate) mod tests {
         // sRGB to linear: the darkest bins stay dark, white stays white
         assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
         assert!(srgb_to_linear(0.5) < 0.25);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    fn any_overlays() -> BrushOverlays {
+        BrushOverlays {
+            labels: kani::any(),
+            numbers: kani::any(),
+        }
+    }
+
+    // Opening the brush turns the tooth colours and the tooth numbers on and
+    // remembers exactly what they showed.
+    #[kani::proof]
+    fn opening_the_brush_turns_both_on_and_remembers_the_rest() {
+        let shown = any_overlays();
+        let (now, before) = follow_brush(shown, None, true);
+        assert!(now.labels && now.numbers);
+        assert_eq!(before, Some(shown));
+    }
+
+    // Leaving the brush puts each of the two back to what it showed before
+    // the brush opened, whatever the user toggled inside, and forgets it.
+    #[kani::proof]
+    fn leaving_the_brush_restores_what_it_was_before() {
+        let (shown_inside, before) = (any_overlays(), any_overlays());
+        let (now, kept) = follow_brush(shown_inside, Some(before), false);
+        assert_eq!(now, before);
+        assert_eq!(kept, None);
+    }
+
+    // While the brush stays open nothing changes: a toggle by hand wins, and
+    // the memory of the way out stays as it was.
+    #[kani::proof]
+    fn inside_the_brush_the_choice_by_hand_stays() {
+        let (shown, before) = (any_overlays(), any_overlays());
+        assert_eq!(
+            follow_brush(shown, Some(before), true),
+            (shown, Some(before))
+        );
+    }
+
+    // With the brush closed and nothing remembered, nothing changes: the
+    // overlays are never switched on but by the user or the brush.
+    #[kani::proof]
+    fn outside_the_brush_nothing_changes() {
+        let shown = any_overlays();
+        assert_eq!(follow_brush(shown, None, false), (shown, None));
+    }
+
+    // Open, toggle by hand any number of times, close: the state is the one
+    // before opening, for all four combinations and every choice inside.
+    #[kani::proof]
+    fn open_toggle_close_gives_back_the_state_before() {
+        let before = any_overlays();
+        let (inside, remembered) = follow_brush(before, None, true);
+        let toggled = BrushOverlays {
+            labels: if kani::any() {
+                !inside.labels
+            } else {
+                inside.labels
+            },
+            numbers: if kani::any() {
+                !inside.numbers
+            } else {
+                inside.numbers
+            },
+        };
+        let (still, remembered) = follow_brush(toggled, remembered, true);
+        assert_eq!(still, toggled);
+        let (after, remembered) = follow_brush(still, remembered, false);
+        assert_eq!(after, before);
+        assert_eq!(remembered, None);
     }
 }

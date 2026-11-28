@@ -566,7 +566,8 @@ impl DentalCraftApp {
                     let module = modules::instantiate("aligners")
                         .ok_or_else(|| "no module can read this project".to_owned())?;
                     let codecs = dc_workspace::project_codecs(module.as_ref());
-                    let outcome = dc_project::load(&p, &codecs).map_err(|e| e.to_string())?;
+                    let outcome =
+                        dc_project::load(&p, &codecs).map_err(|e| dc_workspace::error_text(&e))?;
                     let id = outcome
                         .project
                         .manifest
@@ -653,8 +654,9 @@ impl DentalCraftApp {
             && let Some(s) = a.poll()
         {
             match &s {
-                AuthState::SignedIn(u) => {
-                    tracing::info!("signed in as {}", u.email);
+                AuthState::SignedIn(_) => {
+                    // nothing identifying in the plain-text local log
+                    tracing::info!("signed in");
                     if let Some(w) = a.storage_warning() {
                         tracing::warn!(
                             "the session cannot be saved ({w}): it will not survive a restart"
@@ -662,13 +664,15 @@ impl DentalCraftApp {
                     }
                 }
                 AuthState::Error(e) => {
-                    // the user's own choices and an offline machine are no bugs
+                    // the user's own choices, an offline machine and a wrong
+                    // computer clock are no bugs
                     let report = !matches!(
                         e.code,
                         AuthErrorCode::Cancelled
                             | AuthErrorCode::AccessDenied
                             | AuthErrorCode::Network
                             | AuthErrorCode::Timeout
+                            | AuthErrorCode::Clock
                     );
                     tracing::warn!(
                         diag = report,
@@ -696,7 +700,21 @@ impl DentalCraftApp {
                     self.open_job = None;
                     let outcome = *outcome;
                     if outcome.read_only {
-                        self.toast(BadgeKind::Warning, t!("open-read-only"));
+                        for issue in &outcome.issues {
+                            tracing::warn!(
+                                code = "project-open-issue",
+                                source = "project",
+                                "{}: {issue}",
+                                path.display()
+                            );
+                        }
+                        let why = dc_workspace::blocking_issues_text(&outcome.issues);
+                        let text = if why.is_empty() {
+                            t!("open-read-only")
+                        } else {
+                            format!("{} {why}", t!("open-read-only"))
+                        };
+                        self.toast(BadgeKind::Warning, text);
                     }
                     self.remember(&path, &module_id);
                     self.enter_workspace(

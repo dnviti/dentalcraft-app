@@ -89,6 +89,8 @@ print-fitting-model = Fitting side taken from each aligner's model in the export
 print-fitting-guessed = Fitting side guessed
 print-fitting-guessed-body = Fitting side guessed from shape; export again. These aligners are not in an export with their models, so a support could touch the side that sits on the teeth.
 print-fitting-guessed-parts = Guessed for: { $parts }
+print-profile-not-validated = Printer size and orientation not yet checked
+print-profile-not-validated-body = The dimensional scale and the left/right orientation of this printer profile are not yet checked against the printer: verify the size of a test piece before use.
 
 print-save = Save print files…
 print-save-help = Choose a USB stick (FAT32). Each plate becomes one file.
@@ -109,7 +111,7 @@ print-err-invalid-part = An aligner's shape cannot be printed as it is. Export t
 print-err-invalid-settings = A resin value is out of range. Check the resin values.
 print-err-fitting-contact = A support would touch the inside of an aligner. Try other support settings.
 print-err-model-mismatch = An aligner does not match its model in the export (another stage or another position). Export the aligners again.
-print-err-island-unsupported = A part of an aligner would print in mid-air without a support. Try other support settings.
+print-err-island-unsupported = No pose of this aligner lets every part rest on a support: the shell needs correcting.
 print-err-part-too-tall = An aligner with its supports is taller than the printer can print.
 print-err-part-too-big = An aligner does not fit on the plate. Reduce the spacing from the plate edge.
 print-err-invalid-footprint = An aligner could not be placed on the plate. Export the aligners again.

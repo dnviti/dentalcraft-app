@@ -89,6 +89,8 @@ print-fitting-model = Lato d'appoggio preso dal modello di ogni allineatore nell
 print-fitting-guessed = Lato d'appoggio stimato
 print-fitting-guessed-body = Lato d'appoggio stimato dalla forma; esporta di nuovo. Questi allineatori non sono in un'esportazione con i loro modelli, quindi un supporto potrebbe toccare il lato che poggia sui denti.
 print-fitting-guessed-parts = Stimato per: { $parts }
+print-profile-not-validated = Dimensioni e orientamento della stampante non ancora verificati
+print-profile-not-validated-body = La scala delle dimensioni e l'orientamento sinistra/destra di questo profilo di stampante non sono ancora stati verificati sulla stampante: controlla le misure di un pezzo di prova prima dell'uso.
 
 print-save = Salva i file di stampa…
 print-save-help = Scegli una chiavetta USB (FAT32). Ogni piatto diventa un file.
@@ -109,7 +111,7 @@ print-err-invalid-part = La forma di un allineatore non si può stampare così c
 print-err-invalid-settings = Un valore della resina è fuori dall'intervallo. Controlla i valori della resina.
 print-err-fitting-contact = Un supporto toccherebbe l'interno di un allineatore. Prova altre impostazioni dei supporti.
 print-err-model-mismatch = Un allineatore non corrisponde al suo modello nell'esportazione (un altro passo o un'altra posizione). Esporta di nuovo gli allineatori.
-print-err-island-unsupported = Una parte di un allineatore verrebbe stampata nel vuoto senza supporto. Prova altre impostazioni dei supporti.
+print-err-island-unsupported = Nessuna posizione di questo allineatore permette di sostenere ogni sua parte: il guscio va corretto.
 print-err-part-too-tall = Un allineatore con i suoi supporti è più alto di quanto la stampante possa stampare.
 print-err-part-too-big = Un allineatore non entra nel piatto. Riduci lo spazio dal bordo del piatto.
 print-err-invalid-footprint = Non è stato possibile disporre un allineatore sul piatto. Esporta di nuovo gli allineatori.

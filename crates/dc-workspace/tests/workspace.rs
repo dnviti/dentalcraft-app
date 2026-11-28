@@ -216,8 +216,9 @@ fn renders_with_synthetic_project() {
         h.query_by_label_contains("Both jaws, occlusal view from below, stage 00")
             .is_some()
     );
-    // import counts as done once the case has scans
-    let label = format!("Treatment workflow 1/{}", leaf_count());
+    // import counts as done once the case has scans, and the bite with them:
+    // one arch has none
+    let label = format!("Treatment workflow 2/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
     // scrub to the last stage with End
     h.key_press(Key::End);
@@ -388,6 +389,15 @@ fn every_function_with_tools_shows_them_and_their_controls_in_the_inspector() {
     // the inspector is the panel on the right
     let inspector = 1920.0 - 360.0;
     for (function, tools) in TOOLS {
+        // one arch has no bite: its tools are tried on both arches
+        if function == "aligners.occlusion.align" {
+            h = harness(Workspace::new_headless(
+                module(),
+                Some(demo_project(&["lower", "upper"])),
+                None,
+            ));
+            h.run();
+        }
         h.state_mut().ws.select_item(function);
         h.run();
         assert!(
@@ -1062,7 +1072,8 @@ fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
     let label = format!("Treatment workflow 0/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
 
-    // confirming it settles the step, and one undo takes it back
+    // confirming it settles the step (and the bite, which one arch has not),
+    // and one undo takes it back
     h.get_by_label("Confirm").click();
     settle(&mut h);
     assert_eq!(
@@ -1070,7 +1081,7 @@ fn a_provisional_scan_is_marked_and_the_step_is_not_done() {
         RoleSource::Explicit
     );
     assert!(h.query_by_label("Provisional").is_none());
-    let label = format!("Treatment workflow 1/{}", leaf_count());
+    let label = format!("Treatment workflow 2/{}", leaf_count());
     assert!(h.query_by_label(&label).is_some());
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run();
@@ -1538,8 +1549,8 @@ fn the_footer_counts_the_nine_steps_that_have_their_result() {
     let mut h = harness(ws);
     h.run();
     assert!(
-        footer(&h, 3),
-        "import, find the teeth, separate teeth and gum"
+        footer(&h, 4),
+        "import, find the teeth, separate teeth and gum, and the bite, which one arch has not"
     );
 }
 
@@ -1585,7 +1596,31 @@ fn a_project_reopened_shows_the_ticks_of_what_it_holds() {
         Some(path),
     ));
     h.run();
-    assert!(footer(&h, 3));
+    // the bite counts: one arch has none to do
+    assert!(footer(&h, 4));
+}
+
+#[test]
+fn the_bite_of_one_arch_does_not_apply_and_has_nothing_to_run() {
+    let ws = Workspace::new_headless(module(), Some(demo_project(&["lower"])), None);
+    let mut h = harness(ws);
+    h.state_mut().ws.select_item("aligners.occlusion.align");
+    h.run();
+    assert!(h.query_by_label("Does not apply").is_some());
+    assert!(
+        h.query_by_label_contains("only the lower arch: there is no bite")
+            .is_some()
+    );
+    // nothing to run, to correct or to do next
+    for label in [
+        "Run",
+        "Run again",
+        "Next step",
+        "Not done yet",
+        "Three points",
+    ] {
+        assert!(h.query_by_label(label).is_none(), "{label}");
+    }
 }
 
 #[test]

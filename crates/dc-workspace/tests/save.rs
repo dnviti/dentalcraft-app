@@ -5,13 +5,23 @@
 //!   workspace as the window runs it, the project is saved with Save (Ctrl+S)
 //!   and opened again as Home opens it, and the case, the data of the module,
 //!   every mesh they use and the step history come back equal; undo after an
-//!   edit too. Every registered command must be listed, so a new one cannot
-//!   be left out of the round trip without a reason.
+//!   edit too. A command that gives the case back as it got it adds no undo
+//!   step, leaves nothing to save and records nothing. Every registered
+//!   command must be listed, so a new one cannot be left out of the round
+//!   trip without a reason.
 //! - The automatic save on a simulated clock: two quiet seconds, restarted by
 //!   each change, never while a job changes the case (it follows the job),
 //!   never for a project without a file, a failed save is shown.
 //! - A change that lands after Save is pressed is saved too, and leaving or
 //!   closing the window saves first.
+//! - The step history follows the case: the runs and the corrections by hand
+//!   are recorded, what they leave out of date goes, undo and redo bring back
+//!   the history of their version, a function that leaves nothing in the case
+//!   is done on the case its run left, a history the CLI saved with records
+//!   of results the case no longer holds marks nothing done, one that
+//!   cannot be read keeps the file read-only (never written over, however
+//!   its path is written), and the empty one of a released app opens and
+//!   saves writable in the app and in the CLI.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -166,7 +176,8 @@ fn assert_same(file: &CaseState, mem: &CaseState, what: &str) {
 }
 
 /// Saves with Save (Ctrl+S), opens the file again and checks that it holds
-/// the case of the workspace and the step history.
+/// the case of the workspace and its step history, and that the workspace
+/// opened on it (as Home opens it) has that same history.
 fn save_and_compare(ws: &mut Workspace, path: &Path, what: &str) {
     ws.save();
     assert!(ws.wait_for_jobs(WAIT), "{what}: save");
@@ -176,7 +187,19 @@ fn save_and_compare(ws: &mut Workspace, path: &Path, what: &str) {
     assert!(errors.is_empty(), "{what}: {:?}", ws.toast_details());
     let p = reopen(path);
     assert_same(&p.case_state, ws.state(), what);
-    assert_eq!(p.history, step_history(), "{what}: step history");
+    assert_eq!(p.history, history(ws), "{what}: step history in the file");
+    let reopened = Workspace::new_headless(module(), Some(p), Some(path.to_path_buf()));
+    assert!(!reopened.is_read_only(), "{what}: read-only");
+    assert_eq!(
+        history(&reopened),
+        history(ws),
+        "{what}: step history reopened"
+    );
+}
+
+/// The step history of `ws` as its file holds it.
+fn history(ws: &Workspace) -> Value {
+    serde_json::to_value(ws.history()).unwrap()
 }
 
 /// The registered command `id`: the module's, or the shell's import and role
@@ -193,17 +216,26 @@ fn spec(ws: &Workspace, id: &str) -> CommandSpec {
 /// Runs `id` with `params` in the background as the window does and waits:
 /// it lands as one step on the undo stack, without an error.
 fn run(ws: &mut Workspace, id: &str, params: Value) {
+    let landed = ran(ws, id, params.clone());
+    assert!(
+        landed,
+        "{id} {params}: nothing landed {:?}",
+        ws.toast_details()
+    );
+}
+
+/// Runs `id` with `params` as [`run`] does: `true` when it landed as a step
+/// on the undo stack (a command that gives the case back as it got it adds
+/// none).
+fn ran(ws: &mut Workspace, id: &str, params: Value) -> bool {
     let before = Arc::clone(ws.state());
     let shown = ws.toast_keys().len();
     let spec = spec(ws, id);
     ws.run_command(Box::new(spec.command(params.clone())));
     assert!(ws.wait_for_jobs(WAIT), "{id}");
     let new: Vec<_> = ws.toast_details().split_off(shown);
-    assert!(
-        !Arc::ptr_eq(&before, ws.state()),
-        "{id} {params}: nothing landed {new:?}"
-    );
     assert!(ws.sticky_toast_keys().is_empty(), "{id} {params}: {new:?}");
+    !Arc::ptr_eq(&before, ws.state())
 }
 
 fn aligners(ws: &Workspace) -> AlignersState {
@@ -289,6 +321,10 @@ enum Plan {
     /// Runs it with these parameters through the workspace, then saves,
     /// opens the file again and compares.
     Run(Params),
+    /// Runs it with these parameters through the workspace: it gives the
+    /// case back as it got it, so nothing lands on the undo stack, nothing
+    /// is left to save and the step history is the same.
+    Same(Params),
     /// Not run here, and why.
     Skip(&'static str),
 }
@@ -337,7 +373,7 @@ fn null(_: &Workspace, _: &Path) -> Value {
 /// Every command that can change the case, in the order the round trip runs
 /// them (each on the case the previous ones left), or why it is not run.
 fn plan() -> Vec<(&'static str, Plan)> {
-    use Plan::{Run, Skip};
+    use Plan::{Run, Same, Skip};
     vec![
         // the settings of the case
         (
@@ -385,17 +421,21 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.demo",
             Run(|_, _| json!({ "arch": "lower", "seed": 5 })),
         ),
-        // the steps, one by one
-        ("aligners.case.detect-arch", Run(null)),
+        // the steps, one by one. `Same`: on this case the run gives back the
+        // case it got (the demo arch is already detected, numbered, oriented
+        // and checked; the diagnoses, the schedule and the occlusion reports
+        // are there; the tooth rebuilt comes out the same; a query): no undo
+        // step, nothing to save
+        ("aligners.case.detect-arch", Same(null)),
         ("aligners.frame", Run(|_, _| json!({}))),
         ("aligners.teeth.find", Run(|_, _| json!({}))),
         (
             "aligners.preparation.numbering.automatic",
-            Run(|_, _| json!({ "arch": "lower" })),
+            Same(|_, _| json!({ "arch": "lower" })),
         ),
         (
             "aligners.preparation.orientation.automatic",
-            Run(|_, _| json!({})),
+            Same(|_, _| json!({})),
         ),
         // both arches: the new tooth marks left their colours out of date
         (
@@ -404,7 +444,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ),
         (
             "aligners.preparation.segmentation.check",
-            Run(|_, _| json!({ "arch": "lower" })),
+            Same(|_, _| json!({ "arch": "lower" })),
         ),
         ("aligners.teeth.frames", Run(|_, _| json!({}))),
         (
@@ -416,10 +456,10 @@ fn plan() -> Vec<(&'static str, Plan)> {
             Run(|_, _| json!({ "arch": "lower" })),
         ),
         ("aligners.teeth.build", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.space-analysis", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.little-index", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.bolton", Run(|_, _| json!({}))),
-        ("aligners.diagnosis.complexity", Run(|_, _| json!({}))),
+        ("aligners.diagnosis.space-analysis", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.little-index", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.bolton", Same(|_, _| json!({}))),
+        ("aligners.diagnosis.complexity", Same(|_, _| json!({}))),
         // the clinician's own values over the computed ones: the complexity follows
         (
             "aligners.diagnosis.edit-values",
@@ -468,9 +508,9 @@ fn plan() -> Vec<(&'static str, Plan)> {
         ("aligners.planning.staging.automatic", Run(|_, _| json!({}))),
         (
             "aligners.planning.schedule",
-            Run(|_, _| json!({ "start_date": "2026-11-16" })),
+            Same(|_, _| json!({ "start_date": "2026-11-16" })),
         ),
-        ("aligners.planning.aligners", Run(|_, _| json!({}))),
+        ("aligners.planning.aligners", Same(|_, _| json!({}))),
         // a tooth slowed: the aligners of its arch computed again with it
         (
             "aligners.planning.tooth-speed",
@@ -505,12 +545,12 @@ fn plan() -> Vec<(&'static str, Plan)> {
             }),
         ),
         ("aligners.review.bulk", Run(|_, _| json!({}))),
-        ("aligners.occlusion.contact-map", Run(null)),
+        ("aligners.occlusion.contact-map", Same(null)),
         (
             "aligners.occlusion.bite-with-aligners",
-            Run(|_, _| json!({})),
+            Same(|_, _| json!({})),
         ),
-        ("aligners.occlusion.bite-ramps", Run(|_, _| json!({}))),
+        ("aligners.occlusion.bite-ramps", Same(|_, _| json!({}))),
         ("aligners.occlusion.bite-registration.icp", Skip(BITE_SCANS)),
         (
             "aligners.occlusion.bite-registration.three-points",
@@ -535,7 +575,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         // corrections of the built teeth and of the plan
         (
             "aligners.preparation.reconstruction.rebuild-tooth",
-            Run(|ws, _| json!({ "fdi": lower_crown(ws, 1) })),
+            Same(|ws, _| json!({ "fdi": lower_crown(ws, 1) })),
         ),
         (
             "aligners.manual.rebuild-tooth",
@@ -544,7 +584,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
         // a query of the region and margin line of a tooth: the case is not touched
         (
             "aligners.manual.tooth-region",
-            Run(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
+            Same(|ws, _| json!({ "fdi": lower_crown(ws, 2) })),
         ),
         (
             "aligners.planning.movements",
@@ -690,7 +730,7 @@ fn plan() -> Vec<(&'static str, Plan)> {
             "aligners.case.make-base",
             // the upper scan now: the old lower one, with all its tooth marks
             // (the swapped upper had its marks cleared: no arch frame)
-            Run(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
+            Same(|_, _| json!({ "arch": "upper", "height_mm": 2.0 })),
         ),
         // the scans
         (
@@ -829,8 +869,9 @@ fn every_change_comes_back_after_save_and_reopen() {
     let path = dir.path().join("round-trip.dcprj");
     let mut ws = saved(demo_state(&["lower", "upper"]), &path);
     for (id, step) in plan() {
-        let params = match step {
-            Plan::Run(params) => params,
+        let (params, same) = match step {
+            Plan::Run(params) => (params, false),
+            Plan::Same(params) => (params, true),
             Plan::Skip(why) => {
                 eprintln!("{id:<52} not run: {why}");
                 continue;
@@ -838,7 +879,24 @@ fn every_change_comes_back_after_save_and_reopen() {
         };
         let start = Instant::now();
         let params = params(&ws, dir.path());
-        run(&mut ws, id, params);
+        let history_before = history(&ws);
+        let landed = ran(&mut ws, id, params.clone());
+        if same {
+            // nothing to save: no undo step, no change, the same history
+            assert!(!landed, "{id} {params}: an unchanged case landed");
+            assert!(!ws.is_dirty(), "{id}: unsaved");
+            assert_eq!(history(&ws), history_before, "{id}: step history");
+            eprintln!(
+                "{id:<52} {:>6.2} s run, case unchanged",
+                start.elapsed().as_secs_f64()
+            );
+            continue;
+        }
+        assert!(
+            landed,
+            "{id} {params}: nothing landed {:?}",
+            ws.toast_details()
+        );
         let ran = start.elapsed();
         save_and_compare(&mut ws, &path, id);
         eprintln!(
@@ -1099,6 +1157,69 @@ fn the_case_saves_itself_two_quiet_seconds_after_the_last_change() {
     assert_eq!(reopen(&path).case_state.case.patient_code, "A");
 }
 
+/// The aligner of the 3D view shown or hidden is how the case is looked at:
+/// it must not mark the project unsaved, so the automatic save never fires
+/// for it. It is hidden by default and shown only when asked for; the flag
+/// goes to the file with the next real save.
+#[test]
+fn showing_or_hiding_the_aligner_in_the_view_leaves_the_project_saved() {
+    const VIEW: &str = "aligners.view.aligner";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("view.dcprj");
+    let mut ws = saved(demo_state(&["lower", "upper"]), &path);
+    run(&mut ws, "aligners.auto", Value::Null);
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.take_action(), WorkspaceAction::Saved(path.clone()));
+    assert!(!ws.is_dirty());
+    assert!(
+        !aligners(&ws).aligner_view.shown,
+        "not shown unless the user asks"
+    );
+
+    let quiet = |ws: &mut Workspace, what: &str| {
+        assert!(!ws.is_dirty(), "{what}: marked unsaved");
+        ws.tick(0.0);
+        assert_eq!(ws.tick(DELAY_S + 60.0), None, "{what}");
+        assert!(!ws.is_saving(), "{what}: the automatic save started");
+        assert_eq!(ws.take_action(), WorkspaceAction::None, "{what}");
+    };
+    // shown, hidden, shown again, then undone and redone
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    assert!(aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "shown");
+    assert!(ran(&mut ws, VIEW, json!({ "show": false })));
+    assert!(!aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "hidden");
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    quiet(&mut ws, "shown again");
+    assert!(ws.undo());
+    quiet(&mut ws, "undone");
+    assert!(ws.redo());
+    assert!(aligners(&ws).aligner_view.shown);
+    quiet(&mut ws, "redone");
+
+    // a real change is unsaved, and a toggle on top of it does not hide that
+    rename(&mut ws, "V");
+    assert!(ws.is_dirty());
+    assert!(ran(&mut ws, VIEW, json!({ "show": false })));
+    assert!(ws.is_dirty(), "the change is still unsaved");
+    assert!(ran(&mut ws, VIEW, json!({ "stage": 1 })));
+    // the save writes the change and the flag with it
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(!ws.is_dirty());
+    let file = reopen(&path);
+    assert_eq!(file.case_state.case.patient_code, "V");
+    assert!(
+        file.case_state
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .aligner_view
+            .shown
+    );
+}
+
 #[test]
 fn nothing_saves_itself_while_a_job_runs_and_it_saves_once_the_job_ends() {
     let dir = tempfile::tempdir().unwrap();
@@ -1208,6 +1329,31 @@ fn a_failed_automatic_save_is_shown_and_tried_again_at_the_next_change() {
     assert!(ws.wait_for_jobs(WAIT));
     assert!(!ws.is_dirty());
     assert_eq!(reopen(&path).case_state.case.patient_code, "B");
+}
+
+#[test]
+fn a_save_whose_backup_cannot_be_kept_succeeds_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ws, path) = saved_lower(dir.path());
+    // `<file>.bak` is a folder: the backup cannot replace it
+    let bak = dir.path().join("auto.dcprj.bak");
+    let _ = std::fs::remove_file(&bak);
+    std::fs::create_dir_all(bak.join("keep")).unwrap();
+    rename(&mut ws, "W");
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.take_action(), WorkspaceAction::Saved(path.clone()));
+    assert!(!ws.is_dirty(), "the save counts as done");
+    assert_eq!(reopen(&path).case_state.case.patient_code, "W");
+    let details = ws.toast_details();
+    assert!(
+        details
+            .iter()
+            .any(|(k, d)| k == "ws-toast-save-warning"
+                && d.as_deref().is_some_and(|d| !d.is_empty())),
+        "the warning reaches the user: {details:?}"
+    );
+    assert!(!ws.toast_keys().contains(&"ws-toast-save-failed".to_owned()));
 }
 
 #[test]
@@ -1334,4 +1480,289 @@ fn leaving_saves_a_project_with_a_file_and_asks_for_one_never_saved() {
     h.get_by_label("Don't save").click();
     h.run();
     assert_eq!(h.state().actions, vec![WorkspaceAction::Quit]);
+}
+
+// ---------------------------------------------------------------- step history
+
+const IMPORT: &str = "aligners.case.import-scans";
+const FIND_TEETH: &str = "aligners.teeth.find";
+const SEGMENT: &str = "aligners.preparation.segmentation.automatic";
+const STUDY_MODELS: &str = "aligners.output.study-models";
+
+/// The functions with a record in the step history of `ws`, sorted.
+fn recorded(ws: &Workspace) -> Vec<String> {
+    ws.history().records().keys().cloned().collect()
+}
+
+fn sorted(ids: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
+    v.sort();
+    v
+}
+
+/// The JSON of a step history another front end wrote: a run of each of
+/// `runs` in turn, at a fixed time.
+fn written(runs: &[&'static str]) -> Value {
+    let g = StepGraph::new(
+        runs.iter()
+            .map(|&id| StepDef { id, depends: &[] })
+            .collect(),
+    )
+    .unwrap();
+    let mut h = StepHistory::new();
+    for id in runs {
+        h.checkpoint(&g, id, StepOutcome::default()).unwrap();
+    }
+    let mut v = serde_json::to_value(&h).unwrap();
+    for record in v["steps"].as_object_mut().unwrap().values_mut() {
+        record["at"] = json!(1_794_600_000_u64);
+    }
+    v
+}
+
+/// `true` when the inspector of function `id`, selected, says it is done.
+fn says_done(h: &mut Harness<'static, App>, id: &'static str) -> bool {
+    h.state_mut().ws.select_item(id);
+    h.run();
+    h.query_by_label("Done").is_some()
+}
+
+#[test]
+fn a_run_that_fails_records_nothing_and_a_step_run_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::new_headless(module(), None, None);
+    assert!(ws.history().records().is_empty());
+    // the button of "Find the teeth" on a case without scans: refused, and
+    // the case and its history are the ones before
+    let before = history(&ws);
+    assert!(ws.run_leaf_command(FIND_TEETH, json!({})));
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.take_leaf_answer().unwrap().is_err());
+    assert!(!ws.is_dirty());
+    assert_eq!(history(&ws), before);
+    // a scan imported: "Import scans" ran, automatically
+    ws.set_import_role(Some(ScanRole::Lower));
+    ws.import_files(vec![write_tetra(dir.path(), "lower.stl")]);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert_eq!(ws.state().case.scans.len(), 1);
+    assert_eq!(recorded(&ws), [IMPORT]);
+    let record = ws.history().record(IMPORT).unwrap();
+    assert!(!record.by_hand && record.failed.is_none() && record.rev == 1);
+    // undo takes the run and its record back, redo brings both again
+    assert!(ws.undo());
+    assert!(ws.history().records().is_empty());
+    assert!(ws.redo());
+    assert_eq!(recorded(&ws), [IMPORT]);
+}
+
+#[test]
+fn a_function_that_is_not_a_step_stays_recorded_and_done_while_the_case_holds_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.dcprj");
+    // the history read with the case: the marks found and the colours by hand
+    let mut ws = saved(demo_state(&["lower"]), &path);
+    assert_eq!(recorded(&ws), sorted(&[FIND_TEETH, SEGMENT]));
+    // the study models: their run is recorded, and the case holds them
+    run(
+        &mut ws,
+        STUDY_MODELS,
+        json!({ "voxel_mm": 1.0, "tolerance_mm": 0.1 }),
+    );
+    assert_eq!(recorded(&ws), sorted(&[FIND_TEETH, SEGMENT, STUDY_MODELS]));
+    let record = ws.history().record(STUDY_MODELS).unwrap();
+    assert!(!record.by_hand && record.failed.is_none());
+    assert!(record.rev > ws.history().record(SEGMENT).unwrap().rev);
+    save_and_compare(&mut ws, &path, "study models");
+    // opened again as Home opens it: the same history, and they are done
+    let reopened = Workspace::new_headless(module(), Some(reopen(&path)), Some(path.clone()));
+    let mut h = harness(reopened);
+    assert_eq!(history(&h.state().ws), history(&ws));
+    assert!(says_done(&mut h, STUDY_MODELS));
+    // a change that leaves them in the case: still done, still recorded
+    rename(&mut h.state_mut().ws, "R");
+    assert!(says_done(&mut h, STUDY_MODELS));
+    assert_eq!(
+        recorded(&h.state().ws),
+        sorted(&[FIND_TEETH, SEGMENT, STUDY_MODELS])
+    );
+    // undo: the case their run left, done again
+    assert!(h.state_mut().ws.undo());
+    assert!(says_done(&mut h, STUDY_MODELS));
+    assert_eq!(history(&h.state().ws), history(&ws));
+}
+
+#[test]
+fn clearing_or_correcting_a_result_drops_exactly_the_records_computed_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cleared.dcprj");
+    let mut p = project(demo_state(&["lower", "upper"]));
+    p.history = written(&[IMPORT, FIND_TEETH, SEGMENT, STUDY_MODELS]);
+    let mut ws = Workspace::new_headless(module(), Some(p), Some(path.clone()));
+    let opened = history(&ws);
+    assert_eq!(
+        recorded(&ws),
+        sorted(&[IMPORT, FIND_TEETH, SEGMENT, STUDY_MODELS])
+    );
+    // the upper scan removed: the lower arch keeps its marks and colours,
+    // the study models were made of both scans
+    let upper = ws.state().case.scan(ScanRole::Upper).unwrap().id;
+    run(
+        &mut ws,
+        "case.remove-scan",
+        json!({ "scan_id": upper.to_string() }),
+    );
+    assert_eq!(recorded(&ws), sorted(&[IMPORT, FIND_TEETH, SEGMENT]));
+    let removed = history(&ws);
+    // a tooth mark moved by hand: the marks are by hand now, and the colours
+    // made from the previous marks (kept, out of date) go from the history
+    let seed = aligners(&ws)
+        .seeds
+        .iter()
+        .find(|s| !s.fdi.is_upper())
+        .copied()
+        .unwrap();
+    let [x, y, z] = seed.position.to_array();
+    run(
+        &mut ws,
+        "aligners.preparation.numbering.place-seeds",
+        json!({ "op": "move", "fdi": seed.fdi.get(), "position": [x + 0.25, y, z] }),
+    );
+    assert_eq!(recorded(&ws), sorted(&[IMPORT, FIND_TEETH]));
+    assert!(ws.history().record(FIND_TEETH).unwrap().by_hand);
+    assert!(!ws.history().record(IMPORT).unwrap().by_hand);
+    let moved = history(&ws);
+    // undo and redo: the case and its history go back and forth together
+    assert!(ws.undo());
+    assert_eq!(history(&ws), removed);
+    assert!(ws.undo());
+    assert_eq!(history(&ws), opened);
+    assert!(ws.redo());
+    assert!(ws.redo());
+    assert_eq!(history(&ws), moved);
+    save_and_compare(&mut ws, &path, "corrected by hand");
+}
+
+#[test]
+fn a_history_the_cli_saved_with_results_the_case_no_longer_holds_marks_nothing_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cli.dcprj");
+    // the app saves the marks found and the colours in its history
+    let ws = saved(demo_state(&["lower"]), &path);
+    let app = history(&ws);
+    // the CLI reads that history, clears the marks and saves its history as
+    // it read it
+    let mut s = dc_session::Session::new();
+    s.register_module(module()).unwrap();
+    let out = s
+        .execute("project.open", json!({ "path": path.to_string_lossy() }))
+        .unwrap();
+    assert_eq!(out["read_only"], false, "{out}");
+    let listed = s.execute("steps.list", Value::Null).unwrap();
+    assert_eq!(listed["records"], app["steps"]);
+    s.execute(
+        "aligners.preparation.numbering.clear-seeds",
+        json!({ "arch": "lower" }),
+    )
+    .unwrap();
+    s.execute("project.save", Value::Null).unwrap();
+    assert_eq!(reopen(&path).history, app, "the CLI kept the records");
+    // the app: "Find the teeth" is not done and its record goes; the colours,
+    // kept, stay
+    let ws = Workspace::new_headless(module(), Some(reopen(&path)), Some(path.clone()));
+    assert_eq!(recorded(&ws), [SEGMENT]);
+    let mut h = harness(ws);
+    h.run();
+    assert!(
+        h.query_by_label("Treatment workflow 3/9").is_some(),
+        "import, the colours and the bite, which one arch has not"
+    );
+    // its next save writes the history as it is
+    h.state_mut().ws.save();
+    assert!(h.state_mut().ws.wait_for_jobs(WAIT));
+    assert_eq!(reopen(&path).history, history(&h.state().ws));
+    assert!(reopen(&path).history["steps"].get(FIND_TEETH).is_none());
+}
+
+#[test]
+fn a_history_that_cannot_be_read_keeps_the_file_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, path) = saved_lower(dir.path());
+    // the same file with a step history of another shape
+    let mut p = reopen(&path);
+    p.history = json!("not a step history");
+    dc_project::save(&path, &p).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut ws = Workspace::new_headless(module(), Some(reopen(&path)), Some(path.clone()));
+    // Home finds the file itself sound: the history keeps it read-only
+    ws.set_read_only(false);
+    assert!(ws.is_read_only() && !ws.autosaves());
+    assert!(
+        ws.sticky_toast_keys()
+            .contains(&"ws-toast-history-unreadable".to_owned())
+    );
+    // never written over: not by itself, not by a save to that file
+    rename(&mut ws, "X");
+    ws.tick(0.0);
+    assert_eq!(ws.tick(10.0), None);
+    ws.save_to(path.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.toast_keys().contains(&"ws-toast-save-failed".to_owned()));
+    assert!(ws.is_dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    // nor by a save to that same file written another way
+    let name = path.file_name().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut spellings = vec![sub.join("..").join(name)];
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        spellings.push(link.join(name));
+    }
+    #[cfg(windows)]
+    spellings.push(PathBuf::from(path.to_string_lossy().to_uppercase()));
+    for p in spellings {
+        assert!(ws.writes_over_read_only(&p), "{}", p.display());
+        ws.save_to(p);
+        assert!(ws.wait_for_jobs(WAIT));
+    }
+    assert!(ws.is_dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    // Save as another file: written, with a history that can be read
+    let other = dir.path().join("other.dcprj");
+    ws.save_to(other.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(!ws.is_read_only() && !ws.is_dirty());
+    let q = reopen(&other);
+    assert_eq!(q.case_state.case.patient_code, "X");
+    assert_eq!(q.history, history(&ws));
+    assert!(serde_json::from_value::<StepHistory>(q.history).is_ok());
+}
+
+#[test]
+fn a_file_with_the_empty_history_of_a_released_app_opens_and_saves_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("released.dcprj");
+    // the history every released app wrote
+    let mut p = project(demo_state(&["lower"]));
+    p.history = json!([]);
+    dc_project::save(&path, &p).unwrap();
+    let cli_opens_writable = |path: &Path| {
+        let mut s = dc_session::Session::new();
+        s.register_module(module()).unwrap();
+        let out = s
+            .execute("project.open", json!({ "path": path.to_string_lossy() }))
+            .unwrap();
+        assert_eq!(out["read_only"], false, "{out}");
+    };
+    cli_opens_writable(&path);
+    // the app opens it writable with an empty history, saves, opens again
+    let mut ws = Workspace::new_headless(module(), Some(reopen(&path)), Some(path.clone()));
+    assert!(!ws.is_read_only() && ws.autosaves());
+    assert!(ws.history().records().is_empty());
+    rename(&mut ws, "R");
+    save_and_compare(&mut ws, &path, "released");
+    // and the CLI opens what the app wrote
+    cli_opens_writable(&path);
 }

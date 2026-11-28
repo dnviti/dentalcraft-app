@@ -163,3 +163,37 @@ fn removing_a_scan_and_registering_the_bite_need_no_advanced_options() {
         }
     }
 }
+
+#[test]
+fn with_one_arch_the_bite_groups_of_the_production_settings_say_they_do_not_apply() {
+    let export = "aligners.output.export-all";
+    // one arch: no bite, so the bite with the aligners worn and the ramps
+    // are ignored; the group opens on the reason, as Bite says it
+    let mut h = harness_with(Some(case_with(&[ScanRole::Lower])), export, true);
+    for group in ["Bite with the aligners worn", "Bite ramps"] {
+        h.get_by_label(group).click();
+        h.run();
+    }
+    assert!(h.query_by_label("Ramps on the aligners").is_none());
+    assert_eq!(h.get_all_by_label("Does not apply").count(), 2);
+    assert_eq!(
+        h.get_all_by_label_contains("there is no bite, so these settings")
+            .count(),
+        2
+    );
+    // the groups that work on one arch alone keep their controls
+    h.get_by_label("Aligner edge").click();
+    h.run();
+    assert!(h.query_by_label_contains("Edge above the margin").is_some());
+    assert_eq!(h.get_all_by_label("Does not apply").count(), 2);
+    // two arches: the same groups have their controls
+    let mut h = harness_with(
+        Some(case_with(&[ScanRole::Upper, ScanRole::Lower])),
+        export,
+        true,
+    );
+    h.get_by_label("Bite ramps").click();
+    h.run();
+    assert!(h.query_by_label("Ramps on the aligners").is_some());
+    assert!(h.query_by_label("Does not apply").is_none());
+}

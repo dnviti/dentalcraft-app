@@ -6,10 +6,12 @@
 //!
 //! The case lives in a [`dc_command::UndoStack`]; module commands and the
 //! scan import run as background jobs ([`dc_jobs::JobSystem`]) and land on
-//! the undo stack. Saving writes a `.dcprj` atomically on a job thread; a
-//! project that has a file is also saved by itself shortly after each change
-//! ([`autosave`], driven by [`Workspace::tick`], which [`Workspace::show`]
-//! calls every frame).
+//! the undo stack, each version with its step history (`history/steps.json`,
+//! [`Workspace::history`]: the functions that ran, kept in step with the
+//! case, undo and redo). Saving writes a `.dcprj` atomically on a job thread;
+//! a project that has a file is also saved by itself shortly after each
+//! change ([`autosave`], driven by [`Workspace::tick`], which
+//! [`Workspace::show`] calls every frame).
 //!
 //! The "Scan" button of "Import scans" opens the scan window (alpha, the
 //! generic popup of [`dc_scan_ui`], with the roles the module accepts): a 3D
@@ -44,6 +46,7 @@ mod archline;
 pub mod autosave;
 mod bite;
 mod function;
+mod history;
 mod icons;
 pub mod import;
 mod keys;
@@ -53,6 +56,7 @@ mod manual;
 mod menu;
 mod overlay;
 mod panels;
+mod plan_warnings;
 mod print;
 mod production;
 mod project;
@@ -70,7 +74,8 @@ mod workspace;
 pub use dc_scan_ui::ScanTicket;
 pub use menu::filter_ids;
 pub use panels::{PanelWidths, WorkspaceLayout};
-pub use project::{now_rfc3339, project_codecs};
+pub use project::{blocking_issues_text, error_text, issue_text, now_rfc3339, project_codecs};
+pub use view::WindowOverlays;
 pub use workspace::{Workspace, WorkspaceAction};
 
 dc_i18n::bundle!(pub(crate) fn loader);

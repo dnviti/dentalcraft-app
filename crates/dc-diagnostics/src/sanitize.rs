@@ -3,12 +3,14 @@
 //! In order: the patient codes and case references the app registered
 //! ([`Sanitizer::redact`]) become `<case>`; the home folder becomes `~`;
 //! e-mail addresses become `<email>`; access codes (`dcat_…`, `Bearer …`,
-//! `access_token=…`, long random strings) become `<token>`; paths under the
-//! user's folders, removable drives and temporary folders, quoted texts
-//! naming a project or scan file, and project and scan file names become
-//! `<project>`; the user name becomes `<user>`. The folders of DentalCraft
-//! itself (logs, settings) and of the Rust toolchain stay, they help to
-//! find a bug and name nobody.
+//! `access_token=…`, long random strings) become `<token>`; every absolute
+//! path (Unix, Windows drive, UNC, network mounts, other users' folders),
+//! quoted texts naming a project or scan file, and project and scan file
+//! names become `<project>`; serial numbers and MAC addresses become
+//! `<serial>`; the user name becomes `<user>`. Only an allow-list of folders
+//! keeps its path: DentalCraft's own (logs, settings, install), the
+//! system's and the Rust toolchain's; they help to find a bug and name
+//! nobody.
 
 /// Cleans texts for the reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,6 +21,12 @@ pub struct Sanitizer {
     user: Option<String>,
     /// Registered words (patient codes, case references), longest first.
     words: Vec<String>,
+    /// Salt of [`Sanitizer::digest`] (one per installation).
+    salt: String,
+    /// Salted digests of the words registered in earlier runs (the plain
+    /// words are never written to disk): a whole word with one of these
+    /// digests becomes `<case>` too.
+    digests: std::collections::BTreeSet<[u8; 32]>,
 }
 
 /// Extensions of project and scan files.
@@ -41,15 +49,28 @@ const KEPT_HOME_DIRS: [&str; 10] = [
     "library/caches/app.dentalcraft.dentalcraft",
 ];
 
-/// Roots of folders that hold the user's files besides the home folder.
-const USER_ROOTS: [&str; 6] = [
-    "/media/",
-    "/mnt/",
-    "/run/media/",
-    "/Volumes/",
-    "/tmp/",
-    "/var/tmp/",
+/// Absolute Unix folders that name nobody (system, install and toolchain
+/// folders): a path under them stays. Every other absolute path goes.
+const KEPT_ROOTS: [&str; 13] = [
+    "/usr/",
+    "/lib/",
+    "/lib64/",
+    "/bin/",
+    "/sbin/",
+    "/etc/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+    "/rustc/",
+    "/app/",
+    "/opt/dentalcraft/",
+    "/Applications/DentalCraft.app/",
 ];
+
+/// Toolchain folders that may sit in anybody's home (a backtrace of a
+/// dependency built elsewhere): the path keeps its tail from here, the
+/// folders before it go.
+const TOOLCHAIN_MARKERS: [&str; 3] = ["/.cargo/registry/", "/.cargo/git/", "/.rustup/toolchains/"];
 
 /// Keys whose value is a secret wherever they appear.
 const SECRET_KEYS: [&str; 6] = [
@@ -104,20 +125,47 @@ impl Sanitizer {
                 .filter(|u| u.chars().count() >= 2)
                 .map(str::to_owned),
             words: Vec::new(),
+            salt: String::new(),
+            digests: Default::default(),
         }
     }
 
     /// From now on `word` (a patient code, a case reference) becomes
     /// `<case>`. Words shorter than three characters are ignored (they
     /// would hide too much); the file name rules still cover them in file
-    /// names.
-    pub fn redact(&mut self, word: &str) {
+    /// names. `true` when the word is new and not remembered from an earlier
+    /// run (see [`Sanitizer::remember`]).
+    pub fn redact(&mut self, word: &str) -> bool {
         let w = word.trim();
         if w.chars().count() < 3 || self.words.iter().any(|x| x == w) {
-            return;
+            return false;
         }
         self.words.push(w.to_owned());
         self.words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+        !self.digests.contains(&Self::digest(&self.salt, w))
+    }
+
+    /// The salted digest of `word` (trimmed), as written to disk.
+    pub fn digest(salt: &str, word: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"dentalcraft-redact\0");
+        h.update(salt.as_bytes());
+        h.update(b"\0");
+        h.update(word.trim().as_bytes());
+        h.finalize().into()
+    }
+
+    /// The salt of the digests and the digests of the words registered in
+    /// earlier runs.
+    pub fn remember(&mut self, salt: &str, digests: impl IntoIterator<Item = [u8; 32]>) {
+        salt.clone_into(&mut self.salt);
+        self.digests.extend(digests);
+    }
+
+    /// The salt set by [`Sanitizer::remember`].
+    pub fn salt(&self) -> &str {
+        &self.salt
     }
 
     /// `text` without personal data.
@@ -126,6 +174,9 @@ impl Sanitizer {
         for w in &self.words {
             s = s.replace(w.as_str(), "<case>");
         }
+        if !self.digests.is_empty() {
+            s = self.remembered_words(&s);
+        }
         for h in &self.home {
             s = replace_where(&s, h, "~", |_, after| {
                 after.is_none_or(|c| !(c.is_alphanumeric() || "_-.".contains(c)))
@@ -133,6 +184,7 @@ impl Sanitizer {
         }
         s = emails(&s);
         s = tokens(&s);
+        s = serials(&s);
         s = user_paths(&s);
         s = quoted(&s);
         s = data_files(&s);
@@ -141,6 +193,41 @@ impl Sanitizer {
             s = replace_where(&s, u, "<user>", |before, after| word(before) && word(after));
         }
         s
+    }
+}
+
+impl Sanitizer {
+    /// Words of `s` (runs of letters, digits, `-`, `_`, `.`, and their parts
+    /// between `_` and `.`) whose digest was remembered become `<case>`.
+    fn remembered_words(&self, s: &str) -> String {
+        let known =
+            |w: &str| w.chars().count() >= 3 && self.digests.contains(&Self::digest(&self.salt, w));
+        let run = |c: char| c.is_alphanumeric() || "-_.".contains(c);
+        let mut spans = Vec::new();
+        let mut start = None;
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        for (k, &(i, c)) in chars.iter().enumerate() {
+            if run(c) {
+                start.get_or_insert(i);
+            }
+            let ends = !run(c) || k + 1 == chars.len();
+            if ends && let Some(a) = start.take() {
+                let b = if run(c) { i + c.len_utf8() } else { i };
+                let whole = s[a..b].trim_end_matches('.');
+                if known(whole) {
+                    spans.push((a, a + whole.len()));
+                    continue;
+                }
+                let mut from = a;
+                for part in s[a..b].split(['_', '.']) {
+                    if known(part) {
+                        spans.push((from, from + part.len()));
+                    }
+                    from += part.len() + 1;
+                }
+            }
+        }
+        splice(s, &spans, "<case>")
     }
 }
 
@@ -222,10 +309,10 @@ fn tokens(s: &str) -> String {
     let mut s = s.to_owned();
     // `key=value`, `"key":"value"`, `key: value`
     for key in SECRET_KEYS {
-        s = secret_values(&s, key, false);
+        s = secret_values(&s, key, false, "<token>");
     }
     for key in QUERY_SECRET_KEYS {
-        s = secret_values(&s, key, true);
+        s = secret_values(&s, key, true, "<token>");
     }
     // runs that look like a token
     let run = |c: char| c.is_ascii_alphanumeric() || "_-+/=.".contains(c);
@@ -269,9 +356,9 @@ fn looks_like_token(w: &str) -> bool {
         && w.matches('/').count() <= 1
 }
 
-/// Replaces the values of `key` (`key=v`, `"key":"v"`, `key: v`); with
-/// `query`, only after `?` or `&`.
-fn secret_values(s: &str, key: &str, query: bool) -> String {
+/// Replaces the values of `key` (`key=v`, `"key":"v"`, `key: v`) with
+/// `rep`; with `query`, only after `?` or `&`.
+fn secret_values(s: &str, key: &str, query: bool, rep: &str) -> String {
     let lower = s.to_ascii_lowercase();
     let mut spans = Vec::new();
     for (at, _) in lower.match_indices(key) {
@@ -308,11 +395,72 @@ fn secret_values(s: &str, key: &str, query: bool) -> String {
     }
     spans.sort_unstable();
     spans.dedup();
-    splice(s, &spans, "<token>")
+    splice(s, &spans, rep)
+}
+
+/// Keys whose value identifies a device (a scanner's serial number).
+const SERIAL_KEYS: [&str; 5] = ["serial_number", "serial", "device_id", "s/n", "sn"];
+
+/// Serial numbers and MAC addresses become `<serial>`: the values of
+/// [`SERIAL_KEYS`], `aa:bb:cc:dd:ee:ff` / `AA-BB-…` addresses, and upper
+/// case words of ten or more letters and digits mixed (as device serials
+/// are written).
+fn serials(s: &str) -> String {
+    let mut s = s.to_owned();
+    for key in SERIAL_KEYS {
+        s = secret_values(&s, key, false, "<serial>");
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || c == ':' || c == '-';
+    let mut spans = Vec::new();
+    let mut start = None;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        if word(c) {
+            start.get_or_insert(i);
+        }
+        let ends = !word(c) || k + 1 == chars.len();
+        if ends && let Some(a) = start.take() {
+            let b = if word(c) { i + c.len_utf8() } else { i };
+            for (x, y) in serial_parts(&s[a..b]) {
+                spans.push((a + x, a + y));
+            }
+        }
+    }
+    splice(&s, &spans, "<serial>")
+}
+
+/// Byte ranges of `w` (letters, digits, `:` and `-`) that are a MAC address
+/// or a serial number.
+fn serial_parts(w: &str) -> Vec<(usize, usize)> {
+    let is_mac = |m: &str| {
+        let b = m.as_bytes();
+        b.len() == 17
+            && (0..6).all(|g| b[g * 3].is_ascii_hexdigit() && b[g * 3 + 1].is_ascii_hexdigit())
+            && (0..5).all(|g| b[g * 3 + 2] == b[2] && matches!(b[2], b':' | b'-'))
+    };
+    if is_mac(w) {
+        return vec![(0, w.len())];
+    }
+    let mut out = Vec::new();
+    let mut from = 0;
+    for part in w.split([':', '-']) {
+        let serial = part.len() >= 10
+            && part
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            && part.bytes().any(|c| c.is_ascii_uppercase())
+            && part.bytes().any(|c| c.is_ascii_digit());
+        if serial {
+            out.push((from, from + part.len()));
+        }
+        from += part.len() + 1;
+    }
+    out
 }
 
 /// Where a path that starts at `i` ends: at a line end, a quote, a bracket,
-/// a list separator or a `: ` (paths may hold spaces).
+/// a list separator (`, `, `;`, `|`) or a `: ` (paths may hold spaces, and
+/// commas, as GNOME's network mounts `smb-share:server=x,share=y` do).
 fn path_end(s: &str, i: usize) -> usize {
     let mut end = s.len();
     let mut it = s[i..].char_indices().peekable();
@@ -320,8 +468,8 @@ fn path_end(s: &str, i: usize) -> usize {
         let next = it.peek().map(|&(_, n)| n);
         let stop = matches!(
             c,
-            '\n' | '\r' | '\t' | '"' | '\'' | '`' | ')' | ']' | '>' | '<' | ',' | ';' | '|'
-        ) || (c == ':' && next.is_none_or(char::is_whitespace));
+            '\n' | '\r' | '\t' | '"' | '\'' | '`' | ')' | ']' | '>' | '<' | ';' | '|'
+        ) || (matches!(c, ':' | ',') && next.is_none_or(char::is_whitespace));
         if stop {
             end = i + k;
             break;
@@ -332,39 +480,81 @@ fn path_end(s: &str, i: usize) -> usize {
     i + trimmed.len().max(1)
 }
 
+/// What happens to an absolute path.
+enum PathFate {
+    /// It names nobody: it stays.
+    Kept,
+    /// It goes as a whole.
+    Gone,
+    /// The folders before byte `n` (a toolchain folder) go.
+    Head(usize),
+}
+
+/// Absolute paths not on the allow-list: a toolchain folder keeps its tail.
+fn gone_or_toolchain(path: &str) -> PathFate {
+    let norm = path.replace('\\', "/").to_ascii_lowercase();
+    TOOLCHAIN_MARKERS
+        .iter()
+        .filter_map(|m| norm.find(m))
+        .min()
+        .map_or(PathFate::Gone, PathFate::Head)
+}
+
+fn path_char(c: char) -> bool {
+    c.is_alphanumeric() || "._-$?".contains(c)
+}
+
 fn user_paths(s: &str) -> String {
     let boundary =
         |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || "_-./\\:~".contains(c)));
-    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut spans: Vec<(usize, usize, &str)> = Vec::new();
     let mut i = 0;
     while i < s.len() {
         let rest = &s[i..];
         let before = s[..i].chars().next_back();
+        let after = |n: usize| rest[n..].chars().next().is_some_and(path_char);
         let start = if !boundary(before) {
             None
         } else if rest.starts_with("~/") || rest.starts_with("~\\") {
             let end = path_end(s, i);
             let inner = s[i + 2..end].replace('\\', "/").to_lowercase();
-            Some((end, KEPT_HOME_DIRS.iter().any(|d| inner.starts_with(d))))
-        } else if USER_ROOTS.iter().any(|r| rest.starts_with(r)) {
-            Some((path_end(s, i), false))
+            let kept = KEPT_HOME_DIRS.iter().any(|d| inner.starts_with(d));
+            Some((end, if kept { PathFate::Kept } else { PathFate::Gone }))
+        } else if (rest.starts_with("\\\\") || rest.starts_with("//")) && after(2) {
+            // UNC (`\\server\share\…`): a network share, never allowed
+            let end = path_end(s, i);
+            Some((end, gone_or_toolchain(&s[i..end])))
+        } else if rest.starts_with('/') && after(1) {
+            let end = path_end(s, i);
+            let path = &s[i..end];
+            if !path[1..].contains('/') {
+                // `/name`: a single word (a web route, a device), no folder
+                None
+            } else if KEPT_ROOTS.iter().any(|r| path.starts_with(r)) {
+                Some((end, PathFate::Kept))
+            } else {
+                Some((end, gone_or_toolchain(path)))
+            }
         } else if let [d, b':', sep, ..] = rest.as_bytes()
             && d.is_ascii_alphabetic()
             && matches!(sep, b'\\' | b'/')
         {
             let end = path_end(s, i);
             let inner = s[i + 3..end].replace('\\', "/").to_lowercase();
-            Some((
-                end,
-                inner.starts_with("windows/") || inner.starts_with("program files"),
-            ))
+            if inner.starts_with("windows/") || inner.starts_with("program files") {
+                Some((end, PathFate::Kept))
+            } else {
+                Some((end, gone_or_toolchain(&s[i..end])))
+            }
         } else {
             None
         };
         match start {
-            Some((end, kept)) => {
-                if !kept {
-                    spans.push((i, end));
+            Some((end, fate)) => {
+                match fate {
+                    PathFate::Kept => {}
+                    PathFate::Gone => spans.push((i, end, "<project>")),
+                    PathFate::Head(n) => spans.push((i, i + n, "<path>")),
                 }
                 i = end.max(i + 1);
             }
@@ -374,7 +564,15 @@ fn user_paths(s: &str) -> String {
             i += 1;
         }
     }
-    splice(s, &spans, "<project>")
+    let mut out = String::with_capacity(s.len());
+    let mut kept = 0;
+    for (a, b, rep) in spans {
+        out.push_str(&s[kept..a]);
+        out.push_str(rep);
+        kept = b;
+    }
+    out.push_str(&s[kept..]);
+    out
 }
 
 /// `true` when `w` names a project or scan file.
@@ -518,8 +716,9 @@ mod tests {
             s.clean("log in /home/mrossi/.local/share/dentalcraft/logs"),
             "log in ~/.local/share/dentalcraft/logs"
         );
-        // another folder of the same prefix is not the home folder
-        assert_eq!(s.clean("/home/mrossi2/x"), "/home/mrossi2/x");
+        // another folder of the same prefix is not the home folder, but it
+        // is somebody else's folder: it goes too
+        assert_eq!(s.clean("/home/mrossi2/x"), "<project>");
         assert_eq!(s.clean("user mrossi signed out"), "user <user> signed out");
         assert_eq!(s.clean("mrossiX"), "mrossiX");
         // the toolchain's folders stay: they locate the bug
@@ -627,6 +826,90 @@ mod tests {
             "logs in ~\\AppData\\Roaming\\DentalCraft\\data\\logs"
         );
         assert_eq!(s.clean("Anna's file"), "<user>'s file");
+    }
+
+    #[test]
+    fn every_absolute_path_goes_but_the_allowed_ones() {
+        let s = linux();
+        // network shares, server folders, other users: no folder name survives
+        for (text, want) in [
+            (
+                // a path may hold spaces: the rest of the line goes with it
+                "open /run/user/1000/gvfs/smb-share:server=nas,share=pazienti/Rossi Mario/upper.stl failed",
+                "open <project>",
+            ),
+            (
+                r"open \\nas\share\Rossi Mario\upper.stl: denied",
+                "open <project>: denied",
+            ),
+            ("load /srv/cases/Rossi/x.dcprj", "load <project>"),
+            ("dir /data/Bianchi Anna/scans", "dir <project>"),
+            ("dir /opt/studio/Verdi/archive", "dir <project>"),
+            ("dir /Users/Shared/Pazienti/Neri", "dir <project>"),
+            ("dir /home/anna/Pazienti/Neri", "dir <project>"),
+            ("dir //nas/pazienti/Neri", "dir <project>"),
+            (r"dir E:\Studio\Neri Luca", "dir <project>"),
+        ] {
+            let got = s.clean(text);
+            assert_eq!(got, want, "{text}");
+            for name in ["Rossi", "Mario", "Bianchi", "Verdi", "Neri", "pazienti"] {
+                assert!(!got.contains(name), "{name} left in {got}");
+            }
+        }
+        // the allowed folders keep their path: they locate the bug
+        for kept in [
+            "/usr/lib64/libvulkan.so.1",
+            "/rustc/58cf8f9c35b3/library/std/src/panicking.rs:10:5",
+            "/app/bin/dentalcraft",
+            "/proc/self/exe",
+            "/dev/video0",
+            r"C:\Program Files\DentalCraft\dentalcraft.exe",
+        ] {
+            assert_eq!(s.clean(kept), kept);
+        }
+        // a dependency built in another home keeps only the toolchain part
+        assert_eq!(
+            s.clean("at /home/builder/.cargo/registry/src/index/zip-2.1/src/read.rs:9:1"),
+            "at <path>/.cargo/registry/src/index/zip-2.1/src/read.rs:9:1"
+        );
+        // a single word after a slash is no folder (a web route)
+        assert_eq!(s.clean("GET /me returned 401"), "GET /me returned 401");
+        // URLs are not paths
+        assert_eq!(
+            s.clean("https://dentalcraft.app/api/v1/diagnostics"),
+            "https://dentalcraft.app/api/v1/diagnostics"
+        );
+    }
+
+    #[test]
+    fn serial_numbers_and_mac_addresses_go() {
+        let s = linux();
+        assert_eq!(
+            s.clean("systemConnectCamera failed for MINI2 (RVPM2A2301234567): in use"),
+            "systemConnectCamera failed for MINI2 (<serial>): in use"
+        );
+        assert_eq!(
+            s.clean("turntable at 3C:71:BF:0A:12:9e lost"),
+            "turntable at <serial> lost"
+        );
+        assert_eq!(s.clean("nic 3c-71-bf-0a-12-9e"), "nic <serial>");
+        assert_eq!(
+            s.clean("device_id=mini2-0042 busy"),
+            "device_id=<serial> busy"
+        );
+        assert_eq!(
+            s.clean(r#"{"serial":"x1y2z3","fw":"1.2"}"#),
+            r#"{"serial":"<serial>","fw":"1.2"}"#
+        );
+        // what helps a bug report stays: times, versions, short codes
+        for kept in [
+            "at 12:30:45",
+            "version 0.2.0-alpha.15",
+            "GPU RTX4090",
+            "E0433",
+        ] {
+            assert_eq!(s.clean(kept), kept);
+        }
     }
 
     #[test]

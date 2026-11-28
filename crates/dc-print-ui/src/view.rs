@@ -549,6 +549,7 @@ impl PrintPopup {
         let room = (ui.available_height() - 230.0).max(140.0);
         plate_view(ui, &self.profile, plate, room);
         ui.add_space(10.0);
+        self.profile_warnings_view(ui);
 
         match &self.phase {
             Phase::Preparing(w) => self.progress(ui, w.progress(), acts),
@@ -630,6 +631,25 @@ impl PrintPopup {
             .clicked()
         {
             acts.push(Act::Cancel);
+        }
+    }
+
+    /// The warnings of the printer profile, as every `print.prepare` result
+    /// carries them: today only that its scale and left/right orientation
+    /// are not yet checked against the printer. Printing stays allowed.
+    fn profile_warnings_view(&self, ui: &mut Ui) {
+        for code in self.profile.warnings() {
+            let (title, body) = match code {
+                dc_print::profile::PROFILE_NOT_VALIDATED => (
+                    "print-profile-not-validated",
+                    "print-profile-not-validated-body",
+                ),
+                _ => continue,
+            };
+            widgets::badge(ui, BadgeKind::Warning, t(title));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(body)).font(fonts::ui(13.0)));
+            ui.add_space(8.0);
         }
     }
 

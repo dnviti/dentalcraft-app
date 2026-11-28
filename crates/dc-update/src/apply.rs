@@ -5,9 +5,9 @@
 //! | installation | prepare | finish |
 //! |---|---|---|
 //! | standalone (`.tar.gz`, `.zip`) | unpacks the archive into `<folder>/.update/staged/` | moves each unpacked entry into the folder, the one it replaces into `<folder>/.update/previous/` (renames only, undone on failure); a running program may be renamed on Linux and Windows |
-//! | AppImage | downloads next to `$APPIMAGE` (`.<name>.new`) | renames it over `$APPIMAGE` (atomic) |
+//! | AppImage | downloads next to `$APPIMAGE` (`.<name>.new`) | checks its SHA-256 again, then renames it over `$APPIMAGE` (atomic) |
 //! | macOS `DentalCraft.app` (`.zip`) | unpacks the archive into `<folder of the app>/.<name>.app.update/staged/` (same volume as the app) | renames the app into `previous/` of that folder and the unpacked one to its place (two renames, undone on failure); a running app may be renamed on macOS; restart opens the new one with `open -n` |
-//! | Windows setup `.exe` / `.msi` | downloads into the work folder | starts a hidden PowerShell that waits for this process to end, then runs `setup.exe /S /D=<folder>` or `msiexec /i <file> /passive`, then (restart) the installed `dentalcraft.exe` |
+//! | Windows setup `.exe` / `.msi` | downloads into the work folder | checks its SHA-256 again, then starts a hidden `%SystemRoot%\System32` PowerShell that waits for this process to end, checks the SHA-256 and the Authenticode signer again, then runs `setup.exe /S /D=<folder>` or `msiexec /i <file> /passive`, then (restart) the installed `dentalcraft.exe` |
 //!
 //! [`cleanup`] removes, at the next start, what the update left behind.
 
@@ -47,11 +47,18 @@ enum Step {
         staged: PathBuf,
         update: PathBuf,
     },
-    /// AppImage: rename `new` over `target`.
-    Replace { new: PathBuf, target: PathBuf },
-    /// Windows installer to run once this process has ended.
+    /// AppImage: rename `new` over `target`; `sha256` (from the signed
+    /// manifest) is checked again first.
+    Replace {
+        new: PathBuf,
+        target: PathBuf,
+        sha256: String,
+    },
+    /// Windows installer to run once this process has ended; `sha256` (from
+    /// the signed manifest) is checked again right before it runs.
     Installer {
         file: PathBuf,
+        sha256: String,
         msi: bool,
         dir: PathBuf,
     },
@@ -121,7 +128,13 @@ impl Prepared {
                     open_bundle(&bundle)?;
                 }
             }
-            Step::Replace { new, target } => {
+            Step::Replace {
+                new,
+                target,
+                sha256,
+            } => {
+                // it waited in a folder other processes may write to
+                unchanged(&new, &sha256)?;
                 fs::rename(&new, &target)
                     .map_err(|e| UpdateError::Install(format!("{}: {e}", target.display())))?;
                 tracing::info!("updated {} to {}", target.display(), self.version);
@@ -129,10 +142,19 @@ impl Prepared {
                     launch(&target)?;
                 }
             }
-            Step::Installer { file, msi, dir } => {
+            Step::Installer {
+                file,
+                sha256,
+                msi,
+                dir,
+            } => {
+                // checked here and again by the script, just before it starts
+                // the (elevated) installer
+                unchanged(&file, &sha256)?;
                 run_installer(&installer_script(
                     std::process::id(),
                     &file,
+                    &sha256,
                     msi,
                     &dir,
                     restart,
@@ -183,6 +205,7 @@ pub fn prepare(
             let file = download_into(work_dir, asset, progress, cancel)?;
             Step::Installer {
                 file,
+                sha256: asset.sha256.clone(),
                 msi: inst.kind == InstallKind::Msi,
                 dir: inst.dir.clone(),
             }
@@ -472,6 +495,7 @@ fn prepare_appimage(
         }
     }
     Ok(Step::Replace {
+        sha256: asset.sha256.clone(),
         new,
         target: target.to_path_buf(),
     })
@@ -728,13 +752,22 @@ fn extract_zip_with(
 
 // ---------------------------------------------------------------- Windows installers
 
-/// The PowerShell commands that wait for process `pid` to end, then run the
-/// installer `file` (`setup.exe /S /D=<dir>`, or `msiexec /i <file>
-/// /passive`), then, with `restart` and when it succeeded, start
-/// `<dir>\dentalcraft.exe`.
+/// SHA-256 fingerprint of the DentalCraft Authenticode certificate
+/// (`packaging/windows/dentalcraft-selfsigned.crt.pem`): the signer the
+/// installer must carry before it is started elevated.
+pub(crate) const AUTHENTICODE_SHA256: &str =
+    "24DD542E337BCEA99C793D57DE53B6D355DC015BF1270D20D1321D56DCF0AA26";
+
+/// The PowerShell commands that wait for process `pid` to end, check the
+/// installer `file` again (its SHA-256 against `sha256` from the signed
+/// manifest, its Authenticode signer against [`AUTHENTICODE_SHA256`]; on any
+/// difference it stops without running it), then run it (`setup.exe /S
+/// /D=<dir>`, or `msiexec /i <file> /passive`), then, with `restart` and when
+/// it succeeded, start `<dir>\dentalcraft.exe`.
 pub(crate) fn installer_script(
     pid: u32,
     file: &Path,
+    sha256: &str,
     msi: bool,
     dir: &Path,
     restart: bool,
@@ -743,6 +776,20 @@ pub(crate) fn installer_script(
     let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let file = file.display().to_string();
     let dir = dir.display().to_string();
+    // the file waited in a folder the user (and any program of the user) can
+    // write to: check it right before the elevated start (-ne on strings
+    // ignores case)
+    let check = format!(
+        "$f = {}; \
+         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne {}) {{ exit 1 }}; \
+         $c = (Get-AuthenticodeSignature -LiteralPath $f).SignerCertificate; \
+         if ($null -eq $c) {{ exit 1 }}; \
+         $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData)) -replace '-', ''; \
+         if ($h -ne {}) {{ exit 1 }}",
+        quote(&file),
+        quote(sha256),
+        quote(AUTHENTICODE_SHA256)
+    );
     let run = if msi {
         // msiexec reads the path in double quotes (it may hold spaces)
         format!(
@@ -752,12 +799,12 @@ pub(crate) fn installer_script(
     } else {
         // NSIS: /D= is the last argument and is never quoted
         format!(
-            "$p = Start-Process -FilePath {} -ArgumentList @('/S', {}) -Wait -PassThru",
-            quote(&file),
+            "$p = Start-Process -FilePath $f -ArgumentList @('/S', {}) -Wait -PassThru",
             quote(&format!("/D={dir}"))
         )
     };
-    let mut script = format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; {run}");
+    let mut script =
+        format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; {check}; {run}");
     if restart {
         let app = format!("{}\\dentalcraft.exe", dir.trim_end_matches(['\\', '/']));
         script.push_str(&format!(
@@ -766,6 +813,43 @@ pub(crate) fn installer_script(
         ));
     }
     script
+}
+
+/// Fails with [`UpdateError::Damaged`] (and deletes `path`) when the SHA-256
+/// of `path` is not `sha256` (hex, any case).
+fn unchanged(path: &Path, sha256: &str) -> Result<(), UpdateError> {
+    use sha2::{Digest, Sha256};
+    let mut file =
+        File::open(path).map_err(|e| UpdateError::Install(format!("{}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; 64 * 1024];
+    loop {
+        let n = match io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(UpdateError::Install(format!("{}: {e}", path.display()))),
+        };
+        hasher.update(&buf[..n]);
+    }
+    if !crate::download::hex(&hasher.finalize()).eq_ignore_ascii_case(sha256) {
+        tracing::warn!(
+            "{} changed after its download: not installed",
+            path.display()
+        );
+        let _ = fs::remove_file(path);
+        return Err(UpdateError::Damaged);
+    }
+    Ok(())
+}
+
+/// Absolute path of Windows PowerShell under `%SystemRoot%\System32`, so
+/// the program's own folder (searched first by `Command`) is never used.
+fn powershell_exe(system_root: Option<OsString>) -> PathBuf {
+    let root = system_root
+        .filter(|r| !r.is_empty())
+        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
 /// `script` for `powershell -EncodedCommand`: UTF-16LE, base64 (no quoting
@@ -778,7 +862,7 @@ pub(crate) fn encoded_command(script: &str) -> String {
 
 /// Starts the hidden PowerShell that runs `script` once this process ends.
 fn run_installer(script: &str) -> Result<(), UpdateError> {
-    let mut cmd = std::process::Command::new("powershell.exe");
+    let mut cmd = std::process::Command::new(powershell_exe(std::env::var_os("SystemRoot")));
     cmd.args([
         "-NoProfile",
         "-NonInteractive",
@@ -1401,20 +1485,36 @@ mod tests {
             r"C:\Users\Jane O'Neil\AppData\Roaming\DentalCraft\dentalcraft\data\updates\DentalCraft-1.0.0-setup.exe",
         );
         let dir = Path::new(r"C:\Users\Jane O'Neil\AppData\Local\Programs\DentalCraft");
-        let s = installer_script(4242, file, false, dir, true);
+        let sha = "ab".repeat(32);
+        let s = installer_script(4242, file, &sha, false, dir, true);
         assert!(
             s.starts_with("Wait-Process -Id 4242 -ErrorAction SilentlyContinue; "),
             "{s}"
         );
-        assert!(s.contains(r"-FilePath 'C:\Users\Jane O''Neil\AppData\Roaming\DentalCraft\dentalcraft\data\updates\DentalCraft-1.0.0-setup.exe'"), "{s}");
+        assert!(s.contains(r"$f = 'C:\Users\Jane O''Neil\AppData\Roaming\DentalCraft\dentalcraft\data\updates\DentalCraft-1.0.0-setup.exe'; "), "{s}");
         assert!(
             s.contains(r"@('/S', '/D=C:\Users\Jane O''Neil\AppData\Local\Programs\DentalCraft')"),
             "{s}"
         );
         assert!(s.ends_with(r"{ Start-Process -FilePath 'C:\Users\Jane O''Neil\AppData\Local\Programs\DentalCraft\dentalcraft.exe' }"), "{s}");
+        // the file is checked again right before the (elevated) start: its
+        // signed hash, then its Authenticode signer; any difference stops it
+        let hash = s
+            .find(&format!(
+                "if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne '{sha}') {{ exit 1 }}"
+            ))
+            .expect("hash check");
+        let signer = s
+            .find(&format!("if ($h -ne '{AUTHENTICODE_SHA256}') {{ exit 1 }}"))
+            .expect("signer check");
+        assert!(s.contains("(Get-AuthenticodeSignature -LiteralPath $f).SignerCertificate"));
+        assert!(s.contains("if ($null -eq $c) { exit 1 }"), "{s}");
+        let start = s.find("$p = Start-Process -FilePath $f").expect("start");
+        assert!(hash < signer && signer < start, "{s}");
         let msi = installer_script(
             7,
             Path::new(r"C:\Temp\Dental Craft.msi"),
+            &sha,
             true,
             Path::new(r"C:\Program Files\DentalCraft\"),
             false,
@@ -1424,6 +1524,10 @@ mod tests {
             "{msi}"
         );
         assert!(!msi.contains("dentalcraft.exe"), "no restart asked: {msi}");
+        assert!(
+            msi.find("Get-AuthenticodeSignature").unwrap() < msi.find("msiexec").unwrap(),
+            "{msi}"
+        );
         // what powershell -EncodedCommand decodes
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
@@ -1434,6 +1538,72 @@ mod tests {
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(String::from_utf16(&units).unwrap(), s);
+    }
+
+    #[test]
+    fn powershell_is_taken_from_system32() {
+        let p = powershell_exe(Some(OsString::from(r"D:\Win")));
+        assert_eq!(
+            p,
+            PathBuf::from(r"D:\Win").join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+        );
+        let p = powershell_exe(None).display().to_string();
+        assert!(p.starts_with(r"C:\Windows"), "{p}");
+        assert!(
+            p.ends_with(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn a_download_changed_after_its_check_is_never_run_or_installed() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let good = crate::download::hex(&Sha256::digest(b"genuine"));
+
+        // Windows installer: refused before the helper is started
+        let file = root.path().join("DentalCraft-9.9.9.msi");
+        fs::write(&file, b"swapped by someone else").unwrap();
+        let prepared = Prepared {
+            version: "9.9.9".into(),
+            step: Step::Installer {
+                file: file.clone(),
+                sha256: good.clone(),
+                msi: true,
+                dir: root.path().join("app"),
+            },
+        };
+        assert_eq!(prepared.finish(false).unwrap_err(), UpdateError::Damaged);
+        assert!(!file.exists(), "the swapped file is deleted");
+
+        // AppImage: the installed one stays
+        let target = root.path().join("DentalCraft.AppImage");
+        fs::write(&target, b"installed").unwrap();
+        let new = appimage_download(&target);
+        fs::write(&new, b"swapped").unwrap();
+        let prepared = Prepared {
+            version: "9.9.9".into(),
+            step: Step::Replace {
+                new: new.clone(),
+                target: target.clone(),
+                sha256: good.clone(),
+            },
+        };
+        assert_eq!(prepared.finish(false).unwrap_err(), UpdateError::Damaged);
+        assert_eq!(fs::read(&target).unwrap(), b"installed");
+
+        // unchanged: replaced (upper-case hex accepted too)
+        fs::write(&new, b"genuine").unwrap();
+        let prepared = Prepared {
+            version: "9.9.9".into(),
+            step: Step::Replace {
+                new,
+                target: target.clone(),
+                sha256: good.to_ascii_uppercase(),
+            },
+        };
+        prepared.finish(false).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"genuine");
     }
 
     #[test]

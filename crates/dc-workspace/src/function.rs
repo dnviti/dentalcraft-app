@@ -36,6 +36,8 @@ use crate::workspace::Workspace;
 
 /// A part of an inspector the workspace draws.
 type Draw = fn(&mut Workspace, &mut Ui);
+/// A part of an inspector the workspace draws when it applies (`true`).
+type Draw2 = fn(&mut Workspace, &mut Ui) -> bool;
 
 /// Who draws the parameters of a function.
 #[derive(Clone, Copy)]
@@ -84,6 +86,10 @@ struct Function {
     advanced_corrections: bool,
     /// [`Function::more`] is only advanced options.
     advanced_more: bool,
+    /// Draws, when the function does not apply to the case, what the
+    /// inspector shows in place of its status, parameters, run button and
+    /// corrections, and returns `true`; `false` (nothing drawn): it applies.
+    not_applicable: Option<Draw2>,
 }
 
 /// The tools shown only with the advanced options on (the region view of
@@ -102,6 +108,7 @@ const PLAIN: Function = Function {
     advanced_params: false,
     advanced_corrections: false,
     advanced_more: false,
+    not_applicable: None,
 };
 
 /// "Import scans", whatever the id of the module's import: the role of the
@@ -116,6 +123,7 @@ const IMPORT: Function = Function {
 static FUNCTIONS: &[Function] = &[
     Function {
         id: leaf::FIND_TEETH,
+        results: Some(Workspace::marks_results),
         params: Params::Module,
         corrections: Corrections::Tools(&[
             Tool::Seeds,
@@ -203,6 +211,8 @@ static FUNCTIONS: &[Function] = &[
         more: Some(Workspace::bite_corrections),
         // "Correct the interpenetration"
         advanced_more: true,
+        // one arch has no bite: nothing to register or estimate
+        not_applicable: Some(Workspace::bite_not_applicable),
         ..PLAIN
     },
 ];
@@ -221,6 +231,30 @@ pub(crate) fn owner(tool: Tool) -> Option<&'static str> {
         .iter()
         .find(|f| matches!(f.corrections, Corrections::Tools(tools) if tools.contains(&tool)))
         .map(|f| f.id)
+}
+
+/// The function a command corrects by hand: the tools of its inspector, and
+/// the corrections that are not tools (the numbering in order and the marks
+/// cleared, the interpenetration corrected, the values of the analysis, the
+/// final position taken back, a tooth slowed, the decisions of the review).
+/// The corrections of "Import scans" (an arch chosen by hand, a scan removed
+/// or closed) are not: the module itself clears what depended on a scan.
+/// A new correction that is not a tool is listed here.
+pub(crate) fn corrected(command: &str) -> Option<&'static str> {
+    if let Some(f) = Tool::from_command(command).and_then(owner) {
+        return Some(f);
+    }
+    match command {
+        crate::manual::SEQUENCE | crate::manual::CLEAR_SEEDS => Some(leaf::FIND_TEETH),
+        crate::bite::CORRECT => Some(leaf::BITE),
+        leaf::DIAGNOSIS_EDIT => Some(leaf::CASE_ANALYSIS),
+        crate::setup::RESET => Some(leaf::SETUP),
+        crate::staging::TOOTH_SPEED_CMD => Some(leaf::ALIGNERS),
+        crate::review::DECIDE | crate::review::SET_VALUE | crate::review::BULK => {
+            Some(leaf::REVIEW)
+        }
+        _ => None,
+    }
 }
 
 /// The title of a section of the inspector, under a hairline.
@@ -265,6 +299,11 @@ impl Workspace {
             return;
         }
         let f = of(id);
+        if let Some(draw) = f.not_applicable
+            && draw(self, ui)
+        {
+            return;
+        }
         let done = self.is_done(id);
         let next = self.next_step() == Some(id);
         let advanced = dc_module_api::advanced_ui(ui.ctx());
@@ -470,6 +509,28 @@ mod tests {
         assert_eq!(owner(Tool::Adjust), Some(leaf::SETUP));
         assert_eq!(owner(Tool::ThreePoints), Some(leaf::BITE));
         assert_eq!(owner(Tool::ArchLine), Some(leaf::SETUP));
+    }
+
+    #[test]
+    fn a_correction_names_the_function_it_corrects() {
+        // the tools, by their command
+        assert_eq!(corrected(crate::manual::SEEDS), Some(leaf::FIND_TEETH));
+        assert_eq!(corrected(crate::manual::BRUSH), Some(leaf::SEGMENT));
+        assert_eq!(corrected(crate::archline::LINE), Some(leaf::SETUP));
+        // the corrections that are buttons
+        assert_eq!(corrected(crate::manual::SEQUENCE), Some(leaf::FIND_TEETH));
+        assert_eq!(corrected(crate::bite::CORRECT), Some(leaf::BITE));
+        assert_eq!(corrected(crate::review::BULK), Some(leaf::REVIEW));
+        // no correction: a setting, a run, the corrections of the import
+        for id in [
+            crate::setup::SETTINGS,
+            leaf::SEGMENT,
+            leaf::SET_ARCH,
+            leaf::MAKE_BASE,
+            "case.remove-scan",
+        ] {
+            assert_eq!(corrected(id), None, "{id}");
+        }
     }
 
     #[test]

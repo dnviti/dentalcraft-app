@@ -127,6 +127,12 @@ pub(crate) struct Reported {
 pub(crate) fn report(id: &str, out: &Value) -> Option<Reported> {
     match id {
         BITE => {
+            // not applicable (one arch: there is no bite): nothing was put
+            // in occlusion, nothing was estimated, nothing to warn about;
+            // the inspector says why
+            if out["applies"] == false {
+                return None;
+            }
             let scan = out["method"] == "bite_scan";
             let (level, title, detail) = if scan {
                 (
@@ -318,7 +324,7 @@ fn base_report(out: &Value) -> Reported {
 }
 
 /// The output of the step `id` in the `steps` of a wrapper command.
-fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
+pub(crate) fn step_output<'a>(out: &'a Value, id: &str) -> Option<&'a Value> {
     out["steps"]
         .as_array()?
         .iter()
@@ -445,6 +451,33 @@ pub(crate) fn warning_toasts(out: &Value) -> Vec<Toast> {
         .filter_map(Value::as_str)
         .filter(|w| !w.is_empty())
         .map(|w| Toast::new(ToastLevel::Warning, "ws-toast-to-check").with_detail(w))
+        .collect()
+}
+
+/// [`warning_toasts`] of every step of a leaf that runs several commands
+/// (`steps`, each with its `output`): what "Find the teeth" left in doubt on
+/// the teeth it found (the base of a model, a stretch with no crown, a low
+/// stretch), said as soon as it ends.
+pub(crate) fn step_warning_toasts(out: &Value) -> Vec<Toast> {
+    out["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| warning_toasts(&s["output"]))
+        .collect()
+}
+
+/// One notice per doubt the automatic numbering left on the tooth marks the
+/// case holds (`numbering_doubts`, by arch, in words): the notices "to
+/// check" that Find the teeth said when it ended, said again when a project
+/// is opened with its marks still in doubt (they go when the marks change).
+pub(crate) fn numbering_doubt_toasts(state: &CaseState) -> Vec<Toast> {
+    state
+        .module_data::<AlignersState>(MODULE_ID)
+        .into_iter()
+        .flat_map(|d| d.numbering_doubts.values().flatten())
+        .filter(|w| !w.is_empty())
+        .map(|w| Toast::new(ToastLevel::Warning, "ws-toast-to-check").with_detail(w.as_str()))
         .collect()
 }
 
@@ -1176,6 +1209,87 @@ mod tests {
     }
 
     #[test]
+    fn the_doubts_of_the_numbering_the_case_holds_are_notices_to_check() {
+        let mut state = CaseState::default();
+        assert!(numbering_doubt_toasts(&state).is_empty());
+        let mut data = AlignersState::default();
+        data.numbering_doubts.insert(
+            ScanRole::Upper,
+            vec!["Check the teeth of the upper arch: no crown between 11 and 22".into()],
+        );
+        state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let toasts = numbering_doubt_toasts(&state);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].message_key, "ws-toast-to-check");
+        assert_eq!(toasts[0].level, ToastLevel::Warning);
+        assert!(toasts[0].detail.as_deref().unwrap().contains("11 and 22"));
+    }
+
+    /// A workspace on a case whose upper arch is in doubt, as opened.
+    fn opened_in_doubt() -> Workspace {
+        let mut state = CaseState::default();
+        let mut data = AlignersState::default();
+        data.numbering_doubts
+            .insert(ScanRole::Upper, vec!["no crown between 11 and 22".into()]);
+        state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let project = dc_project::Project::new(
+            dc_project::AppInfo {
+                version: "0.1.0".into(),
+                commit: "test".into(),
+            },
+            crate::now_rfc3339(),
+            state,
+        );
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(project),
+            None,
+        )
+    }
+
+    fn to_check(ws: &Workspace) -> Vec<String> {
+        ws.sticky_toast_keys()
+            .into_iter()
+            .filter(|k| k == "ws-toast-to-check")
+            .collect()
+    }
+
+    #[test]
+    fn the_doubts_of_find_the_teeth_stay_on_screen_from_the_leaf_the_pipeline_and_a_reopened_project()
+     {
+        // the inspector's button: the warnings of the numbering step
+        let mut ws =
+            Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        let numbering = json!({ "steps": [
+            { "id": "aligners.preparation.numbering.automatic",
+              "output": { "warnings": ["no crown between 11 and 22"] } },
+        ] });
+        ws.show_leaf_report(FIND_TEETH, &numbering);
+        assert_eq!(to_check(&ws).len(), 1);
+        // the whole pipeline: the doubts are in its warnings, once
+        let mut ws =
+            Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        let auto = json!({ "steps": [], "seconds": 1.0,
+                           "warnings": ["no crown between 11 and 22"] });
+        ws.show_leaf_report(AUTO, &auto);
+        assert_eq!(to_check(&ws).len(), 1);
+        // the project opened again with the marks still in doubt: said again
+        assert_eq!(to_check(&opened_in_doubt()).len(), 1);
+        // a new case, or marks without doubt: nothing
+        let none = Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        assert!(to_check(&none).is_empty());
+    }
+
+    #[test]
+    fn a_bite_that_does_not_apply_has_no_notification() {
+        let none = json!({ "applies": false, "reason": "one_arch" });
+        assert!(report(BITE, &none).is_none());
+        // an estimate still warns, a bite scan does not
+        assert!(report(BITE, &json!({ "method": "virtual_bite" })).is_some_and(|r| r.sticky));
+        assert!(report(BITE, &json!({ "method": "bite_scan" })).is_some_and(|r| !r.sticky));
+    }
+
+    #[test]
     fn the_print_leaf_button_opens_the_popup() {
         assert_eq!(button_key(PRINT, None, false), "ws-btn-print");
         assert_eq!(button_key(PRINT, None, true), "ws-btn-print");
@@ -1378,6 +1492,24 @@ mod tests {
         );
         assert!(warning_toasts(&json!({ "warnings": [] })).is_empty());
         assert!(warning_toasts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn what_find_the_teeth_left_in_doubt_is_a_notice() {
+        let out = json!({ "steps": [
+            { "id": "aligners.preparation.numbering.automatic",
+              "output": { "arches": [], "failed": [],
+                          "warnings": ["Check the teeth of the upper arch: no crown between 11 and 22"] } },
+            { "id": "aligners.preparation.orientation.automatic", "output": {} },
+        ] });
+        let toasts = step_warning_toasts(&out);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].message_key, "ws-toast-to-check");
+        assert_eq!(toasts[0].level, ToastLevel::Warning);
+        assert!(toasts[0].detail.as_deref().unwrap().contains("11 and 22"));
+        // an older module, or a numbering with no doubt: nothing
+        assert!(step_warning_toasts(&json!({ "steps": [{ "output": {} }] })).is_empty());
+        assert!(step_warning_toasts(&json!({})).is_empty());
     }
 
     #[test]

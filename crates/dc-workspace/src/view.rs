@@ -110,6 +110,16 @@ pub(crate) enum Model {
     Teeth,
 }
 
+impl Model {
+    /// Name of the choice for agents (`app.window.view`).
+    fn name(self) -> &'static str {
+        match self {
+            Model::Scan => "scan",
+            Model::Teeth => "teeth",
+        }
+    }
+}
+
 /// What the meshes were last built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SceneKey {
@@ -136,6 +146,19 @@ type ContactCache = Option<(usize, Result<Arc<ContactColors>, String>)>;
 /// and for the 3D teeth or the scan.
 type AnchorCache = Option<(usize, bool, Arc<Vec<Anchor>>)>;
 
+/// The four toggles of the toolbar `app.window.view` sets (`None`: stays).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowOverlays {
+    /// The tooth colours on the scans.
+    pub colours: Option<bool>,
+    /// The marks of the teeth.
+    pub marks: Option<bool>,
+    /// The tooth numbers.
+    pub numbers: Option<bool>,
+    /// The occlusal contact map.
+    pub contacts: Option<bool>,
+}
+
 /// Viewport and view options.
 #[derive(Default)]
 pub(crate) struct ViewState {
@@ -153,6 +176,10 @@ pub(crate) struct ViewState {
     pub mesh_count: usize,
     /// Layers over the scans (labels, seeds, contact map).
     pub layers: Layers,
+    /// What the tooth colours and the tooth numbers showed when the tooth
+    /// brush opened (`None` while it is closed): they go back to it when
+    /// the brush closes ([`overlay::follow_brush`]).
+    pub brush_before: Option<overlay::BrushOverlays>,
     /// Scan or 3D teeth, as the user chose (see [`Workspace::teeth_shown`]).
     pub model: Model,
     /// Contact map of the last state it was asked for.
@@ -282,7 +309,8 @@ pub(crate) struct SceneInput<'a> {
     pub contacts: Option<&'a ContactColors>,
     /// Draw the module's entries that replace the scan of their arch (the
     /// built teeth and gingiva) instead of it; `false`: the scan, and none of
-    /// the entries of its arch.
+    /// the entries of its arch but the aligner of the view, which replaces
+    /// nothing.
     pub teeth: bool,
     /// Wait for the slow part of the module entries (the deformed gingiva at
     /// a stage); `false` (the UI thread): draw them at rest meanwhile and
@@ -503,8 +531,14 @@ fn crowns_only(mut mesh: dc_mesh::TriMesh, labels: &[u16]) -> dc_mesh::TriMesh {
 /// - The module's entries at a later stage are only asked for when something
 ///   of them is drawn: with the scans shown, the entries of an arch they
 ///   replace are left out, so the stage (and the deformation it costs) is
-///   skipped when no other entry exists. `hides_scan` and `arch` of an entry
-///   do not depend on the stage.
+///   skipped when no other entry exists and no aligner is shown. `hides_scan`
+///   and `arch` of an entry do not depend on the stage.
+/// - The aligner of the view (`aligners.view.aligner`, while the case shows
+///   it) replaces nothing: it is drawn over whatever its arch shows, the
+///   scan, the 3D teeth or the study model, at the stage shown, translucent
+///   and never picked (`crate::aligner`). Only a hidden arch, a scan shown
+///   alone ([`SceneInput::focus`]) or the region of a tooth
+///   ([`SceneInput::region`], at the initial position) leaves it out.
 /// - With the target layer and a final position, whatever the stage, a
 ///   translucent ghost in [`SceneInput::target`] shows the teeth at their
 ///   final pose (the plugin's `ghost_final`): the built teeth that are
@@ -570,8 +604,16 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
             .is_some_and(|a| al.is_some_and(|d| d.study_models.get(&a) == Some(blob))),
         _ => false,
     };
+    // the aligner of the view, drawn whatever the arch shows
+    let is_aligner = |e: &SceneEntry| match &e.item {
+        SceneItem::Mesh { blob, .. } => crate::aligner::is_view_aligner(al, blob),
+        _ => false,
+    };
+    let aligner_shown =
+        al.is_some_and(|a| a.aligner_view.shown && !a.aligner_view.bases.is_empty());
     let mut complete = true;
-    let entries = if input.stage == 0 || !rest.iter().any(|e| keep(e) && !is_study(e)) {
+    let staged = aligner_shown || rest.iter().any(|e| keep(e) && !is_study(e));
+    let entries = if input.stage == 0 || !staged {
         rest.clone()
     } else if input.wait {
         input.module.scene_at(state, Some(input.stage))
@@ -766,6 +808,8 @@ pub(crate) fn scene_meshes(input: &SceneInput<'_>) -> (Vec<ViewMesh>, bool) {
     for (i, e) in entries.iter().enumerate().filter(|(_, e)| {
         if is_study(e) {
             e.arch.is_some_and(|a| study.contains(&a))
+        } else if is_aligner(e) {
+            input.region.is_none()
         } else {
             keep(e) && e.arch.is_none_or(|a| !study.contains(&a))
         }
@@ -833,6 +877,25 @@ impl Workspace {
     pub(crate) fn sync_scene_with(&mut self, enamel: Color) {
         let target = scene_color(dc_ui::tokens::tokens().dark.model_target);
         self.sync_scene_mode(enamel, target, true);
+    }
+
+    /// The tooth brush opened or closed since the last look: while it is
+    /// open the tooth colours and the tooth numbers are on, and when it
+    /// closes each goes back to what it was before it opened (a toggle by
+    /// hand inside wins until then). The marks and the contact map are the
+    /// user's alone. It is tied to the brush being the open tool, never to
+    /// selecting the menu entry.
+    pub(crate) fn sync_brush_overlays(&mut self) {
+        let layers = &mut self.view.layers;
+        let shown = overlay::BrushOverlays {
+            labels: layers.labels,
+            numbers: layers.numbers,
+        };
+        let in_brush = self.manual.tool == Some(manual::Tool::Brush);
+        let (now, before) = overlay::follow_brush(shown, self.view.brush_before, in_brush);
+        layers.labels = now.labels;
+        layers.numbers = now.numbers;
+        self.view.brush_before = before;
     }
 
     /// The layers drawn: the user's, with the final position ghosted while
@@ -1057,6 +1120,7 @@ impl Workspace {
     /// Draws the centre area.
     pub(crate) fn center_ui(&mut self, ui: &mut Ui) {
         let c = *colors(ui);
+        self.sync_brush_overlays();
         self.sync_scene(ui);
         // the selection: outline, tint, gizmo, and the change being dragged
         self.selection_follow_case();
@@ -1448,17 +1512,24 @@ impl Workspace {
     /// view (`occlusal`, `front`, `left`, `right`, `back`), `stage` the
     /// stage shown (at most the last one; the playback stops), `study` and
     /// `target` the "Study models" and "Final position" layers (the final
-    /// position stays off, with its notice, in a case without one). What is
-    /// `None` stays. Answers what the view shows then.
+    /// position stays off, with its notice, in a case without one), `model`
+    /// the "Scan" or "3D teeth" choice (`scan`, `teeth`; a tool that works on
+    /// the scan still shows the scan, see `teeth_shown`), `overlays` the four
+    /// toggles after the arches (`colours`, `marks`, `numbers`, `contacts`: all
+    /// off when a project opens; the tooth brush turns the colours and the
+    /// numbers on while it is open and puts them back when it closes). What
+    /// is `None` stays. Answers what the view shows then.
     ///
     /// # Errors
-    /// An unknown view; nothing changes.
+    /// An unknown view or model; nothing changes.
     pub fn set_window_view(
         &mut self,
         view: Option<&str>,
         stage: Option<u32>,
         study: Option<bool>,
         target: Option<bool>,
+        model: Option<&str>,
+        overlays: WindowOverlays,
     ) -> Result<serde_json::Value, String> {
         let choice = match view {
             None => None,
@@ -1471,8 +1542,20 @@ impl Workspace {
                     })?,
             ),
         };
+        let model = match model {
+            None => None,
+            Some(m) => Some(
+                [Model::Scan, Model::Teeth]
+                    .into_iter()
+                    .find(|c| c.name() == m)
+                    .ok_or_else(|| format!("unknown model {m}: scan or teeth"))?,
+            ),
+        };
         if let Some(c) = choice {
             self.set_view(c);
+        }
+        if let Some(m) = model {
+            self.view.model = m;
         }
         let last = TimelineModel::from_state(self.undo.current()).last();
         if let Some(s) = stage {
@@ -1485,12 +1568,30 @@ impl Workspace {
         if target.is_some_and(|on| on != self.view.layers.target) {
             self.toggle_target_layer();
         }
+        // the four toggles of the toolbar: set as a click on them sets them
+        // (inside the tooth brush the choice wins, as a click does)
+        let layers = &mut self.view.layers;
+        for (value, on) in [
+            (overlays.colours, &mut layers.labels),
+            (overlays.marks, &mut layers.seeds),
+            (overlays.numbers, &mut layers.numbers),
+            (overlays.contacts, &mut layers.contacts),
+        ] {
+            if let Some(v) = value {
+                *on = v;
+            }
+        }
         Ok(serde_json::json!({
             "view": self.view.view.name(),
             "stage": self.timeline.current,
             "last_stage": last,
             "study": self.view.layers.study,
             "target": self.view.layers.target,
+            "model": self.view.model.name(),
+            "colours": self.view.layers.labels,
+            "marks": self.view.layers.seeds,
+            "numbers": self.view.layers.numbers,
+            "contacts": self.view.layers.contacts,
             "study_shown": self.study_shown(),
             "teeth_shown": self.teeth_shown(),
         }))
@@ -1872,8 +1973,9 @@ pub(crate) enum ToolbarItem {
 
 impl ToolbarItem {
     /// Every item, in the order of the toolbar; without `advanced` (the
-    /// advanced options off) not the measuring tools nor the layers of the
-    /// marks.
+    /// advanced options off) not the measuring tools. The four layers
+    /// (tooth colours, marks, tooth numbers, contact map) are always there,
+    /// whatever the project, the view, the step or the options.
     fn all(advanced: bool) -> Vec<ToolbarItem> {
         let views = ViewChoice::ALL.iter().map(|v| ToolbarItem::View(*v));
         let groups = [
@@ -1887,7 +1989,7 @@ impl ToolbarItem {
             ToolbarGroup::Fit,
         ]
         .into_iter()
-        .filter(|g| advanced || !matches!(g, ToolbarGroup::Tools | ToolbarGroup::Layers))
+        .filter(|g| advanced || !matches!(g, ToolbarGroup::Tools))
         .map(ToolbarItem::Group);
         views.chain(groups).collect()
     }
@@ -2389,10 +2491,12 @@ mod tests {
     }
 
     #[test]
-    fn the_advanced_options_off_leave_the_tools_and_the_marks_out_of_the_toolbar() {
+    fn the_advanced_options_off_leave_the_tools_out_of_the_toolbar_and_never_the_layers() {
         let simple = ToolbarItem::all(false);
         assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Tools)));
-        assert!(!simple.contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
+        // the four layers: tooth colours, marks, tooth numbers, contact map
+        assert!(simple.contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
+        assert!(ToolbarItem::all(true).contains(&ToolbarItem::Group(ToolbarGroup::Layers)));
         // the rest, in the same order
         let full: Vec<ToolbarItem> = ToolbarItem::all(true)
             .into_iter()
@@ -2435,11 +2539,17 @@ mod tests {
             crate::now_rfc3339(),
             state,
         );
-        Workspace::new_headless(
+        let mut ws = Workspace::new_headless(
             Box::new(dca_module::AlignersModule::new()),
             Some(project),
             None,
-        )
+        );
+        // these tests are about what the layers draw: they are on (a project
+        // opens with them off, see `the_four_toggles_start_off...`)
+        ws.view.layers.labels = true;
+        ws.view.layers.seeds = true;
+        ws.view.layers.numbers = true;
+        ws
     }
 
     /// Two segmented demo arches in virtual occlusion with tooth frames and
@@ -2845,11 +2955,17 @@ mod built_teeth_tests {
             crate::now_rfc3339(),
             state,
         );
-        Workspace::new_headless(
+        let mut ws = Workspace::new_headless(
             Box::new(dca_module::AlignersModule::new()),
             Some(project),
             None,
-        )
+        );
+        // these tests are about what the layers draw: they are on (a project
+        // opens with them off, see `the_four_toggles_start_off...`)
+        ws.view.layers.labels = true;
+        ws.view.layers.seeds = true;
+        ws.view.layers.numbers = true;
+        ws
     }
 
     fn mesh(ws: &Workspace, id: u64) -> Option<&ViewMesh> {
@@ -2983,6 +3099,151 @@ mod built_teeth_tests {
         assert_eq!(ws.toasts.len(), toasts + 1);
         ws.sync_scene_with(Color::TOOTH);
         assert!(study_meshes(&ws).is_empty());
+    }
+
+    /// [`built_case`] (tooth 31 built: its 3D tooth replaces the lower scan)
+    /// with a study model of the lower arch and, shown in the view, the
+    /// aligner of the lower arch built at stages 0, 1 and 2 for the case as
+    /// it is; with the meshes of those three aligners.
+    fn aligner_case() -> (CaseState, Vec<dc_case::BlobRef>) {
+        let mut state = built_case();
+        let mut al = state
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap()
+            .clone();
+        let cast = TriMesh::new(
+            vec![-Vec3::Z, Vec3::X - Vec3::Z, Vec3::Y - Vec3::Z],
+            vec![[0, 1, 2]],
+        );
+        al.study_models
+            .insert(ScanRole::Lower, state.blobs.insert(cast));
+        let key = dca_model::view_key(&state, &al);
+        // a closed shell over the teeth, one higher at every stage
+        let shells: Vec<dc_case::BlobRef> = (0..3u8)
+            .map(|k| {
+                let z = 0.5 + f32::from(k);
+                state.blobs.insert(TriMesh::new(
+                    vec![
+                        Vec3::new(-1.0, -1.0, z),
+                        Vec3::new(2.0, -1.0, z),
+                        Vec3::new(0.0, 2.0, z),
+                        Vec3::new(0.0, 0.0, z + 1.0),
+                    ],
+                    vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+                ))
+            })
+            .collect();
+        al.aligner_view.shown = true;
+        al.aligner_view.bases = shells
+            .iter()
+            .zip(0u32..)
+            .map(|(mesh, stage)| dca_model::AlignerBase {
+                arch: ScanRole::Lower,
+                stage,
+                mesh: *mesh,
+                exact: false,
+                voxel_mm: 0.4,
+                tolerance_mm: 0.08,
+                key: key.clone(),
+                seconds: 1.0,
+            })
+            .collect();
+        state.set_module(dca_model::MODULE_ID, ModuleState::new(al));
+        (state, shells)
+    }
+
+    /// The aligners drawn: for each, the stage of the one of `shells` it is
+    /// and its mesh.
+    fn aligners_drawn<'a>(
+        ws: &'a Workspace,
+        shells: &[dc_case::BlobRef],
+    ) -> Vec<(usize, &'a ViewMesh)> {
+        let state = ws.undo.current();
+        ws.view
+            .meshes
+            .iter()
+            .filter_map(|m| {
+                shells
+                    .iter()
+                    .position(|b| state.mesh(b).is_some_and(|s| Arc::ptr_eq(s, &m.mesh)))
+                    .map(|k| (k, m))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_aligner_shown_is_drawn_over_whatever_its_arch_shows_at_the_stage_shown() {
+        let (state, shells) = aligner_case();
+        let world = state.case.world_frame.from_case.to_mat4().as_mat4();
+        let color = scene_color(dc_ui::tokens::tokens().dark.model_aligner);
+        let mut ws = workspace(state);
+        assert!(ws.aligner_shown());
+        // the stage drawn, translucent in its colour, where it was built, the
+        // only aligner of the arch, never picked
+        let drawn_at = |ws: &mut Workspace, model: Model, stage: u32| {
+            ws.view.model = model;
+            ws.timeline.current = stage;
+            ws.sync_scene_with(Color::TOOTH);
+            let drawn = aligners_drawn(ws, &shells);
+            assert_eq!(drawn.len(), 1, "{model:?} at {stage}");
+            let (k, vm) = drawn[0];
+            assert!(vm.visible && !vm.pickable, "{model:?} at {stage}");
+            assert_eq!(vm.coloring, MeshColoring::Uniform(color));
+            assert!((vm.opacity - crate::aligner::ALIGNER_OPACITY).abs() < 1e-6);
+            assert!(close_mats(vm.xform, world), "{model:?} at {stage}");
+            k
+        };
+        // over the 3D teeth, the aligner of the stage the timeline shows
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 1), 1);
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_some());
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        // over the scan, as after "Separate teeth and gum": the same aligners
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 2), 2);
+        assert!(mesh(&ws, scan_id(&ws, ScanRole::Lower)).is_some());
+        assert!(mesh(&ws, manual::tooth_mesh_id(31)).is_none());
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 1), 1);
+        // a tool on the scan keeps it
+        ws.manual.tool = Some(manual::Tool::Brush);
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        ws.manual.tool = None;
+        // the region of a tooth shows the scan at the initial position alone
+        // (the aligner of the stage shown would hide what it shows); after
+        // it, the aligner is back
+        ws.view.model = Model::Teeth;
+        ws.timeline.current = 2;
+        region_on(&mut ws, 31);
+        assert_eq!(ws.region_tooth(), Some(31));
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(aligners_drawn(&ws, &shells).is_empty());
+        ws.set_region_view(false);
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 2), 2);
+        // at the initial position the arch is its study model, under it
+        assert_eq!(drawn_at(&mut ws, Model::Teeth, 0), 0);
+        assert_eq!(study_meshes(&ws).len(), 1);
+        assert_eq!(drawn_at(&mut ws, Model::Scan, 0), 0);
+        // a hidden arch hides its aligner
+        ws.timeline.current = 2;
+        ws.view.arches.lower = false;
+        ws.sync_scene_with(Color::TOOTH);
+        assert!(aligners_drawn(&ws, &shells).iter().all(|(_, m)| !m.visible));
+        ws.view.arches.lower = true;
+        // hidden (the layer of the toolbar, the button of the inspector): gone
+        ws.toggle_aligner_layer();
+        assert!(ws.wait_for_jobs(std::time::Duration::from_secs(60)));
+        assert!(!ws.aligner_shown());
+        for (model, stage) in [(Model::Teeth, 2), (Model::Scan, 2), (Model::Teeth, 0)] {
+            ws.view.model = model;
+            ws.timeline.current = stage;
+            ws.sync_scene_with(Color::TOOTH);
+            assert!(
+                ws.view
+                    .meshes
+                    .iter()
+                    .all(|m| m.opacity != crate::aligner::ALIGNER_OPACITY
+                        && m.coloring != MeshColoring::Uniform(color)),
+                "{model:?} at {stage}"
+            );
+        }
     }
 
     #[test]
@@ -3635,5 +3896,144 @@ mod built_teeth_tests {
             assert!(a.follow_scans(has.0, has.1), "{arches:?}");
             assert_eq!(a, Arches::default());
         }
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// The four toolbar toggles, as the layers hold them: tooth colours,
+    /// tooth marks, tooth numbers, contact map.
+    fn four(ws: &Workspace) -> [bool; 4] {
+        let l = ws.view.layers;
+        [l.labels, l.seeds, l.numbers, l.contacts]
+    }
+
+    fn set_four(ws: &mut Workspace, on: [bool; 4]) {
+        let l = &mut ws.view.layers;
+        [l.labels, l.seeds, l.numbers, l.contacts] = on;
+    }
+
+    /// A project with the segmented demo arch, opened as it is from a file.
+    fn opened() -> Workspace {
+        Workspace::new_headless(
+            Box::new(dca_module::AlignersModule::new()),
+            Some(Project::new(
+                AppInfo {
+                    version: "0.1.0".into(),
+                    commit: "test".into(),
+                },
+                crate::now_rfc3339(),
+                lower_demo(),
+            )),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_four_toggles_start_off_in_a_new_and_in_an_opened_project() {
+        let new = Workspace::new_headless(Box::new(dca_module::AlignersModule::new()), None, None);
+        assert_eq!(four(&new), [false; 4]);
+        // a project whose teeth are already found and segmented
+        let ws = opened();
+        assert_eq!(four(&ws), [false; 4]);
+        assert!(overlay::aligners(ws.state()).is_some_and(|a| !a.seeds.is_empty()));
+        // the rest of the layers keep their own defaults
+        assert!(ws.view.layers.study && !ws.view.layers.target && !ws.view.layers.ipr);
+        // selecting the function of the separation only selects it
+        let mut ws = opened();
+        ws.select_item(crate::leaf::SEGMENT);
+        ws.select_item(crate::leaf::FIND_TEETH);
+        assert_eq!(four(&ws), [false; 4]);
+        // the bridge says so
+        let out = ws
+            .set_window_view(None, None, None, None, None, WindowOverlays::default())
+            .unwrap();
+        for k in ["colours", "marks", "numbers", "contacts"] {
+            assert_eq!(out[k], false, "{k}");
+        }
+    }
+
+    #[test]
+    fn find_the_teeth_and_the_separation_switch_no_toggle_on() {
+        let mut ws = opened();
+        for id in [crate::leaf::FIND_TEETH, crate::leaf::SEGMENT] {
+            assert!(ws.run_leaf_command(id, Value::Null), "{id}");
+            assert!(ws.wait_for_jobs(WAIT), "{id}");
+            assert!(ws.take_leaf_answer().is_some_and(|a| a.is_ok()), "{id}");
+            assert_eq!(four(&ws), [false; 4], "{id}");
+        }
+    }
+
+    #[test]
+    fn the_brush_turns_the_colours_and_the_numbers_on_and_gives_them_back() {
+        // every combination of the four before the brush opens
+        for bits in 0..16u8 {
+            let before = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0];
+            let mut ws = opened();
+            set_four(&mut ws, before);
+            assert!(ws.open_tool(manual::Tool::Brush));
+            // colours and numbers on; the marks and the contact map as they were
+            assert_eq!(
+                four(&ws),
+                [true, before[1], true, before[3]],
+                "inside {before:?}"
+            );
+            ws.close_tool();
+            assert_eq!(four(&ws), before, "after {before:?}");
+        }
+    }
+
+    #[test]
+    fn a_toggle_by_hand_inside_the_brush_wins_and_the_exit_restores_the_entry() {
+        let mut ws = opened();
+        set_four(&mut ws, [true, false, false, false]);
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, false, true, false]);
+        // the user turns the colours off and the marks on inside the brush
+        ws.view.layers.labels = false;
+        ws.view.layers.seeds = true;
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, true, false], "the choice wins");
+        // a frame while the brush is open changes nothing
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, true, false]);
+        // the bridge sets one inside the brush: it wins too
+        ws.set_window_view(
+            None,
+            None,
+            None,
+            None,
+            None,
+            WindowOverlays {
+                numbers: Some(false),
+                ..WindowOverlays::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(four(&ws), [false, true, false, false]);
+        // out of the brush: the two go back to the entry; the marks stay as
+        // the user left them
+        ws.close_tool();
+        assert_eq!(four(&ws), [true, true, false, false]);
+    }
+
+    #[test]
+    fn leaving_the_brush_by_another_tool_or_a_state_change_restores_the_toggles() {
+        let mut ws = opened();
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, false, true, false]);
+        // another tool of the same function opens: the brush is left
+        assert!(ws.open_tool(manual::Tool::Seeds));
+        assert_eq!(four(&ws), [false; 4]);
+        // back in the brush, then the tool goes by the state alone (an undo
+        // that closes it, a project change): the next look restores them
+        set_four(&mut ws, [false, true, false, true]);
+        assert!(ws.open_tool(manual::Tool::Brush));
+        assert_eq!(four(&ws), [true, true, true, true]);
+        ws.manual.tool = None;
+        ws.sync_brush_overlays();
+        assert_eq!(four(&ws), [false, true, false, true]);
+        // selecting the entry of the separation never turns them on
+        ws.select_item(crate::leaf::SEGMENT);
+        assert_eq!(four(&ws), [false, true, false, true]);
     }
 }

@@ -167,6 +167,7 @@ auth-error-access-denied = L'accesso è stato rifiutato nel browser.
 auth-error-server-rejected = Il servizio di accesso ha rifiutato la richiesta. Riprova o contatta l'assistenza.
 auth-error-invalid-grant = L'accesso è scaduto. Accedi di nuovo.
 auth-error-token-invalid = Non è stato possibile verificare l'accesso. Riprova o contatta l'assistenza.
+auth-error-clock = L'orologio di questo computer sembra sbagliato, quindi non è possibile verificare l'accesso. Imposta la data e l'ora corrette, poi riprova.
 auth-error-cancelled = Accesso annullato.
 auth-error-storage-unavailable = Accesso eseguito, ma il portachiavi di sistema non è disponibile: la prossima volta dovrai accedere di nuovo.
 auth-error-not-signed-in = Non hai eseguito l'accesso.
@@ -367,9 +368,11 @@ app-cmd-menu-select-doc = Seleziona una voce del menu del progetto aperto, come 
 app-cmd-window-screenshot = Istantanea della finestra
 app-cmd-window-screenshot-doc = Scrive la finestra così come la vede l'utente (menu, ispettore, vista 3D, finestre aperte) in un file PNG al fotogramma successivo. Parametro: path, il file PNG. Risponde con path, width e height.
 app-cmd-window-view = Vista della finestra
-app-cmd-window-view-doc = Imposta cosa mostra la vista 3D della finestra, come fanno la sua barra degli strumenti e la sua linea del tempo; il caso non cambia. Parametri, ciascuno facoltativo (quello che non viene dato resta com'è): view (occlusal, front, left, right o back), stage (lo stadio mostrato sulla linea del tempo, al massimo l'ultimo; 0 è la posizione iniziale), study (il livello Modelli da studio), target (il livello Posizione finale, l'ombra dei denti nella loro posizione finale). Risponde con view, stage, last_stage, study, target, study_shown e teeth_shown.
+app-cmd-window-view-doc = Imposta cosa mostra la vista 3D della finestra, come fanno la sua barra degli strumenti e la sua linea del tempo; il caso non cambia. Parametri, ciascuno facoltativo (quello che non viene dato resta com'è): view (occlusal, front, left, right o back), stage (lo stadio mostrato sulla linea del tempo, al massimo l'ultimo; 0 è la posizione iniziale), study (il livello Modelli da studio), target (il livello Posizione finale, l'ombra dei denti nella loro posizione finale), model (scan o teeth: cosa mostra un'arcata i cui denti sono stati costruiti, la Scansione o i Denti 3D della barra degli strumenti; uno strumento che lavora sulla scansione mostra comunque la scansione), e i quattro interruttori della barra degli strumenti: colours (i colori dei denti), marks (i segni dei denti), numbers (i numeri dei denti), contacts (la mappa dei contatti). I quattro sono spenti quando si apre un progetto e solo l'utente li accende, tranne il pennello dei denti: finché è aperto i colori e i numeri dei denti sono accesi, e quando si chiude ognuno torna com'era prima di aprirlo (un interruttore cambiato dentro il pennello vale fino ad allora). Risponde con view, stage, last_stage, study, target, model, colours, marks, numbers, contacts, study_shown e teeth_shown.
 app-cmd-window-layout = Disposizione della finestra
 app-cmd-window-layout-doc = Dimensiona la finestra e i suoi pannelli laterali come fa l'utente, poi risponde con la posizione delle parti della finestra; il caso non cambia. Parametri, ciascuno facoltativo: width e height (l'interno della finestra, in punti, dati insieme), menu e inspector (le larghezze del menu a sinistra e dell'ispettore, in punti, come le imposta il trascinamento dei loro bordi: restano entro i loro limiti e vengono salvate per il prossimo avvio). Risponde con window, menu, inspector e view (x, y, width, height di ciascuno), chosen (le larghezze scelte dei pannelli) e overflow (di quanto il contenuto di ciascun pannello supera la sua larghezza).
+# Gli avvisi del risultato di print.prepare (il codice resta; questo è il suo messaggio).
+app-print-warning-profile-not-validated = La scala delle dimensioni e l'orientamento sinistra/destra del profilo di stampante { $profile } non sono ancora stati verificati sulla stampante: controlla le misure di un pezzo di prova prima dell'uso.
 
 ## settings
 settings-title = Impostazioni

@@ -50,6 +50,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     STUBBORN.store(false, Ordering::SeqCst);
     OTHER_DONE.store(false, Ordering::SeqCst);
     REFUSE.store(false, Ordering::SeqCst);
+    *METHOD.lock().unwrap() = "virtual_bite";
     g
 }
 
@@ -75,7 +76,10 @@ fn run_export(
         }
     }
     let out = json!({ "dir": params["dir"], "files": [{}, {}, {}] });
-    Ok((state.clone(), out))
+    // the export records its folder in the case
+    let mut exported = state.clone();
+    exported.case.patient_code.push('x');
+    Ok((exported, out))
 }
 
 fn run_visit(
@@ -84,7 +88,10 @@ fn run_visit(
     _ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((VISIT, params.clone()));
-    Ok((state.clone(), json!({ "teeth": 14, "on_track": 11 })))
+    // a visit is added to the case
+    let mut visited = state.clone();
+    visited.case.patient_code.push('v');
+    Ok((visited, json!({ "teeth": 14, "on_track": 11 })))
 }
 
 fn run_bite(
@@ -93,7 +100,18 @@ fn run_bite(
     _ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     CALLS.lock().unwrap().push((BITE, params.clone()));
-    Ok((state.clone(), json!({ "method": *METHOD.lock().unwrap() })))
+    let method = *METHOD.lock().unwrap();
+    if method == "not_applicable" {
+        // one arch: no bite, the case is given back as it came
+        return Ok((
+            state.clone(),
+            json!({ "applies": false, "reason": "one_arch" }),
+        ));
+    }
+    // a bite moves an arch: the case changes
+    let mut moved = state.clone();
+    moved.case.patient_code.push('+');
+    Ok((moved, json!({ "method": method })))
 }
 
 fn run_other(
@@ -412,6 +430,21 @@ fn the_bite_says_which_method_ran() {
 }
 
 #[test]
+fn a_bite_that_does_not_apply_warns_of_no_estimate_and_changes_nothing() {
+    let _g = exclusive();
+    *METHOD.lock().unwrap() = "not_applicable";
+    let mut ws = fake();
+    ws.run_leaf(BITE);
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.toast_keys().is_empty(), "{:?}", ws.toast_keys());
+    assert!(ws.sticky_toast_keys().is_empty());
+    // the case is as it was: not unsaved, no undo step, nothing recorded
+    assert!(!ws.is_dirty());
+    assert!(!ws.undo());
+    assert!(ws.history().records().is_empty());
+}
+
+#[test]
 fn the_selected_leaf_has_a_primary_button_that_runs_it() {
     let _g = exclusive();
     let mut ws = fake();
@@ -482,4 +515,91 @@ fn after_the_cross_the_status_bar_says_it_is_stopping_until_the_job_ends() {
     h.run();
     assert!(h.state().toast_keys().contains(&"job-cancelled".to_owned()));
     assert!(h.query_by_label_contains("Stopping at the end").is_none());
+}
+
+#[test]
+fn an_export_is_done_on_the_case_it_exported_until_the_case_changes() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let dir = tempfile::tempdir().unwrap();
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("done")));
+    assert!(ws.wait_for_jobs(WAIT));
+    // its run is in the step history; the case shows nothing of the files
+    let record = ws.history().record(EXPORT).unwrap();
+    assert!(record.failed.is_none() && !record.by_hand);
+    let mut h = harness(ws);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_some());
+    // the bite moves an arch: the files no longer show the case
+    h.state_mut().run_leaf(BITE);
+    settle(&mut h);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_none());
+    assert!(h.state().history().record(EXPORT).is_none());
+    // undo: back to the case the export wrote, done again
+    assert!(h.state_mut().undo());
+    h.run();
+    assert!(h.query_by_label("Done").is_some());
+}
+
+/// The project at `path` opened again as Home opens it, in the fake module.
+fn reopened(path: &std::path::Path) -> Workspace {
+    let codecs = dc_workspace::project_codecs(&AlignersModule::new());
+    let loaded = dc_project::load(path, &codecs).unwrap();
+    assert!(!loaded.read_only, "{:?}", loaded.issues);
+    Workspace::new_headless(
+        Box::new(Fake {
+            inner: AlignersModule::new(),
+        }),
+        Some(loaded.project),
+        Some(path.to_path_buf()),
+    )
+}
+
+#[test]
+fn an_export_is_still_done_after_save_and_reopen_until_the_case_changes() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("exported.dcprj");
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("out")));
+    assert!(ws.wait_for_jobs(WAIT));
+    ws.save_to(file.clone());
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.history().record(EXPORT).is_some());
+    // opened again: the record came back with the case it was saved with
+    let mut h = harness(reopened(&file));
+    assert!(h.state().history().record(EXPORT).is_some());
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_some(), "done after reopening");
+    // the case changes afterwards: no longer done
+    h.state_mut().run_leaf(BITE);
+    settle(&mut h);
+    h.state_mut().select_item(EXPORT);
+    h.run();
+    assert!(h.query_by_label("Done").is_none());
+}
+
+#[test]
+fn an_export_stays_done_through_a_function_that_only_adds_its_own_result() {
+    let _g = exclusive();
+    let mut ws = fake();
+    let dir = tempfile::tempdir().unwrap();
+    ws.answer_leaf_input(EXPORT, Some(dir.path().join("out")));
+    assert!(ws.wait_for_jobs(WAIT));
+    // a control visit (not a step, it adds its own result): the export is
+    // not made of it, the two are done
+    ws.answer_leaf_input(VISIT, Some(dir.path().join("scan.stl")));
+    assert!(ws.wait_for_jobs(WAIT));
+    assert!(ws.history().record(EXPORT).is_some());
+    assert!(ws.history().record(VISIT).is_some());
+    let mut h = harness(ws);
+    for id in [EXPORT, VISIT] {
+        h.state_mut().select_item(id);
+        h.run();
+        assert!(h.query_by_label("Done").is_some(), "{id}");
+    }
 }

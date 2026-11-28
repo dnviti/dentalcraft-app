@@ -637,13 +637,14 @@ struct Client {
 }
 
 impl Client {
+    /// Connects and proves the token of the bridge on `port`.
     fn connect(port: u16) -> Self {
-        let w = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        Self {
-            r: BufReader::new(w.try_clone().unwrap()),
-            w,
-            id: 0,
-        }
+        use dc_app::control::auth;
+        let mut w = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r = BufReader::new(w.try_clone().unwrap());
+        let token = auth::read_token(&auth::token_file(&auth::token_dir().unwrap(), port)).unwrap();
+        auth::client_handshake(&mut r, &mut w, &token, port).unwrap();
+        Self { r, w, id: 0 }
     }
 
     /// The answer of `method`: `Ok(result)` or `Err(error)`.

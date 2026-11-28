@@ -3,10 +3,14 @@
 //!
 //! - under the status, the result of the last aligners of each arch: how
 //!   many, the days and months of the calendar with its first and last day,
-//!   the pattern used and the complexity, the slowed teeth, the collisions
-//!   left and the overcorrection (`AlignersState::staging_results`, the
-//!   calendar built from the stored aligners with the calendar settings of
-//!   the case, as the plugin's `key_numbers` builds it);
+//!   the pattern used and the complexity, the slowed teeth and the
+//!   overcorrection (`AlignersState::staging_results`, the calendar built
+//!   from the stored aligners with the calendar settings of the case, as the
+//!   plugin's `key_numbers` builds it);
+//! - the collisions the aligners leave, one line each (aligner, teeth,
+//!   penetration and what is over the allowance) in a warning block
+//!   (`AlignersState::staging_collisions`, kept in the case: shown after a
+//!   reopen too);
 //! - "Parameters": the periodontal condition, the pattern and the calendar
 //!   (how the aligner changes, the days of each, the start date), then the
 //!   largest movement per aligner in a group of its own, as on the plugin's
@@ -30,6 +34,7 @@ use egui::{RichText, Ui};
 use serde_json::{Value, json};
 
 use crate::function::caption;
+use crate::plan_warnings::{collision_blocks, show_blocks};
 use crate::select::Component;
 use crate::setup::{
     Choice, Number, ResultLine, choice, flag, num, number, show_result_lines, slider, tr,
@@ -177,8 +182,10 @@ fn slowed_list(teeth: impl Iterator<Item = (Fdi, f64)>) -> String {
 /// The result of the last aligners of each arch, as the plugin's page words
 /// it: the aligners, the days and months, the first and last day with the
 /// hours of wear, the pattern and the complexity, the slowed teeth, the
-/// collisions left (a warning) and the overcorrection. The arch is named
-/// when both have a result. Nothing when no arch has one. Without
+/// overcorrection. The collisions left are a warning: a count line only for
+/// an arch whose case holds no list of them (a case saved before the list
+/// was kept), otherwise the list is shown by [`collision_blocks`]. The arch
+/// is named when both have a result. Nothing when no arch has one. Without
 /// `advanced` (the advanced options off) the pattern, the slowed teeth and
 /// the overcorrection are left out.
 pub(crate) fn result_lines(data: &AlignersState, today: Date, advanced: bool) -> Vec<ResultLine> {
@@ -259,7 +266,7 @@ pub(crate) fn result_lines(data: &AlignersState, today: Date, advanced: bool) ->
                 false,
             ));
         }
-        if r.collisions_left > 0 {
+        if r.collisions_left > 0 && data.staging_collisions.get(role).is_none_or(Vec::is_empty) {
             out.push(line(
                 tr(
                     "ws-stg-result-collisions",
@@ -308,6 +315,8 @@ impl Workspace {
         };
         let advanced = dc_module_api::advanced_ui(ui.ctx());
         show_result_lines(ui, result_lines(data, Date::today(), advanced));
+        show_blocks(ui, collision_blocks(data));
+        show_blocks(ui, self.plan_warnings.staging_blocks(data));
     }
 
     /// The parameters of the aligners and of their calendar, read from the
@@ -524,7 +533,8 @@ impl Workspace {
         }
         if let Some(p) = send {
             self.staging_ui.speed = None;
-            self.run_module_command(TOOTH_SPEED_CMD, p);
+            // its report holds the warnings of the aligners it computed again
+            self.run_manual(TOOTH_SPEED_CMD, p);
         }
     }
 }
@@ -681,5 +691,43 @@ mod tests {
         let lines = result_lines(&data, today, true);
         assert!(lines[0].heading);
         assert_eq!(lines.iter().filter(|l| l.heading).count(), 2);
+    }
+
+    #[test]
+    fn the_collision_count_line_gives_way_to_the_list() {
+        assert_eq!(dc_i18n::current(), dc_i18n::Lang::En);
+        let today = Date::parse("2026-11-16").unwrap();
+        let mut data = AlignersState {
+            stages: stages(3),
+            ..Default::default()
+        };
+        data.staging_results.insert(
+            ScanRole::Lower,
+            StagingSummary {
+                aligners: 3,
+                collisions_left: 1,
+                ..Default::default()
+            },
+        );
+        let counts = |data: &AlignersState| {
+            result_lines(data, today, false)
+                .iter()
+                .filter(|l| l.warning)
+                .count()
+        };
+        // a case saved before the list was kept: the count says it
+        assert_eq!(counts(&data), 1);
+        // with the list, the inspector shows the list and the count is not repeated
+        data.staging_collisions.insert(
+            ScanRole::Lower,
+            vec![dca_model::CollisionLeft {
+                stage: 2,
+                a: fdi(41),
+                b: fdi(31),
+                penetration_mm: 0.4,
+                allowed_mm: 0.2,
+            }],
+        );
+        assert_eq!(counts(&data), 0);
     }
 }

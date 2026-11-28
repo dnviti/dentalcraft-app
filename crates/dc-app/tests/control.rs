@@ -19,13 +19,15 @@ struct Client {
 }
 
 impl Client {
+    /// Connects and proves the token of the bridge on `port` (its file is
+    /// where the app writes it).
     fn connect(port: u16) -> Self {
-        let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        Self {
-            r: BufReader::new(w.try_clone().unwrap()),
-            w,
-            id: 0,
-        }
+        use dc_app::control::auth;
+        let mut w = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r = BufReader::new(w.try_clone().unwrap());
+        let token = auth::read_token(&auth::token_file(&auth::token_dir().unwrap(), port)).unwrap();
+        auth::client_handshake(&mut r, &mut w, &token, port).unwrap();
+        Self { r, w, id: 0 }
     }
 
     fn raw(&mut self, line: &str) -> Value {
@@ -216,10 +218,70 @@ fn bridge_runs_commands_through_the_workspace() {
         assert!(e["message"].as_str().unwrap().contains("not available"));
         assert_eq!(c.call("nope", json!({})).unwrap_err()["code"], -32601);
         assert_eq!(c.raw("{not json")["error"]["code"], -32700);
+        // a line that is not JSON-RPC also ends the connection
+        let mut rest = String::new();
+        assert_eq!(c.r.read_line(&mut rest).unwrap(), 0, "{rest}");
     });
     drive(&mut h, client);
     assert_eq!(h.state().bridge().app.screen(), Screen::Workspace);
     assert!(project.is_file());
+}
+
+/// A project opened read-only (its step history cannot be read): the bridge
+/// never saves over its file, however the path is written, and saves it to
+/// another file.
+#[test]
+fn bridge_never_saves_over_a_file_opened_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("read-only.dcprj");
+    let mut p = dc_project::Project::new(
+        dc_project::AppInfo {
+            version: "0.1.0".into(),
+            commit: "test".into(),
+        },
+        dc_workspace::now_rfc3339(),
+        dc_case::CaseState::new(dc_case::Case::new("RO")),
+    );
+    p.history = json!("not a step history");
+    dc_project::save(&project, &p).unwrap();
+    let before = std::fs::read(&project).unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let app = DentalCraftApp::new(AppDeps::headless(dir.path()));
+    let server = ControlServer::bind(0).unwrap();
+    let port = server.local_addr().port();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .build_ui_state(
+            |ui, s: &mut ControlledApp| s.show(ui),
+            ControlledApp::new(app, server),
+        );
+    h.run_steps(2);
+    let project_s = project.to_string_lossy().into_owned();
+    let spelled = dir.path().join("sub").join("..").join("read-only.dcprj");
+    let spelled = spelled.to_string_lossy().into_owned();
+    let other = dir.path().join("other.dcprj");
+    let other_s = other.to_string_lossy().into_owned();
+
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        c.call("open", json!({"path": project_s})).unwrap();
+        let summary = c.call("inspect", json!({})).unwrap();
+        assert_eq!(summary["project"]["read_only"], true, "{summary}");
+        for path in [
+            json!({}),
+            json!({"path": project_s}),
+            json!({"path": spelled}),
+        ] {
+            let e = c.call("save", path.clone()).unwrap_err();
+            let m = e["message"].as_str().unwrap();
+            assert!(m.contains("opened read-only"), "{path}: {e}");
+        }
+        let saved = c.call("save", json!({"path": other_s})).unwrap();
+        assert!(saved["bytes"].as_u64().unwrap() > 0, "{saved}");
+    });
+    drive(&mut h, client);
+    assert_eq!(std::fs::read(&project).unwrap(), before);
+    assert!(other.is_file());
 }
 
 #[test]
@@ -246,17 +308,22 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
             .unwrap();
         };
         demo(&mut c, "lower");
-        // a leaf that fails answers with its error, as before
-        let e = c
-            .call("execute", json!({"id": "aligners.occlusion.align"}))
-            .unwrap_err();
+        // a leaf that fails answers with its error, as before (the case
+        // analysis needs the 3D teeth, which the demo arch has not yet)
+        let analysis = "aligners.diagnosis.space-analysis";
+        let e = c.call("execute", json!({ "id": analysis })).unwrap_err();
         assert!(
             e["message"]
                 .as_str()
                 .unwrap()
-                .starts_with("aligners.occlusion.align: "),
+                .starts_with(&format!("{analysis}: ")),
             "{e}"
         );
+        // Bite with one arch is no failure: it does not apply, and says so
+        let out = c
+            .call("execute", json!({"id": "aligners.occlusion.align"}))
+            .unwrap();
+        assert_eq!(out["applies"], false, "{out}");
         demo(&mut c, "upper");
         let out = c
             .call(
@@ -266,10 +333,15 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
             )
             .unwrap();
         assert!(out["teeth"].as_u64().is_some_and(|n| n > 0), "{out}");
+        // the models are built at a coarser voxel than the default 0.25 mm:
+        // the solid of one arch takes about 205 s at the default in a debug
+        // build (about 20 s in release), 22 s at 0.5 mm, so the test does not
+        // depend on the speed of heavy geometry in the profile CI uses; the
+        // test checks the leaf and the bridge, not the detail of the solid
         let out = c
             .call(
                 "execute",
-                json!({"id": "aligners.output.study-models", "params": {}}),
+                json!({"id": "aligners.output.study-models", "params": {"voxel_mm": 0.5}}),
             )
             .unwrap();
         assert!(
@@ -294,10 +366,45 @@ fn bridge_runs_a_menu_leaf_as_the_button_of_its_inspector() {
         assert_eq!(set["view"], "front", "{set}");
         assert_eq!(set["stage"], set["last_stage"], "{set}");
         assert_eq!(set["study_shown"], false, "{set}");
+        // the Scan / 3D teeth choice of the toolbar
+        for (model, teeth) in [("teeth", true), ("scan", false)] {
+            let set = view(&mut c, json!({ "model": model })).unwrap();
+            assert_eq!(
+                (&set["model"], &set["teeth_shown"]),
+                (&json!(model), &json!(teeth)),
+                "{set}"
+            );
+        }
+        // the four toggles of the toolbar: off when the project opens, set
+        // one by one (the others stay), and the answer says them
+        let four = |v: &Value| {
+            [&v["colours"], &v["marks"], &v["numbers"], &v["contacts"]].map(Value::as_bool)
+        };
+        assert_eq!(four(&now), [Some(false); 4], "{now}");
+        let set = view(&mut c, json!({"colours": true, "numbers": true})).unwrap();
+        assert_eq!(
+            four(&set),
+            [Some(true), Some(false), Some(true), Some(false)],
+            "{set}"
+        );
+        let set = view(&mut c, json!({"marks": true})).unwrap();
+        assert_eq!(
+            four(&set),
+            [Some(true), Some(true), Some(true), Some(false)],
+            "{set}"
+        );
+        let set = view(
+            &mut c,
+            json!({"colours": false, "marks": false, "numbers": false}),
+        )
+        .unwrap();
+        assert_eq!(four(&set), [Some(false); 4], "{set}");
         for bad in [
+            json!({"colours": "yes"}),
             json!({"view": "top"}),
             json!({"stage": -1}),
             json!({"zoom": 2}),
+            json!({"model": "gums"}),
         ] {
             let e = view(&mut c, bad).unwrap_err();
             assert_eq!(e["code"], -32602, "{e}");

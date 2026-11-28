@@ -50,6 +50,12 @@ const MAX_BATCHES: usize = 10;
 /// File (in the diagnostics folder) with the time of the consent: crash
 /// files older than it are not reported.
 const SINCE_FILE: &str = "crash-since";
+/// File (in the diagnostics folder) with the salt (first line) and the
+/// salted digests (one hex per line) of the patient codes and case
+/// references registered in every run: crash files and log tails of earlier
+/// runs are cleaned of them before anything is queued. The plain codes are
+/// never written.
+const REDACT_FILE: &str = "redact";
 
 /// Where the diagnostics live and go.
 #[derive(Debug, Clone)]
@@ -192,6 +198,53 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn hex32(d: &[u8; 32]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 || !s.is_ascii() {
+        return None;
+    }
+    let mut out = [0_u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The salt and digests of [`REDACT_FILE`] (a new salt when there is none).
+fn read_redact(dir: &Path) -> (String, Vec<[u8; 32]>) {
+    let text = std::fs::read_to_string(dir.join(REDACT_FILE)).unwrap_or_default();
+    let mut lines = text.lines();
+    match lines.next().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(salt) => (salt.to_owned(), lines.filter_map(parse_hex32).collect()),
+        None => (new_id(), Vec::new()),
+    }
+}
+
+/// Adds `digest` to [`REDACT_FILE`] (written with `salt` when new).
+fn append_redact(dir: &Path, salt: &str, digest: &[u8; 32]) {
+    use std::io::Write;
+    let path = dir.join(REDACT_FILE);
+    let new = !path.exists();
+    let _ = std::fs::create_dir_all(dir);
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let line = if new {
+        format!("{salt}\n{}\n", hex32(digest))
+    } else {
+        format!("{}\n", hex32(digest))
+    };
+    let _ = f.write_all(line.as_bytes());
+}
+
 fn read_since(dir: &Path) -> Option<u64> {
     std::fs::read_to_string(dir.join(SINCE_FILE))
         .ok()?
@@ -258,6 +311,11 @@ impl Diagnostics {
         if enabled && read_since(&config.dir).is_none() {
             write_since(&config.dir, crate::now_unix());
         }
+        // the codes of earlier runs, before any crash file or log tail of
+        // theirs is queued
+        let mut config = config;
+        let (salt, digests) = read_redact(&config.dir);
+        config.sanitizer.remember(&salt, digests);
         Self {
             inner: Arc::new(Inner {
                 enabled: AtomicBool::new(enabled),
@@ -323,9 +381,15 @@ impl Diagnostics {
     }
 
     /// From now on `word` (a patient code, a case reference) is removed
-    /// from every text.
+    /// from every text, in the next runs too (its salted digest is kept in
+    /// the diagnostics folder).
     pub fn redact(&self, word: &str) {
-        self.shared().sanitizer.redact(word);
+        let mut shared = self.shared();
+        if shared.sanitizer.redact(word) {
+            let salt = shared.sanitizer.salt().to_owned();
+            drop(shared);
+            append_redact(&self.inner.dir, &salt, &Sanitizer::digest(&salt, word));
+        }
     }
 
     /// The `tracing` layer that records the log's errors.
@@ -562,6 +626,12 @@ impl Diagnostics {
         if !self.enabled() {
             return Err("diagnostics are off: nothing is collected or sent".into());
         }
+        let endpoint = self.endpoint();
+        if !crate::endpoint_allowed(&endpoint) {
+            return Err(format!(
+                "the diagnostics address {endpoint} is not https (http only on this computer): nothing is sent"
+            ));
+        }
         let mut out = Flush::default();
         for _ in 0..MAX_BATCHES {
             let batch = self.inner.queue.batch(MAX_EVENTS, BATCH_BYTES);
@@ -572,7 +642,6 @@ impl Diagnostics {
             let Some(body) = self.body(&events) else {
                 break;
             };
-            let endpoint = self.endpoint();
             match crate::post(&endpoint, &body) {
                 SendOutcome::Accepted {
                     accepted,
@@ -739,6 +808,65 @@ pub(crate) mod tests {
 
     fn error(message: &str) -> NewEvent {
         NewEvent::new(Kind::Error, Source::Save, "save-failed", message)
+    }
+
+    #[test]
+    fn reports_never_go_to_plain_http_off_this_computer() {
+        for ok in [
+            "https://dentalcraft.app/api/v1/diagnostics/reports",
+            "http://127.0.0.1:8787/api/v1/diagnostics/reports",
+            "http://localhost:8787/x",
+            "http://[::1]:8787/x",
+        ] {
+            assert!(crate::endpoint_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "http://x/api/v1/diagnostics/reports",
+            "http://127.0.0.1.evil.example/x",
+            "ftp://dentalcraft.app/x",
+            "not a url",
+            "",
+        ] {
+            assert!(!crate::endpoint_allowed(bad), "{bad}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = diagnostics(dir.path(), true);
+        d.set_endpoint(crate::endpoint("http://x"));
+        assert!(d.record(error("a")));
+        let before = d.pending();
+        assert!(d.flush().unwrap_err().contains("not https"));
+        assert_eq!(d.pending(), before, "nothing sent, nothing dropped");
+    }
+
+    #[test]
+    fn codes_of_earlier_runs_are_redacted_before_anything_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let file =
+            || std::fs::read_to_string(dir.path().join("diagnostics").join(REDACT_FILE)).unwrap();
+        {
+            let d = diagnostics(dir.path(), false);
+            d.redact("AL-2026-0142");
+            d.redact("BIA-07");
+        }
+        // the file never holds the codes themselves
+        let first = file();
+        assert!(
+            !first.contains("AL-2026") && !first.contains("BIA"),
+            "{first}"
+        );
+        assert_eq!(first.lines().count(), 3, "salt and two digests: {first}");
+        // the next run, before any project is open
+        let d = diagnostics(dir.path(), true);
+        assert!(d.record(error(
+            "panicked: case AL-2026-0142_BIA-07 at step 3, see AL-2026-0142."
+        )));
+        assert_eq!(
+            d.queued().last().unwrap().message,
+            "panicked: case <case>_<case> at step 3, see <case>."
+        );
+        // a code known from an earlier run is not written again
+        d.redact("BIA-07");
+        assert_eq!(file(), first);
     }
 
     #[test]

@@ -42,8 +42,10 @@ dc-update.workspace = true
 dc-workspace.workspace = true
 
 base64.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 directories.workspace = true
+getrandom.workspace = true
 eframe = { workspace = true, features = ["wgpu", "wayland", "x11", "default_fonts", "accesskit", "clipboard", "links"] }
 egui.workspace = true
 egui-wgpu.workspace = true

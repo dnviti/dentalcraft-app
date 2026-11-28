@@ -255,7 +255,8 @@ pub fn run(
         std::fs::create_dir_all(dir)
             .map_err(|e| CreateError::Failed(format!("{}: {e}", dir.display())))?;
     }
-    dc_project::save(&req.path, &project).map_err(|e| CreateError::Failed(e.to_string()))?;
+    dc_project::save(&req.path, &project)
+        .map_err(|e| CreateError::Failed(dc_workspace::error_text(&e)))?;
     let report = report.map(|r| serde_json::to_value(&r).unwrap_or(Value::Null));
     Ok(Created { project, report })
 }

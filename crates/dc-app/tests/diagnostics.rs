@@ -246,13 +246,14 @@ struct Client {
 }
 
 impl Client {
+    /// Connects and proves the token of the bridge on `port`.
     fn connect(port: u16) -> Self {
-        let w = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        Self {
-            r: BufReader::new(w.try_clone().unwrap()),
-            w,
-            id: 0,
-        }
+        use dc_app::control::auth;
+        let mut w = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut r = BufReader::new(w.try_clone().unwrap());
+        let token = auth::read_token(&auth::token_file(&auth::token_dir().unwrap(), port)).unwrap();
+        auth::client_handshake(&mut r, &mut w, &token, port).unwrap();
+        Self { r, w, id: 0 }
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
@@ -270,7 +271,7 @@ impl Client {
 }
 
 #[test]
-fn the_bridge_turns_diagnostics_on_shows_and_sends_them() {
+fn the_bridge_cannot_turn_diagnostics_on_but_shows_sends_and_turns_them_off() {
     use dc_app::control::{ControlServer, ControlledApp};
     let _g = lock();
     let dir = tempfile::tempdir().unwrap();
@@ -288,46 +289,38 @@ fn the_bridge_turns_diagnostics_on_shows_and_sends_them() {
             ControlledApp::new(app, server),
         );
     h.run_steps(2);
-    let client = std::thread::spawn(move || {
-        let mut c = Client::connect(port);
-        let list = c.call("list", json!({})).unwrap();
-        let ids: Vec<String> = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["source"] == "app")
-            .map(|e| e["id"].as_str().unwrap().to_owned())
-            .collect();
-        let before = c
-            .call("execute", json!({"id": "app.diagnostics.status"}))
-            .unwrap();
-        let bad = c
-            .call(
-                "execute",
-                json!({"id": "app.diagnostics.set", "params": {"enabled": "yes"}}),
-            )
-            .unwrap_err();
-        let on = c
-            .call(
-                "execute",
-                json!({"id": "app.diagnostics.set", "params": {"enabled": true}}),
-            )
-            .unwrap();
-        let preview = c
-            .call("execute", json!({"id": "app.diagnostics.preview"}))
-            .unwrap();
-        let sent = c
-            .call("execute", json!({"id": "app.diagnostics.send"}))
-            .unwrap();
-        (ids, before, bad, on, preview, sent)
-    });
-    let start = Instant::now();
-    while !client.is_finished() {
-        assert!(start.elapsed() < Duration::from_secs(60), "timed out");
-        h.step();
-        std::thread::sleep(Duration::from_millis(2));
+    fn run<T>(h: &mut Harness<'_, ControlledApp>, client: std::thread::JoinHandle<T>) -> T {
+        let start = Instant::now();
+        while !client.is_finished() {
+            assert!(start.elapsed() < Duration::from_secs(60), "timed out");
+            h.step();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        client.join().unwrap()
     }
-    let (ids, before, bad, on, preview, sent) = client.join().unwrap();
+    let status = json!({"id": "app.diagnostics.status"});
+    let set = |on: Value| json!({"id": "app.diagnostics.set", "params": {"enabled": on}});
+    let (s, set_) = (status.clone(), set);
+    let (ids, before, bad, refused, after) = run(
+        &mut h,
+        std::thread::spawn(move || {
+            let mut c = Client::connect(port);
+            let list = c.call("list", json!({})).unwrap();
+            let ids: Vec<String> = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["source"] == "app")
+                .map(|e| e["id"].as_str().unwrap().to_owned())
+                .collect();
+            let before = c.call("execute", s.clone()).unwrap();
+            let bad = c.call("execute", set_(json!("yes"))).unwrap_err();
+            // only the user gives consent, in the app
+            let refused = c.call("execute", set_(json!(true))).unwrap_err();
+            let after = c.call("execute", s).unwrap();
+            (ids, before, bad, refused, after)
+        }),
+    );
     for id in [
         "app.diagnostics.status",
         "app.diagnostics.set",
@@ -338,11 +331,44 @@ fn the_bridge_turns_diagnostics_on_shows_and_sends_them() {
     }
     assert_eq!(before["enabled"], false);
     assert_eq!(bad["code"], -32602);
+    // the bridge names the command first, as for every parameter error
+    assert_eq!(refused["code"], -32602);
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("app.diagnostics.set: consent-only-in-app:"),
+        "{refused}"
+    );
+    assert_eq!(after["enabled"], false);
+    assert_eq!(h.state().bridge().app.diagnostics_enabled(), Some(false));
+    // the user ticks the box in Settings
+    h.state_mut().bridge_mut().app.set_diagnostics(true);
+    let (on, preview, sent, off) = run(
+        &mut h,
+        std::thread::spawn(move || {
+            let mut c = Client::connect(port);
+            let on = c.call("execute", status).unwrap();
+            let preview = c
+                .call("execute", json!({"id": "app.diagnostics.preview"}))
+                .unwrap();
+            let sent = c
+                .call("execute", json!({"id": "app.diagnostics.send"}))
+                .unwrap();
+            // an agent may turn it off
+            let off = c.call("execute", set(json!(false))).unwrap();
+            (on, preview, sent, off)
+        }),
+    );
     assert_eq!(on["enabled"], true);
     assert!(on["install_id"].is_string());
-    // the account menu follows the agent
-    assert_eq!(h.state().bridge().app.diagnostics_enabled(), Some(true));
-    // the start of this run waits to be sent, with the machine
+    assert_eq!(
+        (off["enabled"].clone(), off["install_id"].clone()),
+        (json!(false), Value::Null)
+    );
+    // the account menu follows
+    assert_eq!(h.state().bridge().app.diagnostics_enabled(), Some(false));
+    // the start of this run waited to be sent, with the machine
     let report = &preview["report"];
     assert_eq!(report["install_id"], on["install_id"]);
     assert_eq!(report["events"][0]["kind"], "session");

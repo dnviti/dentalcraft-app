@@ -21,8 +21,8 @@ pub const EXTENSIONS: [&str; 3] = ["stl", "obj", "ply"];
 pub const DIALOG_EXTENSIONS: [&str; 6] = ["stl", "ply", "obj", "STL", "PLY", "OBJ"];
 
 /// Most notifications one report puts on screen, the one-line group and the
-/// success line included (the stack draws four). Failed files and arch
-/// warnings do not count against it past the first slots: they are never
+/// success line included (the stack draws four). Failed files, arch
+/// warnings and a scan that could not be closed do not count against it past the first slots: they are never
 /// grouped or dropped, so a report with many of them goes over the bound
 /// by them alone, and the other notes shrink to [`MIN_OTHER_TOASTS`].
 pub const MAX_REPORT_TOASTS: usize = 4;
@@ -103,6 +103,7 @@ fn warning_title_key(code: &str) -> &'static str {
         "arch_conflict" => "ws-toast-warn-arch-conflict",
         "provisional" => "ws-toast-warn-provisional",
         "bite_limit" => "ws-toast-warn-bite-limit",
+        "not_closed" => "ws-toast-warn-not-closed",
         _ => "ws-toast-import-warning",
     }
 }
@@ -222,7 +223,8 @@ pub(crate) fn removed_toast(module_id: &str, report: &Value) -> Option<Toast> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReportToast {
     pub toast: Toast,
-    /// Failed files and arch warnings: never time out, never grouped.
+    /// Failed files, arch warnings and a scan that could not be closed: never
+    /// time out, never grouped.
     pub sticky: bool,
 }
 
@@ -248,6 +250,7 @@ fn warning_rank(w: &Value) -> u8 {
         "arch_conflict" => 0,
         "provisional" => 1,
         "replaced" => 4,
+        "not_closed" => NOT_CLOSED,
         "units_suspect" => FIRST_UNITS,
         "rescaled" => FIRST_UNITS + 1,
         "tiny" => FIRST_UNITS + 2,
@@ -261,6 +264,8 @@ fn warning_rank(w: &Value) -> u8 {
 
 const ARCH_TO_BE_CHECKED: u8 = 2;
 const ARCH_NOT_RECOGNISED: u8 = 3;
+/// A scan the closing could not close: sticky, like the arch warnings.
+const NOT_CLOSED: u8 = 5;
 const FIRST_UNITS: u8 = 10;
 const FIRST_OTHER: u8 = 20;
 
@@ -270,7 +275,8 @@ const FIRST_OTHER: u8 = 20;
 /// units warnings; every other warning; then the success line, so it stays at
 /// the bottom.
 ///
-/// Failed files and arch warnings are `sticky` and always listed in full,
+/// Failed files, arch warnings and a scan that could not be closed are
+/// `sticky` and always listed in full,
 /// each as its own notification. The rest keeps its time out and, when it
 /// does not fit in [`MAX_REPORT_TOASTS`] together with the sticky ones, the
 /// surplus becomes one grouped line.
@@ -614,6 +620,20 @@ mod tests {
         let r =
             json!({ "warnings": [warning_of("other", "aligners-arch-warn-to-be-checked", "k")] });
         assert!(report_toasts(&r, "aligners")[0].sticky);
+    }
+
+    #[test]
+    fn a_scan_that_could_not_be_closed_is_a_sticky_notice() {
+        let r = json!({
+            "warnings": [minor(1), warning_of("not_closed", "x", "m"), minor(2)],
+        });
+        let t = report_toasts(&r, "aligners");
+        let sticky: Vec<_> = t.iter().filter(|t| t.sticky).collect();
+        assert_eq!(sticky.len(), 1, "{t:?}");
+        assert_eq!(sticky[0].toast.message_key, "ws-toast-warn-not-closed");
+        assert_eq!(sticky[0].toast.detail.as_deref(), Some("m"));
+        // it comes before the minor warnings
+        assert!(t[0].sticky);
     }
 
     #[test]

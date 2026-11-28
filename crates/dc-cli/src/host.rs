@@ -109,7 +109,9 @@ impl CliHost {
     /// default `"teeth"`) chooses between the scans and the built teeth and
     /// gingiva, `stage` (default none: the initial position) poses the
     /// teeth at a treatment stage, and `study` (default `true`) draws the
-    /// study models at the initial position, each in place of its arch.
+    /// study models at the initial position, each in place of its arch. The
+    /// aligner the case shows in the view (`aligners.view.aligner`) is drawn
+    /// over whatever its arch shows.
     pub fn render_png(&self, params: &Value) -> HostResult<Vec<u8>> {
         let empty = Map::new();
         let call = match params {
@@ -119,12 +121,20 @@ impl CliHost {
         };
         let req = RenderRequest::from_layers(&[self.session.view(), call]).map_err(HostError)?;
         let state = self.session.state();
-        let (entries, study) =
-            render_entries(&[self.session.view(), call], true, None, true, |stage| {
-                self.session.modules().scene_at(state, stage)
-            })
-            .map_err(HostError)?;
-        let entries = dca_module::study_models_drawn(state, entries, study);
+        let over = |e: &SceneEntry| is_view_aligner(state, e);
+        let (entries, study) = render_entries(
+            &[self.session.view(), call],
+            true,
+            None,
+            true,
+            |stage| self.session.modules().scene_at(state, stage),
+            over,
+        )
+        .map_err(HostError)?;
+        // the aligner of the view replaces nothing: over the study model too
+        let (aligner, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(over);
+        let mut entries = dca_module::study_models_drawn(state, entries, study);
+        entries.extend(aligner);
         req.render_case_png_with(state, &aligner_labels(state), &entries)
             .map_err(HostError)
     }
@@ -145,7 +155,8 @@ fn app_specs() -> Vec<CommandSpec> {
 ///
 /// - `model`: `"teeth"` draws the entries (they replace the scan of their
 ///   arch), `"scan"` draws the scans and none of the entries of an arch
-///   they replace.
+///   they replace, but those `over` names: they replace nothing and go over
+///   whatever the arch shows (the aligner of the view).
 /// - `stage`: the treatment stage that poses the 3D teeth and moves the
 ///   gingiva (`0` or absent: the initial position). The scans are drawn at
 ///   rest whatever the stage.
@@ -160,6 +171,7 @@ fn render_entries(
     default_stage: Option<u32>,
     default_study: bool,
     at: impl Fn(Option<u32>) -> Vec<SceneEntry>,
+    over: impl Fn(&SceneEntry) -> bool,
 ) -> Result<(Vec<SceneEntry>, bool), String> {
     let get = |key: &str| {
         layers
@@ -202,9 +214,21 @@ fn render_entries(
         .collect();
     let entries = rest
         .into_iter()
-        .filter(|e| !e.arch.is_some_and(|a| replaced.contains(&a)))
+        .filter(|e| over(e) || !e.arch.is_some_and(|a| replaced.contains(&a)))
         .collect();
     Ok((entries, study))
+}
+
+/// `e` is the aligner of the 3D view (`aligners.view.aligner`, while the
+/// case shows it), drawn over whatever its arch shows, as the app's
+/// viewport draws it.
+fn is_view_aligner(state: &CaseState, e: &SceneEntry) -> bool {
+    let dc_scene::SceneItem::Mesh { blob, .. } = &e.item else {
+        return false;
+    };
+    state
+        .module_data::<AlignersState>(dca_model::MODULE_ID)
+        .is_some_and(|d| d.aligner_view.bases.iter().any(|b| b.mesh == *blob))
 }
 
 impl Host for CliHost {
@@ -272,35 +296,47 @@ mod tests {
     use dc_scene::{Color, MeshColoring, SceneItem};
     use serde_json::json;
 
-    /// A tooth of the lower arch (hides its scan) and an untagged entry; at
-    /// a stage the tooth is moved.
+    /// A tooth of the lower arch (hides its scan), an untagged entry and the
+    /// aligner of the view over the lower arch; at a stage the tooth and the
+    /// aligner are moved.
     fn entries_at(stage: Option<u32>) -> Vec<SceneEntry> {
         let mut state = CaseState::new(Case::new("T"));
         let blob = state.blobs.insert(TriMesh::new(vec![], vec![]));
-        let item = |at: f64| SceneItem::Mesh {
+        let item = |blob, at: f64| SceneItem::Mesh {
             blob,
             coloring: MeshColoring::Uniform(Color::TOOTH),
             xform: Pose::from_translation(glam::DVec3::X * at),
             pickable: true,
         };
+        let at = f64::from(stage.unwrap_or(0));
         vec![
-            SceneEntry::new(item(f64::from(stage.unwrap_or(0))))
+            SceneEntry::new(item(blob, at))
                 .with_arch(ScanRole::Lower)
                 .with_tooth(31)
                 .hiding_scan(),
-            SceneEntry::new(item(0.0)),
+            SceneEntry::new(item(blob, 0.0)),
+            SceneEntry::new(item(aligner_blob(), at)).with_arch(ScanRole::Lower),
         ]
+    }
+
+    /// The mesh of the aligner of the view in [`entries_at`].
+    fn aligner_blob() -> BlobRef {
+        BlobRef::of_bytes(b"aligner")
+    }
+
+    fn is_aligner(e: &SceneEntry) -> bool {
+        matches!(&e.item, SceneItem::Mesh { blob, .. } if *blob == aligner_blob())
     }
 
     fn pick(params: Value, teeth: bool, stage: Option<u32>) -> Result<Vec<SceneEntry>, String> {
         let m = params.as_object().unwrap().clone();
-        render_entries(&[&m], teeth, stage, true, entries_at).map(|(e, _)| e)
+        render_entries(&[&m], teeth, stage, true, entries_at, is_aligner).map(|(e, _)| e)
     }
 
     /// Whether the study models are drawn for `params`.
     fn study(params: Value, default: bool, stage: Option<u32>) -> Result<bool, String> {
         let m = params.as_object().unwrap().clone();
-        render_entries(&[&m], true, stage, default, entries_at).map(|(_, s)| s)
+        render_entries(&[&m], true, stage, default, entries_at, is_aligner).map(|(_, s)| s)
     }
 
     fn shift(e: &SceneEntry) -> f64 {
@@ -314,7 +350,7 @@ mod tests {
     fn model_and_stage_choose_the_entries() {
         // teeth (the default), no stage: at rest
         let e = pick(json!({}), true, None).unwrap();
-        assert_eq!((e.len(), shift(&e[0])), (2, 0.0));
+        assert_eq!((e.len(), shift(&e[0])), (3, 0.0));
         // a stage poses them; stage 0 is the rest
         assert_eq!(
             shift(&pick(json!({"stage": 3}), true, None).unwrap()[0]),
@@ -328,14 +364,20 @@ mod tests {
         assert_eq!(shift(&pick(json!({}), true, Some(2)).unwrap()[0]), 2.0);
         assert_eq!(
             pick(json!({"model": "scan"}), true, Some(2)).unwrap().len(),
-            1
+            2
         );
-        // scan: the entries of an arch whose scan they replace are left out
+        // scan: the entries of an arch whose scan they replace are left out,
+        // but the aligner of the view, which replaces nothing
         let e = pick(json!({"model": "Scan", "stage": 3}), true, None).unwrap();
+        assert_eq!(e.len(), 2);
+        assert!(e.iter().all(|e| e.tooth.is_none()));
+        assert!(e.iter().any(is_aligner));
+        assert_eq!(pick(json!({}), false, None).unwrap().len(), 2);
+        assert_eq!(pick(json!({"model": null}), false, None).unwrap().len(), 2);
+        // nothing goes over the scan when nothing is named
+        let m = json!({"model": "scan"}).as_object().unwrap().clone();
+        let (e, _) = render_entries(&[&m], true, None, true, entries_at, |_| false).unwrap();
         assert_eq!(e.len(), 1);
-        assert!(e[0].tooth.is_none());
-        assert_eq!(pick(json!({}), false, None).unwrap().len(), 1);
-        assert_eq!(pick(json!({"model": null}), false, None).unwrap().len(), 1);
         // bad values are explained
         for bad in [
             json!({"model": "gums"}),
@@ -409,5 +451,39 @@ mod tests {
             assert!(host.render_png(&p).unwrap().starts_with(b"\x89PNG"));
         }
         assert!(host.render_png(&json!({"model": "x"})).is_err());
+    }
+
+    #[test]
+    fn the_aligner_of_the_view_is_known_by_its_mesh() {
+        let shell = BlobRef::of_bytes(b"shell");
+        let entry = |blob| {
+            SceneEntry::new(SceneItem::Mesh {
+                blob,
+                coloring: MeshColoring::Uniform(Color::TOOTH),
+                xform: Pose::IDENTITY,
+                pickable: false,
+            })
+            .with_arch(ScanRole::Lower)
+        };
+        let mut state = CaseState::new(Case::new("T"));
+        assert!(!is_view_aligner(&state, &entry(shell)), "no aligners data");
+        let mut al = AlignersState::default();
+        al.aligner_view.shown = true;
+        al.aligner_view.bases.push(dca_model::AlignerBase {
+            arch: ScanRole::Lower,
+            stage: 1,
+            mesh: shell,
+            exact: false,
+            voxel_mm: 0.4,
+            tolerance_mm: 0.08,
+            key: String::new(),
+            seconds: 1.0,
+        });
+        state.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(al));
+        assert!(is_view_aligner(&state, &entry(shell)));
+        assert!(!is_view_aligner(
+            &state,
+            &entry(BlobRef::of_bytes(b"tooth"))
+        ));
     }
 }

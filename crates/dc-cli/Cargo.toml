@@ -15,12 +15,15 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 clap.workspace = true
 dc-case.workspace = true
 dc-diagnostics.workspace = true
 dc-i18n.workspace = true
 dc-mcp.workspace = true
 dc-module-api.workspace = true
+directories.workspace = true
+getrandom.workspace = true
 dc-raster.workspace = true
 dc-scene.workspace = true
 dc-session.workspace = true

@@ -18,7 +18,7 @@
 use dc_case::{Fdi, ScanRole};
 use dc_ui::fonts;
 use dc_ui::widgets::{self, BadgeKind, Button};
-use dca_model::{AlignersState, PRODUCTION_NUMBERS, Side, StampSettings};
+use dca_model::{AlignersState, BiteUse, PRODUCTION_NUMBERS, Side, StampSettings};
 use egui::{RichText, Ui};
 use serde_json::{Value, json};
 
@@ -196,6 +196,13 @@ const GROUPS: &[(&str, &str, &[Item])] = &[
                 "mm",
             )),
             Item::Number(number("scallop_mm", "ws-prod-trim-scallop", 0.1, 1, "mm")),
+            Item::Number(number(
+                "papilla_relief_mm",
+                "ws-prod-trim-papilla",
+                0.1,
+                1,
+                "mm",
+            )),
             Item::Number(number("recess_mm", "ws-prod-trim-recess", 0.1, 1, "mm")),
             Item::Number(number(
                 "extension_mm",
@@ -229,6 +236,13 @@ const GROUPS: &[(&str, &str, &[Item])] = &[
                 "clearance_mm",
                 "ws-prod-shell-clearance",
                 0.01,
+                2,
+                "mm",
+            )),
+            Item::Number(number(
+                "gum_clearance_mm",
+                "ws-prod-shell-gum-clearance",
+                0.05,
                 2,
                 "mm",
             )),
@@ -313,6 +327,12 @@ const GROUPS: &[(&str, &str, &[Item])] = &[
         ],
     ),
 ];
+
+/// The groups of settings that work on the bite of the two arches (the bite
+/// with the aligners worn, the ramps): ignored with one arch.
+fn ignored_with_one_arch(group: &str) -> bool {
+    matches!(group, "bite" | "ramps")
+}
 
 /// The settings that are whole numbers.
 const WHOLE: [&str; 1] = ["equilibrate_teeth_per_side"];
@@ -585,6 +605,7 @@ impl Workspace {
             }
 
             // the folded groups
+            let one_arch = BiteUse::of(&state).one_arch();
             for (gi, (group, title, items)) in GROUPS.iter().enumerate() {
                 let group_values = &values[*group];
                 ui.add_space(6.0);
@@ -592,6 +613,14 @@ impl Workspace {
                     .id_salt(*title)
                     .default_open(false)
                     .show(ui, |ui| {
+                        // one arch: there is no bite, so these settings are
+                        // ignored; as the Bite inspector says it
+                        if one_arch && ignored_with_one_arch(group) {
+                            widgets::badge(ui, BadgeKind::Neutral, t("ws-fn-not-applicable"));
+                            ui.add_space(6.0);
+                            caption(ui, t("ws-prod-one-arch"));
+                            return;
+                        }
                         let mut change = None;
                         for item in *items {
                             if !shown(item, group_values) {

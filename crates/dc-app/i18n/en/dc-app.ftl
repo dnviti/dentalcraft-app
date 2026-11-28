@@ -167,6 +167,7 @@ auth-error-access-denied = The sign-in was declined in the browser.
 auth-error-server-rejected = The sign-in service refused the request. Try again or contact support.
 auth-error-invalid-grant = The sign-in expired. Sign in again.
 auth-error-token-invalid = The sign-in could not be verified. Try again or contact support.
+auth-error-clock = The clock of this computer looks wrong, so the sign-in cannot be checked. Set the correct date and time, then try again.
 auth-error-cancelled = Sign-in cancelled.
 auth-error-storage-unavailable = Signed in, but the system keyring is not available: you will need to sign in again next time.
 auth-error-not-signed-in = You are not signed in.
@@ -367,9 +368,11 @@ app-cmd-menu-select-doc = Selects an entry of the menu of the open project, as a
 app-cmd-window-screenshot = Screenshot of the window
 app-cmd-window-screenshot-doc = Writes the window as the user sees it (menu, inspector, 3D view, open dialogs) to a PNG file at the next frame. Parameter: path, the PNG file. Answers path, width and height.
 app-cmd-window-view = View of the window
-app-cmd-window-view-doc = Sets what the 3D view of the window shows, as its toolbar and its timeline do; the case does not change. Parameters, each optional (what is not given stays): view (occlusal, front, left, right or back), stage (the stage shown on the timeline, at most the last one; 0 is the initial position), study (the Study models layer), target (the Final position layer, the ghost of the teeth at their final position). Answers view, stage, last_stage, study, target, study_shown and teeth_shown.
+app-cmd-window-view-doc = Sets what the 3D view of the window shows, as its toolbar and its timeline do; the case does not change. Parameters, each optional (what is not given stays): view (occlusal, front, left, right or back), stage (the stage shown on the timeline, at most the last one; 0 is the initial position), study (the Study models layer), target (the Final position layer, the ghost of the teeth at their final position), model (scan or teeth: what an arch whose teeth were built shows, the Scan or 3D teeth of the toolbar; a tool that works on the scan still shows the scan), and the four toggles of the toolbar: colours (the tooth colours), marks (the tooth marks), numbers (the tooth numbers), contacts (the contact map). The four are off when a project opens and nothing but the user switches them on, except the tooth brush: while it is open the tooth colours and the tooth numbers are on, and when it closes each goes back to what it was before it opened (a toggle set inside the brush wins until then). Answers view, stage, last_stage, study, target, model, colours, marks, numbers, contacts, study_shown and teeth_shown.
 app-cmd-window-layout = Layout of the window
 app-cmd-window-layout-doc = Sizes the window and its side panels as the user does, then answers where the parts of the window are; the case does not change. Parameters, each optional: width and height (the inside of the window, in points, given together), menu and inspector (the widths of the left menu and of the inspector, in points, as a drag of their edges sets them: kept within their ranges and saved for the next start). Answers window, menu, inspector and view (x, y, width, height of each), chosen (the panel widths chosen) and overflow (how far the contents of each panel run past its width).
+# The warnings of a print.prepare result (the code stays; this is its message).
+app-print-warning-profile-not-validated = The dimensional scale and the left/right orientation of printer profile { $profile } are not yet checked against the printer: verify the size of a test piece before use.
 
 ## settings
 settings-title = Settings
